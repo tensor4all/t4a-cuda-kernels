@@ -1,0 +1,33 @@
+[package]
+name = "t4a-cuda-kernels"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Runtime-independent CUDA kernels for tensor4all and external CUDA consumers"
+
+[features]
+default = []
+# Tests that compile the kernel sources with nvcc and run them on a real device.
+# An invoked GPU test on a host without a usable device fails; it never silently
+# passes.
+gpu-tests = ["dep:cudarc"]
+
+[dependencies]
+# Only the GPU tests use it; the library itself has no dependency.
+cudarc = { version = "=0.19.8", default-features = false, features = [
+    "std",
+    "driver",
+    "dynamic-loading",
+    "cuda-12060",
+], optional = true }
+
+[[test]]
+name = "planning"
+path = "tests/planning.rs"
+
+[[test]]
+name = "gpu_kernels"
+path = "tests/gpu_kernels.rs"
+required-features = ["gpu-tests"]

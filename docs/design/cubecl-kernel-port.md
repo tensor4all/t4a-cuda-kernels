@@ -29,7 +29,7 @@ See the [symbol inventory](../kernel-inventory.md) and [machine-readable invento
 
 - [Reduction launch/routines](https://github.com/tensor4all/tenferro-rs/tree/14bc1ab933e3c7a9c966e08355670331ab9d993c/crates/tenferro-gpu/src/kernels/reduce): preserve strategy selection, split/finalize behavior and scratch requirements. Remove CubeCL client queries/launch plumbing; accept explicit device capabilities where planning needs them.
 - [Native permutation planning](https://github.com/tensor4all/tenferro-rs/blob/14bc1ab933e3c7a9c966e08355670331ab9d993c/crates/tenferro-gpu/src/native_permutation.rs): a host planning reference, not a CUDA kernel body. Preserve useful layout classification without importing tenferro types.
-- [Generated fusion](https://github.com/tensor4all/tenferro-rs/tree/14bc1ab933e3c7a9c966e08355670331ab9d993c/crates/tenferro-gpu/src/cubecl/fusion): the current implementation builds CubeCL IR dynamically. Moving static kernels alone will not replace this path. Tenferro keeps fusion selection and its graph representation; a consumer-side CUDA source emitter can use this repository's numerical helper headers. Do not make this crate depend on `ElementwiseFusionPlan` or build a universal compiler as a prerequisite.
+- [Generated fusion](https://github.com/tensor4all/tenferro-rs/tree/14bc1ab933e3c7a9c966e08355670331ab9d993c/crates/tenferro-gpu/src/cubecl/fusion): the current implementation builds CubeCL IR dynamically. Moving static kernels alone will not replace this path. Tenferro keeps fusion selection and its graph representation; this repository supplies a small, independent expression-to-CUDA emitter using its numerical helper headers. The caller/runtime compiles and loads its output. Do not make this crate depend on `ElementwiseFusionPlan` or build a universal compiler as a prerequisite.
 - [WebGPU packing](https://github.com/tensor4all/tenferro-rs/blob/14bc1ab933e3c7a9c966e08355670331ab9d993c/crates/tenferro-gpu/src/webgpu/kernels.rs): `pack_lhs_dot_general` / `pack_rhs_dot_general` serve the WebGPU/CubeK route. They are not required for current CUDA parity; reuse a generic pack primitive only if a CUDA consumer needs one.
 - [Sample CubeCL kernel](https://github.com/tensor4all/tenferro-rs/blob/14bc1ab933e3c7a9c966e08355670331ab9d993c/samples/cubecl-kernel/src/kernel.rs): consumer example, not another production kernel family.
 
@@ -71,6 +71,29 @@ The kernel layer owns:
 
 Kernel launch success is not proof of asynchronous completion or device-side numerical validity.
 
+### Preparation, compilation and private caches
+
+The kernel crate provides a small source emitter for supported fused elementwise expressions using a runtime-independent operation description. Tenferro chooses fusion groups and converts its graph representation to that description. Source generation, ABI metadata and numerical helpers stay independent of tenferro and t4a-cuda-runtime; CUDA compilation/loading remains a caller/runtime service.
+
+For traced execution, compilation is part of **prepare**, rather than the numerical run loop:
+
+1. Prepare fixes the selected target capabilities and kernel/fusion variants, then generates CUDA C++ and a source/header/ABI manifest.
+2. For each target, obtain a compatible precompiled or cached artifact; otherwise compile with NVRTC using explicit options and report diagnostics from prepare.
+3. Record entry points, launch/workspace requirements and required artifacts before prepare succeeds. Treat ordinary shape/stride values as runtime arguments, as specified below.
+4. Materialize loaded modules/functions in each supplied runtime's private cache during preparation. If engines are supplied only after the shareable plan is prepared, perform an explicit engine-binding/warmup stage before numerical execution. That stage loads the already prepared artifact in the actual context and validates the required target.
+5. Run uses the prepared code and compatible engine-owned bindings. It performs no CUDA source generation or NVRTC invocation. A missing artifact or incompatible target is a preparation/binding error; run does not silently JIT-compile after numerical submission begins.
+
+A shareable prepared plan may contain immutable source/artifact descriptions and requirements, but never captures an engine, CUDA context, stream or context-bound function handle. Loaded modules and mutable workspace remain engine-owned. A replacement runtime on the same ordinal gets its own loaded module and cache; the ordinal alone is not a module compatibility key.
+
+Eager callers may compile on first use before the operation is enqueued, or explicitly prewarm. Subsequent compatible calls reuse the artifact/module; changing ordinary runtime shape values does not trigger recompilation.
+
+There are two distinct cache levels:
+
+- **Compilation artifacts:** key by the generated source and all included header contents, kernel/ABI revision, selected dtype and declared specialization, complete compiler options, NVRTC/toolchain version and target architecture/output kind. Runtime shape/stride/offset values and buffer addresses are excluded unless an explicit specialization deliberately embeds them.
+- **Loaded modules/functions:** key by artifact identity and load options within the owning runtime/context generation. Do not use a process-global cache or share module/cache state between independent runtimes, even on one physical GPU.
+
+The caller/runtime owns bounded cache capacity, clear/eviction, statistics and module retirement. Active prepared bindings and queued work retain the modules they need independently of cache membership. Clearing a cache must not unload code still in use. Disk persistence is optional; if supplied, it must validate the same compilation key and must never persist CUDA handles.
+
 ## 4. API contract
 
 Exact Rust names are provisional; keep the public surface small.
@@ -88,6 +111,12 @@ Execution accepts caller-provided CUDA function handle(s), stream and device poi
 - Data-dependent errors such as invalid floating indices, invalid casts or integer division by zero use explicit device status storage where required. The consumer decides when to wait/read and translate status into its own errors.
 - Host planning/compilation may allocate ordinary host memory. This does not authorize hidden device allocation or payload transfer.
 - Exact in-place/overlap rules are documented per entry. The metadata API must not imply that arbitrary overlapping pointers are safe.
+
+Dimension count, axis extents, strides, offsets, broadcast/indexing/reduction metadata, element counts and ordinary scalar arguments are **runtime parameters by default**. The CUDA source must not substitute these values as literals, template arguments or generated defines merely because prepare knows them. Pass small descriptors by value or explicitly supplied device metadata buffers; their ownership and lifetime follow the existing ABI rules.
+
+For the same expression, dtype, target and selected kernel variant, changing axis sizes or stride/offset values reuses the compiled kernel. Prepare recomputes launch dimensions and workspace sizes without recompiling device code. This does not by itself make a whole prepared program dynamically shaped: its input-shape constraints are a separate consumer contract.
+
+Compact/strided/tiled variants and explicitly documented rank/layout specializations may have separate entries. Shape-specific constant folding/unrolling is opt-in, represented in the artifact key and tested separately; it is not the default migration strategy. A source symbol named `comptime_layout` is an inventory item, not a requirement to embed extents in the new ABI.
 
 CubeCL-specific workarounds are not required ABI features. For example, a complex coefficient can use a documented POD scalar argument instead of a one-element device array if the CUDA ABI supports the chosen representation.
 
@@ -112,7 +141,7 @@ Relevant prior design evidence: [strided movement](https://github.com/tensor4all
 1. Define the C-compatible ABI, source packaging and runtime-free planning; implement zero/one/copy/strided materialization/transpose, elementary arithmetic and reusable scalar helpers.
 2. Implement reduction families and explicit scratch planning, conversions/status kernels and indexing/scatter/diagonal operations.
 3. Implement linalg auxiliary kernels and RRQR primitives; consolidate shared fill, adjoint, phase, norm and pivot helpers.
-4. Validate a consumer-generated fused CUDA kernel using the helper headers and document the remaining tenferro-side emitter integration.
+4. Implement the independent fused-expression source emitter and validate a generated kernel with runtime shape arguments. Connect prepare-time compilation/cache lookup and explicit engine binding in a standalone CUDA consumer; tenferro adapts its fusion graph separately.
 5. Compare with the pinned CUDA numerical tests, test an external plain-CUDA consumer, measure representative warm paths and record supported coverage.
 
 These are work packages, not authorization to publish or replace tenferro's backend. The port can be developed and tested without waiting for t4a-cuda-runtime.
@@ -121,6 +150,9 @@ These are work packages, not authorization to publish or replace tenferro's back
 
 - [ ] No direct/transitive production dependency on t4a-cuda-runtime, tenferro, CubeCL or CubeK. Standalone tests/examples also use an independent CUDA consumer.
 - [ ] CUDA source/header assets and ABI are packaged so NVCC/NVRTC consumers need no Rust runtime object. Ordinary source/planning checks build without CUDA initialization.
+- [ ] Prepare obtains cached/precompiled artifacts or invokes NVRTC, and reports compilation failures before numerical run. Warm run performs zero source-generation/NVRTC calls; late engine binding is completed explicitly before submission.
+- [ ] Default generated sources and artifact keys are unchanged when only runtime axis sizes/strides/offsets change for the same expression/dtype/target/variant. Tests vary shapes, reversed/broadcast views and reduction lengths, check numerical output, and verify compile-count reuse.
+- [ ] Cache tests cover header/options/compiler/target invalidation, bounded eviction/clear, and independent module/cache state for two runtimes on the same GPU. Clearing a cache cannot invalidate active bindings or in-flight kernels.
 - [ ] Every source inventory family has a tested replacement, a consolidated replacement mapping, or an explicitly documented exclusion. Macro-generated symbols and status helpers are accounted for.
 - [ ] GPU tests compare numerical results with trusted CPU references or established numerical residuals, not only shapes or successful launches.
 - [ ] Coverage includes empty/odd sizes, offsets, reversed/broadcast views, batched layouts, all supported dtype routes, NaN/Inf/signed zero, integer boundaries and invalid index/cast/division cases.

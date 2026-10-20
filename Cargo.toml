@@ -31,3 +31,8 @@ path = "tests/planning.rs"
 name = "gpu_kernels"
 path = "tests/gpu_kernels.rs"
 required-features = ["gpu-tests"]
+
+[[test]]
+name = "gpu_slice_b"
+path = "tests/gpu_slice_b.rs"
+required-features = ["gpu-tests"]

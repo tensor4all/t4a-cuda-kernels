@@ -289,7 +289,10 @@ fn c_layout_mirror_round_trips() {
 fn entry_names_are_unique_and_exported_by_the_sources() {
     let sources = concat!(
         include_str!("../cuda/src/movement.cu"),
-        include_str!("../cuda/src/arithmetic.cu")
+        include_str!("../cuda/src/arithmetic.cu"),
+        include_str!("../cuda/src/diagonal.cu"),
+        include_str!("../cuda/src/window.cu"),
+        include_str!("../cuda/src/validation.cu")
     );
     for (index, entry) in Entry::ALL.iter().enumerate() {
         let name = entry.name();
@@ -322,6 +325,11 @@ fn entry_dtype_matrix_matches_the_abi_document() {
         );
     }
     assert_eq!(Entry::Div.supported_dtypes(), &[DType::F32, DType::F64]);
+    assert_eq!(
+        Entry::ValidateRealCast.supported_dtypes(),
+        &[DType::F32, DType::F64]
+    );
+    assert_eq!(Entry::Pad.supported_dtypes(), &DType::ALL);
     assert_eq!(Entry::Add.supported_dtypes().len(), 6);
     assert_eq!(Entry::FillZero.supported_dtypes(), &DType::ALL);
     assert_eq!(MAX_RANK, 8);
@@ -358,4 +366,247 @@ fn offsets_must_fit_a_64_bit_byte_address() {
     );
     // The same element offset is fine for a four-byte element.
     assert!(plan_fill_zero_view(DType::F32, &layout, allocation).is_ok());
+}
+
+// --- revision 2: diagonal, windowing and validation ------------------------
+
+use t4a_cuda_kernels::{
+    plan_dynamic_slice, plan_embed_diagonal_copy, plan_extract_diagonal,
+    plan_extract_invalid_float_index, plan_extract_invalid_real_cast, plan_init_validation,
+    plan_pad, plan_slice, plan_tril, plan_triu, plan_validate_float_indices,
+    plan_validate_real_cast, CAxisValues,
+};
+
+#[test]
+fn extract_diagonal_derives_the_output_layout() {
+    let input = Layout::compact(&[2, 3, 4]).unwrap();
+    // axes (0, 2): remove axis 2, diagonal length min(2, 4) = 2 at axis 0.
+    let output = Layout::compact(&[2, 3]).unwrap();
+    assert!(plan_extract_diagonal(DType::F32, &input, 24, &output, 6, 0, 2).is_ok());
+    // The diagonal output position is derived, so a different supplied shape is
+    // refused instead of reinterpreted.
+    let wrong = Layout::compact(&[3, 2]).unwrap();
+    assert_eq!(
+        plan_extract_diagonal(DType::F32, &input, 24, &wrong, 6, 0, 2),
+        Err(Error::ShapeMismatch)
+    );
+    // axes (2, 0) put the diagonal at output position 1: extents [3, 2].
+    let output = Layout::compact(&[3, 2]).unwrap();
+    assert!(plan_extract_diagonal(DType::F32, &input, 24, &output, 6, 2, 0).is_ok());
+    assert_eq!(
+        plan_extract_diagonal(DType::F32, &input, 24, &output, 6, 0, 0),
+        Err(Error::DuplicateAxis)
+    );
+    assert_eq!(
+        plan_extract_diagonal(DType::F32, &input, 24, &output, 6, 0, 3),
+        Err(Error::InvalidAxis)
+    );
+    let strided_out = Layout::new(&[2, 3], &[1, 4], 0).unwrap();
+    assert_eq!(
+        plan_extract_diagonal(DType::F32, &input, 24, &strided_out, 12, 0, 2),
+        Err(Error::NotCompact)
+    );
+}
+
+#[test]
+fn embed_diagonal_allows_an_insertion_position_at_the_end() {
+    let input = Layout::compact(&[2, 3]).unwrap();
+    let output = Layout::compact(&[2, 3, 3]).unwrap();
+    // axis_a = 1 (input), axis_b = 2 (insertion at the end), equal axes allowed.
+    assert!(plan_embed_diagonal_copy(DType::F32, &input, 6, &output, 18, 1, 2).is_ok());
+    assert!(plan_embed_diagonal_copy(DType::F32, &input, 6, &output, 18, 1, 3).is_err());
+    let same = Layout::compact(&[2, 3, 3]).unwrap();
+    assert!(plan_embed_diagonal_copy(DType::F32, &input, 6, &same, 18, 1, 1).is_ok());
+    let strided_in = Layout::new(&[2, 3], &[1, 4], 0).unwrap();
+    assert_eq!(
+        plan_embed_diagonal_copy(DType::F32, &strided_in, 12, &output, 18, 1, 2),
+        Err(Error::NotCompact)
+    );
+    let wrong = Layout::compact(&[2, 3]).unwrap();
+    assert_eq!(
+        plan_embed_diagonal_copy(DType::F32, &input, 6, &wrong, 6, 1, 2),
+        Err(Error::ShapeMismatch)
+    );
+    // A destination that repeats an address is a data race.
+    let broadcast_out = Layout::new(&[2, 3, 3], &[0, 0, 0], 0).unwrap();
+    assert_eq!(
+        plan_embed_diagonal_copy(DType::F32, &input, 6, &broadcast_out, 1, 1, 2),
+        Err(Error::BroadcastDestination)
+    );
+}
+
+#[test]
+fn triangular_plans_accept_batches_and_extreme_offsets() {
+    assert_eq!(plan_tril(DType::F32, 3, 4, 12).unwrap().grid, [1, 1, 1]);
+    // Three 3x4 matrices: the mask repeats per batch.
+    assert!(plan_tril(DType::F32, 3, 4, 36).is_ok());
+    assert_eq!(plan_tril(DType::F32, 3, 4, 13), Err(Error::ShapeMismatch));
+    assert!(plan_tril(DType::F32, 0, 4, 0).is_ok());
+    assert_eq!(plan_triu(DType::F32, 2, 2, -1), Err(Error::NegativeCount));
+    assert!(plan_triu(DType::C64, 2, 2, 4).is_ok());
+}
+
+#[test]
+fn slice_requires_the_reachable_count() {
+    let input = Layout::compact(&[10, 4]).unwrap();
+    let output = Layout::compact(&[5, 2]).unwrap();
+    // starts (0, 0), steps (2, 2): ceil(10/2) = 5 and ceil(4/2) = 2.
+    assert!(plan_slice(DType::F32, &output, 10, &input, 40, &[0, 0], &[2, 2]).is_ok());
+    assert_eq!(
+        plan_slice(DType::F32, &output, 10, &input, 40, &[0, 0], &[0, 2]),
+        Err(Error::InvalidStep)
+    );
+    assert_eq!(
+        plan_slice(DType::F32, &output, 10, &input, 40, &[11, 0], &[2, 2]),
+        Err(Error::OffsetOutOfSpan)
+    );
+    // A shorter output is the caller's slice limit and stays valid.
+    let shorter = Layout::compact(&[4, 2]).unwrap();
+    assert!(plan_slice(DType::F32, &shorter, 8, &input, 40, &[0, 0], &[2, 2]).is_ok());
+    // Longer than the reachable count is not.
+    let wrong_output = Layout::compact(&[6, 2]).unwrap();
+    assert_eq!(
+        plan_slice(DType::F32, &wrong_output, 12, &input, 40, &[0, 0], &[2, 2]),
+        Err(Error::ShapeMismatch)
+    );
+    let strided_out = Layout::new(&[5, 2], &[1, 7], 0).unwrap();
+    assert_eq!(
+        plan_slice(DType::F32, &strided_out, 20, &input, 40, &[0, 0], &[2, 2]),
+        Err(Error::NotCompact)
+    );
+}
+
+#[test]
+fn dynamic_slice_checks_windows_and_index_dtype() {
+    let input = Layout::compact(&[10, 4]).unwrap();
+    let output = Layout::compact(&[3, 4]).unwrap();
+    assert!(plan_dynamic_slice(DType::F32, DType::I64, &output, 12, &input, 40, 2).is_ok());
+    assert!(plan_dynamic_slice(DType::F32, DType::F64, &output, 12, &input, 40, 2).is_ok());
+    assert_eq!(
+        plan_dynamic_slice(DType::F32, DType::Bool, &output, 12, &input, 40, 2),
+        Err(Error::UnsupportedDType)
+    );
+    let too_wide = Layout::compact(&[11, 4]).unwrap();
+    assert_eq!(
+        plan_dynamic_slice(DType::F32, DType::I64, &too_wide, 44, &input, 40, 2),
+        Err(Error::ShapeMismatch)
+    );
+    assert_eq!(
+        plan_dynamic_slice(DType::F32, DType::I64, &output, 12, &input, 40, 3),
+        Err(Error::RankLength)
+    );
+}
+
+#[test]
+fn pad_derives_the_padded_extents() {
+    let input = Layout::compact(&[3, 4]).unwrap();
+    // low (1, 0), high (2, 1), interior (0, 1): [3 + 0 + 3, 4 + 1 + 4] with
+    // interior spacing 2 giving (4-1)*2 + 1 = 7.
+    let output = Layout::compact(&[6, 8]).unwrap();
+    assert!(plan_pad(
+        DType::F32,
+        &output,
+        48,
+        &input,
+        12,
+        &[1, 0],
+        &[2, 1],
+        &[0, 1]
+    )
+    .is_ok());
+    assert_eq!(
+        plan_pad(
+            DType::F32,
+            &output,
+            48,
+            &input,
+            12,
+            &[1, 0],
+            &[2, 1],
+            &[0, -1]
+        ),
+        Err(Error::InvalidPadding)
+    );
+    let wrong = Layout::compact(&[6, 7]).unwrap();
+    assert_eq!(
+        plan_pad(
+            DType::F32,
+            &wrong,
+            42,
+            &input,
+            12,
+            &[1, 0],
+            &[2, 1],
+            &[0, 1]
+        ),
+        Err(Error::ShapeMismatch)
+    );
+    // A negative edge low is allowed and reduces the output extent.
+    let negative = Layout::compact(&[2, 4]).unwrap();
+    assert!(plan_pad(
+        DType::F32,
+        &negative,
+        8,
+        &input,
+        12,
+        &[-1, 0],
+        &[0, 0],
+        &[0, 0]
+    )
+    .is_ok());
+    // An empty input axis pads from zero.
+    let empty = Layout::compact(&[0]).unwrap();
+    let padded = Layout::compact(&[2]).unwrap();
+    assert!(plan_pad(DType::F32, &padded, 2, &empty, 0, &[1], &[1], &[5]).is_ok());
+}
+
+#[test]
+fn validation_plans_cap_the_domain_and_check_stride() {
+    assert_eq!(plan_init_validation(DType::F32).unwrap().block, [1, 1, 1]);
+    assert_eq!(
+        plan_init_validation(DType::I32),
+        Err(Error::UnsupportedDType)
+    );
+    assert_eq!(
+        plan_validate_float_indices(DType::F64, i64::from(u32::MAX) + 1),
+        Err(Error::DomainTooLarge)
+    );
+    assert!(plan_validate_float_indices(DType::F64, i64::from(u32::MAX)).is_ok());
+    assert_eq!(
+        plan_validate_float_indices(DType::I32, 4),
+        Err(Error::UnsupportedDType)
+    );
+    assert_eq!(
+        plan_extract_invalid_float_index(DType::F32).unwrap().block,
+        [1, 1, 1]
+    );
+    assert_eq!(
+        plan_validate_real_cast(DType::F32, 8, 0),
+        Err(Error::InvalidStride)
+    );
+    // Sampling every second element halves the launch domain.
+    let launch = plan_validate_real_cast(DType::F32, 1_000, 2).unwrap();
+    assert_eq!(u64::from(launch.grid[0]), 500u64.div_ceil(256));
+    // The cap applies to the sample count, so a buffer twice the cap is fine at
+    // stride 2 while one sample more than the cap is not.
+    assert!(plan_validate_real_cast(DType::F32, 2 * i64::from(u32::MAX), 2).is_ok());
+    assert_eq!(
+        plan_validate_real_cast(DType::F32, 2 * i64::from(u32::MAX) + 1, 2),
+        Err(Error::DomainTooLarge)
+    );
+    // A tiny buffer with a huge stride is a legal one-sample plan.
+    assert!(plan_validate_real_cast(DType::F64, 3, i64::MAX).is_ok());
+    assert_eq!(
+        plan_extract_invalid_real_cast(DType::F64).unwrap().grid,
+        [1, 1, 1]
+    );
+}
+
+#[test]
+fn c_axis_values_mirror_layout() {
+    let mirror = CAxisValues::new(&[1, -2, 3]).unwrap();
+    assert_eq!(mirror.rank, 3);
+    assert_eq!(&mirror.values[..4], &[1, -2, 3, 0]);
+    assert_eq!(std::mem::size_of::<CAxisValues>(), 72);
+    assert_eq!(CAxisValues::new(&[0; 9]), Err(Error::RankOutOfRange));
 }

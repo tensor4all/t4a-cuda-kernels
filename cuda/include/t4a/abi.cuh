@@ -16,7 +16,7 @@
 #endif
 
 #define T4A_CUDA_MAX_RANK 8
-#define T4A_CUDA_ABI_REVISION 1
+#define T4A_CUDA_ABI_REVISION 2
 
 static_assert(sizeof(int) == 4, "the C ABI requires 32-bit int");
 static_assert(sizeof(long long) == 8, "the C ABI requires 64-bit long long");
@@ -55,6 +55,14 @@ typedef struct {
   long long strides[T4A_CUDA_MAX_RANK];
 } t4a_cuda_layout;
 
+// Per-axis runtime values of the windowing operations (slice starts and steps,
+// padding amounts). `rank` must equal the operation rank.
+typedef struct {
+  int rank;
+  int reserved;
+  long long values[T4A_CUDA_MAX_RANK];
+} t4a_cuda_axis_values;
+
 // Algorithm configuration of the tiled transpose, selected at runtime.
 typedef struct {
   int tile;
@@ -70,6 +78,9 @@ static_assert(__builtin_offsetof(t4a_cuda_layout, extents) == 16, "t4a_cuda_layo
 static_assert(__builtin_offsetof(t4a_cuda_layout, strides) == 80, "t4a_cuda_layout.strides offset");
 static_assert(alignof(t4a_cuda_transpose_config) == 4, "t4a_cuda_transpose_config ABI alignment");
 static_assert(sizeof(t4a_cuda_transpose_config) == 16, "t4a_cuda_transpose_config ABI size");
+static_assert(sizeof(t4a_cuda_axis_values) == 72, "t4a_cuda_axis_values ABI size");
+static_assert(alignof(t4a_cuda_axis_values) == 8, "t4a_cuda_axis_values ABI alignment");
+static_assert(__builtin_offsetof(t4a_cuda_axis_values, values) == 8, "t4a_cuda_axis_values.values offset");
 static_assert(sizeof(t4a_cuda_c32) == 8, "t4a_cuda_c32 ABI size");
 static_assert(alignof(t4a_cuda_c32) == 4, "t4a_cuda_c32 ABI alignment");
 static_assert(sizeof(t4a_cuda_c64) == 16, "t4a_cuda_c64 ABI size");
@@ -237,6 +248,30 @@ __device__ __forceinline__ t4a_cuda_c64 t4a_cuda_mul<t4a_cuda_c64>(t4a_cuda_c64 
                                                                  t4a_cuda_c64 rhs) {
   t4a_cuda_c64 value = {lhs.re * rhs.re - lhs.im * rhs.im, lhs.re * rhs.im + lhs.im * rhs.re};
   return value;
+}
+
+// Index values of the dynamic-slice starts tensor. Truncation matches the
+// baseline's cast, but the baseline validates float starts before the launch, so
+// a fractional or nonfinite start is a caller error rather than data.
+template <typename I>
+__device__ __forceinline__ unsigned long long t4a_cuda_index_to_u64(I value) {
+  return static_cast<unsigned long long>(value);
+}
+
+// Nonfinite detection by bit pattern: exact for NaN and +/-Infinity without math
+// headers, and independent of any x - x folding.
+__device__ __forceinline__ bool t4a_cuda_is_finite(float value) {
+  return (__float_as_uint(value) & 0x7f800000u) != 0x7f800000u;
+}
+
+__device__ __forceinline__ bool t4a_cuda_is_finite(double value) {
+  return (__double_as_longlong(value) & 0x7ff0000000000000ull) != 0x7ff0000000000000ull;
+}
+
+// Lowest invalid position wins; the flag domain is capped at UINT32_MAX by the
+// facade, matching the 32-bit status word.
+__device__ __forceinline__ void t4a_cuda_note_invalid(unsigned int* flag, long long position) {
+  atomicMin(flag, static_cast<unsigned int>(position));
 }
 
 // Division is float-only in this ABI revision; complex division keeps the

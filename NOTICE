@@ -1,0 +1,22 @@
+t4a-cuda-kernels
+
+Copyright (c) 2026 Hiroshi Shinaoka and tensor4all contributors
+
+The kernel bodies in cuda/src/*.cu and cuda/include/t4a/*.cuh are translations of
+CUDA kernels written in CubeCL in the tenferro-rs project, at commit
+14bc1ab933e3c7a9c966e08355670331ab9d993c:
+
+  crates/tenferro-gpu/src/kernels/structural.rs
+  crates/tenferro-gpu/src/kernels/elementwise.rs
+  crates/tenferro-gpu/src/kernels/helpers.rs
+
+Copyright (c) 2026 Hiroshi Shinaoka and tenferro-rs contributors
+Licensed under the MIT license or the Apache License, Version 2.0.
+
+tenferro-rs is distributed under the same dual license; both texts are included
+in this repository as LICENSE-MIT and LICENSE-APACHE.
+
+Notices inherited by kernel families that are not part of this repository yet
+(reductions derived from CubeK, and complex division derived from Julia Base)
+are recorded in tenferro-rs and must be audited and carried over before those
+families are ported here.

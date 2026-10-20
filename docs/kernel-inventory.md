@@ -283,3 +283,9 @@ The design and migration decisions are in [the design note](design/cubecl-kernel
 | [WebGPU packing kernels](https://github.com/tensor4all/tenferro-rs/blob/14bc1ab933e3c7a9c966e08355670331ab9d993c/crates/tenferro-gpu/src/webgpu/kernels.rs) | WebGPU/CubeK route only; not required for current CUDA parity. |
 | [CUDA FFT](https://github.com/tensor4all/tenferro-rs/tree/14bc1ab933e3c7a9c966e08355670331ab9d993c/crates/tenferro-fft/src/cuda) | cuFFT execution/plan integration; no separate static CubeCL FFT kernel definitions found in this source tree. |
 | [sample CubeCL kernel](https://github.com/tensor4all/tenferro-rs/blob/14bc1ab933e3c7a9c966e08355670331ab9d993c/samples/cubecl-kernel/src/kernel.rs) | Consumer example, not production parity inventory. |
+
+## CUDA migration exclusions and performance policy
+
+The source inventory retains two WebGPU/Metal-only entries for traceability: `materialize_strided_comptime_layout_kernel` and `tiled_transpose_comptime_layout_kernel`. Exclude them from the CUDA port; their CUDA replacements are `materialize_strided_kernel` and `tiled_transpose_kernel`, with runtime layout values and classified rank/tile configuration.
+
+The [performance preservation contract](design/cubecl-performance-parity.md) is normative for this migration. It includes the missing compile-count observation in the baseline tests and requires actual NVRTC counters in the replacement.

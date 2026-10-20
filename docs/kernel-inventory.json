@@ -388,7 +388,12 @@
         {
           "name": "materialize_strided_comptime_layout_kernel",
           "line": 133,
-          "kind": "entry"
+          "kind": "entry",
+          "cuda_port": {
+            "status": "excluded_webgpu_metal_only",
+            "replacement": "materialize_strided_kernel",
+            "reason": "CUDA uses runtime layout metadata; retain classified rank and algorithm configuration."
+          }
         },
         {
           "name": "tiled_transpose_kernel",
@@ -398,7 +403,12 @@
         {
           "name": "tiled_transpose_comptime_layout_kernel",
           "line": 227,
-          "kind": "entry"
+          "kind": "entry",
+          "cuda_port": {
+            "status": "excluded_webgpu_metal_only",
+            "replacement": "tiled_transpose_kernel",
+            "reason": "CUDA uses runtime layout metadata; retain classified rank and algorithm configuration."
+          }
         },
         {
           "name": "contiguous_to_view_kernel",
@@ -1142,5 +1152,6 @@
         }
       ]
     }
-  ]
+  ],
+  "cuda_performance_contract": "docs/design/cubecl-performance-parity.md"
 }

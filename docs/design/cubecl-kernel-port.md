@@ -89,7 +89,7 @@ Eager callers may compile on first use before the operation is enqueued, or expl
 
 There are two distinct cache levels:
 
-- **Compilation artifacts:** key by the generated source and all included header contents, kernel/ABI revision, selected dtype and declared specialization, complete compiler options, NVRTC/toolchain version and target architecture/output kind. Runtime shape/stride/offset values and buffer addresses are excluded unless an explicit specialization deliberately embeds them.
+- **Compilation artifacts:** key by the generated source and all included header contents, kernel/ABI revision, selected dtype and declared specialization, complete compiler options, NVRTC/toolchain version and target architecture/output kind. Concrete tensor layout/size values and buffer addresses are excluded. Classified rank, operation-attribute and algorithm variants are included; see the performance preservation contract.
 - **Loaded modules/functions:** key by artifact identity and load options within the owning runtime/context generation. Do not use a process-global cache or share module/cache state between independent runtimes, even on one physical GPU.
 
 The caller/runtime owns bounded cache capacity, clear/eviction, statistics and module retirement. Active prepared bindings and queued work retain the modules they need independently of cache membership. Clearing a cache must not unload code still in use. Disk persistence is optional; if supplied, it must validate the same compilation key and must never persist CUDA handles.
@@ -112,11 +112,15 @@ Execution accepts caller-provided CUDA function handle(s), stream and device poi
 - Host planning/compilation may allocate ordinary host memory. This does not authorize hidden device allocation or payload transfer.
 - Exact in-place/overlap rules are documented per entry. The metadata API must not imply that arbitrary overlapping pointers are safe.
 
-Dimension count, axis extents, strides, offsets, broadcast/indexing/reduction metadata, element counts and ordinary scalar arguments are **runtime parameters by default**. The CUDA source must not substitute these values as literals, template arguments or generated defines merely because prepare knows them. Pass small descriptors by value or explicitly supplied device metadata buffers; their ownership and lifetime follow the existing ABI rules.
+Tensor shape extents, tensor strides, offsets, buffer lengths, flattened products, element/reduction counts, slice starts, padding amounts, slice/window sizes, running concatenation offsets and ordinary numerical scalar arguments are **runtime values**. Do not emit these concrete values as literals, template arguments or generated defines merely because prepare knows them.
 
-For the same expression, dtype, target and selected kernel variant, changing axis sizes or stride/offset values reuses the compiled kernel. Prepare recomputes launch dimensions and workspace sizes without recompiling device code. This does not by itself make a whole prepared program dynamically shaped: its input-shape constraints are a separate consumer contract.
+Preserve the existing classified specialization boundary: validated rank/sequence length may be a compile-time loop bound for local storage and unrolling; permutation/axis mappings, axis sets and static slice-step attributes are operation attributes; tile/block/padding/vector settings, index/address width and kernel blueprints are algorithm configuration. Each compiled parameter is classified in a reviewed manifest and included in the artifact key. Numerical scalar arguments remain distinct from operation/mode dispatch.
 
-Compact/strided/tiled variants and explicitly documented rank/layout specializations may have separate entries. Shape-specific constant folding/unrolling is opt-in, represented in the artifact key and tested separately; it is not the default migration strategy. A source symbol named `comptime_layout` is an inventory item, not a requirement to embed extents in the new ABI.
+For common small-rank paths, pass host-known runtime per-axis layout values as documented by-value scalar/POD launch arguments, matching CubeCL's runtime Sequence behavior without a separate device allocation/upload. Data-dependent index/start arrays remain device inputs without host readback. Larger metadata may use explicitly supplied device storage; declare and account for its transport and lifetime.
+
+At a fixed dtype, rank, attribute set, target and algorithm variant, varying runtime layout values reuses compiled code. Prepare recomputes launch dimensions and workspace sizes separately. This does not by itself make a whole prepared program dynamically shaped: its input-shape constraints are a separate consumer contract.
+
+CUDA does not inherit the WebGPU/Metal `*_comptime_layout_kernel` exception. Port the runtime-layout CUDA entries and retain useful rank/attribute/algorithm specializations. See the [performance preservation contract](cubecl-performance-parity.md) for the complete classification, fast paths and validation requirements.
 
 CubeCL-specific workarounds are not required ABI features. For example, a complex coefficient can use a documented POD scalar argument instead of a one-element device array if the CUDA ABI supports the chosen representation.
 
@@ -136,13 +140,19 @@ Port behavior, not known DSL restrictions or accidental implementation bugs.
 
 Relevant prior design evidence: [strided movement](https://github.com/tensor4all/tenferro-rs/blob/14bc1ab933e3c7a9c966e08355670331ab9d993c/docs/worklogs/issue-1832-1834-cuda-strided-data-movement.md), [exact complex copy/tiled destination](https://github.com/tensor4all/tenferro-rs/blob/14bc1ab933e3c7a9c966e08355670331ab9d993c/docs/worklogs/issue-1891-exact-cuda-copy-and-tiled-transpose-destination.md), [RRQR CUDA](https://github.com/tensor4all/tenferro-rs/blob/14bc1ab933e3c7a9c966e08355670331ab9d993c/docs/worklogs/2026-09-05-rank-revealing-qr-cuda.md).
 
+### CubeCL performance preservation
+
+The [performance preservation contract](cubecl-performance-parity.md) is part of this migration's acceptance criteria. It records the audited metadata/specialization rules, by-value runtime metadata, affine-axis fusion, dense and tiled copy paths, bounded unit/warp/split reductions, multi-output fusion, view reads, allocation reuse and required cold/warm overhead measurements. Preserve those paths or provide paired evidence for a deliberate replacement.
+
+Rank, operation attributes and algorithm configuration may specialize code; concrete tensor sizes/layout values remain runtime arguments. The WebGPU-only baked-layout twins are excluded from CUDA. Existing compile-count tests have a disabled observation, so new tests must count actual NVRTC calls rather than rely on their names or source equality alone.
+
 ## 6. Implementation sequence
 
-1. Define the C-compatible ABI, source packaging and runtime-free planning; implement zero/one/copy/strided materialization/transpose, elementary arithmetic and reusable scalar helpers.
+1. Define the C-compatible ABI, source packaging, classified specialization manifest and runtime-free planning; implement zero/one/copy/strided materialization/transpose, elementary arithmetic and reusable scalar helpers.
 2. Implement reduction families and explicit scratch planning, conversions/status kernels and indexing/scatter/diagonal operations.
 3. Implement linalg auxiliary kernels and RRQR primitives; consolidate shared fill, adjoint, phase, norm and pivot helpers.
 4. Implement the independent fused-expression source emitter and validate a generated kernel with runtime shape arguments. Connect prepare-time compilation/cache lookup and explicit engine binding in a standalone CUDA consumer; tenferro adapts its fusion graph separately.
-5. Compare with the pinned CUDA numerical tests, test an external plain-CUDA consumer, measure representative warm paths and record supported coverage.
+5. Compare with the pinned CUDA numerical tests, test an external plain-CUDA consumer, and run the performance contract's paired cold/warm benchmark matrix with actual compile/launch/transfer counters. Record supported coverage and unresolved regressions.
 
 These are work packages, not authorization to publish or replace tenferro's backend. The port can be developed and tested without waiting for t4a-cuda-runtime.
 
@@ -151,7 +161,8 @@ These are work packages, not authorization to publish or replace tenferro's back
 - [ ] No direct/transitive production dependency on t4a-cuda-runtime, tenferro, CubeCL or CubeK. Standalone tests/examples also use an independent CUDA consumer.
 - [ ] CUDA source/header assets and ABI are packaged so NVCC/NVRTC consumers need no Rust runtime object. Ordinary source/planning checks build without CUDA initialization.
 - [ ] Prepare obtains cached/precompiled artifacts or invokes NVRTC, and reports compilation failures before numerical run. Warm run performs zero source-generation/NVRTC calls; late engine binding is completed explicitly before submission.
-- [ ] Default generated sources and artifact keys are unchanged when only runtime axis sizes/strides/offsets change for the same expression/dtype/target/variant. Tests vary shapes, reversed/broadcast views and reduction lengths, check numerical output, and verify compile-count reuse.
+- [ ] Every compiled parameter is classified as rank, operation attribute/axis mapping or algorithm configuration. Runtime extents/strides/offsets/lengths/starts/padding/window/concatenation values are excluded; CUDA does not use the WebGPU-only baked-layout exception.
+- [ ] At fixed dtype/rank/attributes/target/algorithm variant, at least four runtime layouts reuse compiled code. Check numerical results and actual NVRTC invocation counts; the baseline test names alone do not establish this. Common small-rank host-known layout metadata uses by-value launch arguments without an added device upload.
 - [ ] Cache tests cover header/options/compiler/target invalidation, bounded eviction/clear, and independent module/cache state for two runtimes on the same GPU. Clearing a cache cannot invalidate active bindings or in-flight kernels.
 - [ ] Every source inventory family has a tested replacement, a consolidated replacement mapping, or an explicitly documented exclusion. Macro-generated symbols and status helpers are accounted for.
 - [ ] GPU tests compare numerical results with trusted CPU references or established numerical residuals, not only shapes or successful launches.
@@ -160,7 +171,8 @@ These are work packages, not authorization to publish or replace tenferro's back
 - [ ] Linalg tests include reconstruction, orthogonality, pivot/permutation direction, phase conventions and rank deficiency.
 - [ ] Use an external caller-owned stream and buffers with plain cudarc or raw CUDA. Show that calls do not create their own streams/pools, allocate hidden device scratch or host-synchronize after each item.
 - [ ] Validate two independent consumer contexts/streams where supported; the caller supplies compatible modules and owns completion. A multi-GPU absence is reported explicitly.
-- [ ] Record supported GPU/compiler/architecture combinations, launch counts and focused release measurements for representative compact/strided/transpose/reduction/scatter paths.
+- [ ] Preserve dense/view reads, affine-axis fusion, tiled transpose, long-axis split reduction, scatter initialization/update and eligible multi-output fusion. Verify commands and physical launches separately.
+- [ ] Complete the [performance preservation contract](cubecl-performance-parity.md): paired release comparisons with predeclared cases/tolerances, cold prepare versus warm host/device costs, copy/allocation/wait counters and an explicit account of unresolved regressions. Record tested hardware/compiler combinations.
 - [ ] Preserve required derivation notices and license texts before translating upstream-derived code.
 - [ ] Consumer/backend adoption is reviewed separately; no existing tenferro/CubeCL path is removed by this design-only setup.
 

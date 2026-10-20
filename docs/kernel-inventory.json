@@ -1,0 +1,1146 @@
+{
+  "source_repository": "tensor4all/tenferro-rs",
+  "source_commit": "14bc1ab933e3c7a9c966e08355670331ab9d993c",
+  "status": "inventory; not implemented or GPU-tested",
+  "files": [
+    {
+      "path": "crates/tenferro-gpu/src/kernels/elementwise.rs",
+      "lines": 882,
+      "functions": [
+        {
+          "name": "broadcast_source_index",
+          "line": 58,
+          "kind": "helper"
+        },
+        {
+          "name": "broadcast_multiply_float",
+          "line": 103,
+          "kind": "macro_entry",
+          "macro": "broadcast_multiply_kernel"
+        },
+        {
+          "name": "broadcast_multiply_complex",
+          "line": 104,
+          "kind": "macro_entry",
+          "macro": "broadcast_multiply_kernel"
+        },
+        {
+          "name": "broadcast_multiply_int",
+          "line": 106,
+          "kind": "entry"
+        },
+        {
+          "name": "axpby_strided_source_float",
+          "line": 200,
+          "kind": "macro_entry",
+          "macro": "axpby_strided_source_kernel"
+        },
+        {
+          "name": "axpby_strided_source_complex",
+          "line": 201,
+          "kind": "macro_entry",
+          "macro": "axpby_strided_source_kernel"
+        },
+        {
+          "name": "add_complex",
+          "line": 203,
+          "kind": "macro_entry",
+          "macro": "binary_float_complex_kernel"
+        },
+        {
+          "name": "add_float",
+          "line": 203,
+          "kind": "macro_entry",
+          "macro": "binary_float_complex_kernel"
+        },
+        {
+          "name": "sub_complex",
+          "line": 204,
+          "kind": "macro_entry",
+          "macro": "binary_float_complex_kernel"
+        },
+        {
+          "name": "sub_float",
+          "line": 204,
+          "kind": "macro_entry",
+          "macro": "binary_float_complex_kernel"
+        },
+        {
+          "name": "mul_complex",
+          "line": 205,
+          "kind": "macro_entry",
+          "macro": "binary_float_complex_kernel"
+        },
+        {
+          "name": "mul_float",
+          "line": 205,
+          "kind": "macro_entry",
+          "macro": "binary_float_complex_kernel"
+        },
+        {
+          "name": "div_float",
+          "line": 208,
+          "kind": "macro_entry",
+          "macro": "binary_float_kernel"
+        },
+        {
+          "name": "add_int",
+          "line": 210,
+          "kind": "entry"
+        },
+        {
+          "name": "sub_int",
+          "line": 217,
+          "kind": "entry"
+        },
+        {
+          "name": "mul_int",
+          "line": 224,
+          "kind": "entry"
+        },
+        {
+          "name": "scalar_div_float",
+          "line": 254,
+          "kind": "macro_entry",
+          "macro": "scalar_binary_float_kernel"
+        },
+        {
+          "name": "scalar_pow_float",
+          "line": 255,
+          "kind": "macro_entry",
+          "macro": "scalar_binary_float_kernel"
+        },
+        {
+          "name": "scalar_rem_float",
+          "line": 262,
+          "kind": "macro_entry",
+          "macro": "scalar_binary_float_kernel"
+        },
+        {
+          "name": "scalar_real_complex_binary",
+          "line": 264,
+          "kind": "entry"
+        },
+        {
+          "name": "scalar_div_int_checked",
+          "line": 332,
+          "kind": "entry"
+        },
+        {
+          "name": "scalar_rem_int_checked",
+          "line": 366,
+          "kind": "entry"
+        },
+        {
+          "name": "div_int_checked",
+          "line": 401,
+          "kind": "entry"
+        },
+        {
+          "name": "rem_float",
+          "line": 419,
+          "kind": "entry"
+        },
+        {
+          "name": "rem_int_checked",
+          "line": 428,
+          "kind": "entry"
+        },
+        {
+          "name": "neg_complex",
+          "line": 446,
+          "kind": "macro_entry",
+          "macro": "unary_both_kernel"
+        },
+        {
+          "name": "neg_float",
+          "line": 446,
+          "kind": "macro_entry",
+          "macro": "unary_both_kernel"
+        },
+        {
+          "name": "neg_int",
+          "line": 447,
+          "kind": "entry"
+        },
+        {
+          "name": "exp_float",
+          "line": 453,
+          "kind": "macro_entry",
+          "macro": "unary_float_kernel"
+        },
+        {
+          "name": "log_float",
+          "line": 454,
+          "kind": "macro_entry",
+          "macro": "unary_float_kernel"
+        },
+        {
+          "name": "sin_float",
+          "line": 455,
+          "kind": "macro_entry",
+          "macro": "unary_float_kernel"
+        },
+        {
+          "name": "cos_float",
+          "line": 456,
+          "kind": "macro_entry",
+          "macro": "unary_float_kernel"
+        },
+        {
+          "name": "tanh_float",
+          "line": 457,
+          "kind": "macro_entry",
+          "macro": "unary_float_kernel"
+        },
+        {
+          "name": "sqrt_float",
+          "line": 458,
+          "kind": "macro_entry",
+          "macro": "unary_float_kernel"
+        },
+        {
+          "name": "rsqrt_float",
+          "line": 460,
+          "kind": "entry"
+        },
+        {
+          "name": "expm1_float",
+          "line": 467,
+          "kind": "entry"
+        },
+        {
+          "name": "log1p_float",
+          "line": 474,
+          "kind": "entry"
+        },
+        {
+          "name": "erf_float",
+          "line": 481,
+          "kind": "entry"
+        },
+        {
+          "name": "abs_float",
+          "line": 488,
+          "kind": "entry"
+        },
+        {
+          "name": "abs_complex32",
+          "line": 496,
+          "kind": "entry"
+        },
+        {
+          "name": "abs_complex64",
+          "line": 503,
+          "kind": "entry"
+        },
+        {
+          "name": "abs_int",
+          "line": 510,
+          "kind": "entry"
+        },
+        {
+          "name": "sign_float",
+          "line": 523,
+          "kind": "entry"
+        },
+        {
+          "name": "sign_complex",
+          "line": 541,
+          "kind": "entry"
+        },
+        {
+          "name": "sign_int",
+          "line": 554,
+          "kind": "entry"
+        },
+        {
+          "name": "maximum_float",
+          "line": 569,
+          "kind": "entry"
+        },
+        {
+          "name": "maximum_int",
+          "line": 576,
+          "kind": "entry"
+        },
+        {
+          "name": "minimum_float",
+          "line": 585,
+          "kind": "entry"
+        },
+        {
+          "name": "minimum_int",
+          "line": 592,
+          "kind": "entry"
+        },
+        {
+          "name": "pow_float",
+          "line": 601,
+          "kind": "entry"
+        },
+        {
+          "name": "pow_int_checked",
+          "line": 608,
+          "kind": "entry"
+        },
+        {
+          "name": "scalar_pow_int_checked",
+          "line": 637,
+          "kind": "entry"
+        },
+        {
+          "name": "compare_float_bool",
+          "line": 682,
+          "kind": "entry"
+        },
+        {
+          "name": "compare_int_bool",
+          "line": 704,
+          "kind": "entry"
+        },
+        {
+          "name": "select_bool_float",
+          "line": 721,
+          "kind": "entry"
+        },
+        {
+          "name": "select_bool_int",
+          "line": 732,
+          "kind": "entry"
+        },
+        {
+          "name": "clamp_float",
+          "line": 743,
+          "kind": "entry"
+        },
+        {
+          "name": "conj_complex",
+          "line": 750,
+          "kind": "entry"
+        },
+        {
+          "name": "complex_div_abs",
+          "line": 759,
+          "kind": "helper"
+        },
+        {
+          "name": "complex_div_sign",
+          "line": 769,
+          "kind": "helper"
+        },
+        {
+          "name": "complex_div_term",
+          "line": 782,
+          "kind": "helper"
+        },
+        {
+          "name": "div_complex_parts",
+          "line": 803,
+          "kind": "entry"
+        },
+        {
+          "name": "complex_div_parts_at",
+          "line": 819,
+          "kind": "helper"
+        }
+      ]
+    },
+    {
+      "path": "crates/tenferro-gpu/src/kernels/structural.rs",
+      "lines": 589,
+      "functions": [
+        {
+          "name": "strided_view_offset_from_tensor",
+          "line": 8,
+          "kind": "helper"
+        },
+        {
+          "name": "fill_zero_kernel",
+          "line": 27,
+          "kind": "entry"
+        },
+        {
+          "name": "fill_zero_view_kernel",
+          "line": 40,
+          "kind": "entry"
+        },
+        {
+          "name": "copy_bool_kernel",
+          "line": 63,
+          "kind": "entry"
+        },
+        {
+          "name": "scale_in_place_float_kernel",
+          "line": 73,
+          "kind": "entry"
+        },
+        {
+          "name": "scale_in_place_complex_kernel",
+          "line": 91,
+          "kind": "entry"
+        },
+        {
+          "name": "materialize_strided_kernel",
+          "line": 102,
+          "kind": "entry"
+        },
+        {
+          "name": "materialize_strided_comptime_layout_kernel",
+          "line": 133,
+          "kind": "entry"
+        },
+        {
+          "name": "tiled_transpose_kernel",
+          "line": 164,
+          "kind": "entry"
+        },
+        {
+          "name": "tiled_transpose_comptime_layout_kernel",
+          "line": 227,
+          "kind": "entry"
+        },
+        {
+          "name": "contiguous_to_view_kernel",
+          "line": 284,
+          "kind": "entry"
+        },
+        {
+          "name": "strided_to_strided_kernel",
+          "line": 299,
+          "kind": "entry"
+        },
+        {
+          "name": "broadcast_in_dim_kernel",
+          "line": 327,
+          "kind": "entry"
+        },
+        {
+          "name": "convert_float_to_float",
+          "line": 351,
+          "kind": "entry"
+        },
+        {
+          "name": "convert_numeric",
+          "line": 358,
+          "kind": "entry"
+        },
+        {
+          "name": "convert_numeric_to_bool",
+          "line": 365,
+          "kind": "entry"
+        },
+        {
+          "name": "convert_bool_to_numeric",
+          "line": 376,
+          "kind": "entry"
+        },
+        {
+          "name": "convert_numeric_to_complex_raw",
+          "line": 383,
+          "kind": "entry"
+        },
+        {
+          "name": "convert_bool_to_complex_raw",
+          "line": 391,
+          "kind": "entry"
+        },
+        {
+          "name": "convert_complex_to_numeric",
+          "line": 399,
+          "kind": "entry"
+        },
+        {
+          "name": "convert_complex_raw_to_bool",
+          "line": 406,
+          "kind": "entry"
+        },
+        {
+          "name": "validate_real_cast",
+          "line": 419,
+          "kind": "entry"
+        },
+        {
+          "name": "extract_invalid_real_cast",
+          "line": 447,
+          "kind": "entry"
+        },
+        {
+          "name": "convert_c32_to_f32",
+          "line": 462,
+          "kind": "entry"
+        },
+        {
+          "name": "convert_c32_to_f64",
+          "line": 469,
+          "kind": "entry"
+        },
+        {
+          "name": "convert_c64_to_f32",
+          "line": 476,
+          "kind": "entry"
+        },
+        {
+          "name": "convert_c64_to_f64",
+          "line": 483,
+          "kind": "entry"
+        },
+        {
+          "name": "convert_f32_to_c32_raw",
+          "line": 494,
+          "kind": "entry"
+        },
+        {
+          "name": "convert_f32_to_c64_raw",
+          "line": 503,
+          "kind": "entry"
+        },
+        {
+          "name": "convert_f64_to_c32_raw",
+          "line": 512,
+          "kind": "entry"
+        },
+        {
+          "name": "convert_f64_to_c64_raw",
+          "line": 521,
+          "kind": "entry"
+        },
+        {
+          "name": "convert_complex_to_complex",
+          "line": 530,
+          "kind": "entry"
+        },
+        {
+          "name": "convert_complex_raw",
+          "line": 540,
+          "kind": "entry"
+        },
+        {
+          "name": "reverse_kernel",
+          "line": 547,
+          "kind": "entry"
+        },
+        {
+          "name": "concatenate_copy_kernel",
+          "line": 570,
+          "kind": "entry"
+        }
+      ]
+    },
+    {
+      "path": "crates/tenferro-gpu/src/kernels/indexing.rs",
+      "lines": 558,
+      "functions": [
+        {
+          "name": "init_float_index_validation_flag",
+          "line": 12,
+          "kind": "entry"
+        },
+        {
+          "name": "validate_float_indices_kernel",
+          "line": 22,
+          "kind": "entry"
+        },
+        {
+          "name": "extract_invalid_float_index_kernel",
+          "line": 47,
+          "kind": "entry"
+        },
+        {
+          "name": "clamp_window_start",
+          "line": 63,
+          "kind": "helper"
+        },
+        {
+          "name": "index_component",
+          "line": 82,
+          "kind": "helper"
+        },
+        {
+          "name": "flat_to_index_batch_index",
+          "line": 108,
+          "kind": "helper"
+        },
+        {
+          "name": "flat_to_update_window_index",
+          "line": 139,
+          "kind": "helper"
+        },
+        {
+          "name": "update_window_len",
+          "line": 160,
+          "kind": "helper"
+        },
+        {
+          "name": "slice_kernel",
+          "line": 174,
+          "kind": "entry"
+        },
+        {
+          "name": "dynamic_slice_kernel",
+          "line": 193,
+          "kind": "entry"
+        },
+        {
+          "name": "pad_kernel",
+          "line": 215,
+          "kind": "entry"
+        },
+        {
+          "name": "gather_kernel",
+          "line": 263,
+          "kind": "entry"
+        },
+        {
+          "name": "scatter_copy_kernel",
+          "line": 343,
+          "kind": "entry"
+        },
+        {
+          "name": "scatter_float_kernel",
+          "line": 350,
+          "kind": "entry"
+        },
+        {
+          "name": "scatter_complex_kernel",
+          "line": 455,
+          "kind": "entry"
+        }
+      ]
+    },
+    {
+      "path": "crates/tenferro-gpu/src/kernels/diagonal.rs",
+      "lines": 87,
+      "functions": [
+        {
+          "name": "extract_diagonal_kernel",
+          "line": 5,
+          "kind": "entry"
+        },
+        {
+          "name": "embed_diagonal_copy_kernel",
+          "line": 33,
+          "kind": "entry"
+        },
+        {
+          "name": "tril_kernel",
+          "line": 61,
+          "kind": "entry"
+        },
+        {
+          "name": "triu_kernel",
+          "line": 75,
+          "kind": "entry"
+        }
+      ]
+    },
+    {
+      "path": "crates/tenferro-gpu/src/kernels/reduce/kernels.rs",
+      "lines": 1438,
+      "functions": [
+        {
+          "name": "reduce_sum_float",
+          "line": 60,
+          "kind": "macro_entry",
+          "macro": "reduce_binary_kernel"
+        },
+        {
+          "name": "reduce_sum_complex",
+          "line": 61,
+          "kind": "macro_entry",
+          "macro": "reduce_binary_kernel"
+        },
+        {
+          "name": "reduce_prod_float",
+          "line": 62,
+          "kind": "macro_entry",
+          "macro": "reduce_binary_kernel"
+        },
+        {
+          "name": "reduce_prod_complex",
+          "line": 63,
+          "kind": "macro_entry",
+          "macro": "reduce_binary_kernel"
+        },
+        {
+          "name": "reduce_sum_squares_float",
+          "line": 65,
+          "kind": "entry"
+        },
+        {
+          "name": "reduce_sum_int",
+          "line": 105,
+          "kind": "entry"
+        },
+        {
+          "name": "reduce_prod_int",
+          "line": 140,
+          "kind": "entry"
+        },
+        {
+          "name": "reduce_sum_float_plane",
+          "line": 175,
+          "kind": "entry"
+        },
+        {
+          "name": "reduce_sum_float_chunked",
+          "line": 223,
+          "kind": "entry"
+        },
+        {
+          "name": "reduce_sum_complex_chunked",
+          "line": 282,
+          "kind": "entry"
+        },
+        {
+          "name": "reduce_prod_float_chunked",
+          "line": 338,
+          "kind": "entry"
+        },
+        {
+          "name": "reduce_prod_complex_chunked",
+          "line": 394,
+          "kind": "entry"
+        },
+        {
+          "name": "reduce_sum_squares_float_chunked",
+          "line": 450,
+          "kind": "entry"
+        },
+        {
+          "name": "reduce_sum_int_chunked",
+          "line": 511,
+          "kind": "entry"
+        },
+        {
+          "name": "reduce_prod_int_chunked",
+          "line": 567,
+          "kind": "entry"
+        },
+        {
+          "name": "reduce_max_float_chunked",
+          "line": 623,
+          "kind": "entry"
+        },
+        {
+          "name": "reduce_min_float_chunked",
+          "line": 685,
+          "kind": "entry"
+        },
+        {
+          "name": "reduce_max_int_chunked",
+          "line": 747,
+          "kind": "entry"
+        },
+        {
+          "name": "reduce_min_int_chunked",
+          "line": 804,
+          "kind": "entry"
+        },
+        {
+          "name": "reduce_sum_complex_plane",
+          "line": 861,
+          "kind": "entry"
+        },
+        {
+          "name": "reduce_prod_float_plane",
+          "line": 903,
+          "kind": "entry"
+        },
+        {
+          "name": "reduce_prod_complex_plane",
+          "line": 945,
+          "kind": "entry"
+        },
+        {
+          "name": "reduce_sum_squares_float_plane",
+          "line": 987,
+          "kind": "entry"
+        },
+        {
+          "name": "reduce_sum_int_plane",
+          "line": 1032,
+          "kind": "entry"
+        },
+        {
+          "name": "reduce_prod_int_plane",
+          "line": 1074,
+          "kind": "entry"
+        },
+        {
+          "name": "reduce_max_float",
+          "line": 1116,
+          "kind": "entry"
+        },
+        {
+          "name": "reduce_max_int",
+          "line": 1151,
+          "kind": "entry"
+        },
+        {
+          "name": "reduce_max_float_plane",
+          "line": 1187,
+          "kind": "entry"
+        },
+        {
+          "name": "reduce_max_int_plane",
+          "line": 1235,
+          "kind": "entry"
+        },
+        {
+          "name": "reduce_min_float",
+          "line": 1278,
+          "kind": "entry"
+        },
+        {
+          "name": "reduce_min_int",
+          "line": 1313,
+          "kind": "entry"
+        },
+        {
+          "name": "reduce_min_float_plane",
+          "line": 1349,
+          "kind": "entry"
+        },
+        {
+          "name": "reduce_min_int_plane",
+          "line": 1397,
+          "kind": "entry"
+        }
+      ]
+    },
+    {
+      "path": "crates/tenferro-gpu/src/kernels/helpers.rs",
+      "lines": 140,
+      "functions": [
+        {
+          "name": "wrapping_add",
+          "line": 7,
+          "kind": "helper"
+        },
+        {
+          "name": "wrapping_sub",
+          "line": 12,
+          "kind": "helper"
+        },
+        {
+          "name": "wrapping_mul",
+          "line": 17,
+          "kind": "helper"
+        },
+        {
+          "name": "wrapping_neg",
+          "line": 22,
+          "kind": "helper"
+        },
+        {
+          "name": "wrapping_plane_sum",
+          "line": 27,
+          "kind": "helper"
+        },
+        {
+          "name": "wrapping_plane_prod",
+          "line": 32,
+          "kind": "helper"
+        },
+        {
+          "name": "nan_propagating_max",
+          "line": 40,
+          "kind": "helper"
+        },
+        {
+          "name": "nan_propagating_min",
+          "line": 52,
+          "kind": "helper"
+        },
+        {
+          "name": "plane_contains_nan",
+          "line": 64,
+          "kind": "helper"
+        },
+        {
+          "name": "plane_propagate_nan",
+          "line": 73,
+          "kind": "helper"
+        },
+        {
+          "name": "zero_value",
+          "line": 83,
+          "kind": "helper"
+        },
+        {
+          "name": "flat_to_tensor_index",
+          "line": 88,
+          "kind": "helper"
+        },
+        {
+          "name": "multi_to_tensor_index",
+          "line": 102,
+          "kind": "helper"
+        },
+        {
+          "name": "axis_in_sequence",
+          "line": 116,
+          "kind": "helper"
+        },
+        {
+          "name": "axis_position_in_sequence",
+          "line": 129,
+          "kind": "helper"
+        }
+      ]
+    },
+    {
+      "path": "crates/tenferro-linalg/src/gpu/kernels.rs",
+      "lines": 491,
+      "functions": [
+        {
+          "name": "zero_value",
+          "line": 8,
+          "kind": "helper"
+        },
+        {
+          "name": "one_value",
+          "line": 13,
+          "kind": "helper"
+        },
+        {
+          "name": "batch_linear_index",
+          "line": 18,
+          "kind": "helper"
+        },
+        {
+          "name": "matching_work_offset",
+          "line": 36,
+          "kind": "helper"
+        },
+        {
+          "name": "matrix_adjoint_offset",
+          "line": 54,
+          "kind": "helper"
+        },
+        {
+          "name": "fill_one_kernel",
+          "line": 72,
+          "kind": "entry"
+        },
+        {
+          "name": "matrix_adjoint_real",
+          "line": 80,
+          "kind": "entry"
+        },
+        {
+          "name": "matrix_adjoint_complex",
+          "line": 92,
+          "kind": "entry"
+        },
+        {
+          "name": "complex32_magnitude",
+          "line": 104,
+          "kind": "entry"
+        },
+        {
+          "name": "complex64_magnitude",
+          "line": 111,
+          "kind": "entry"
+        },
+        {
+          "name": "householder_explicit_v",
+          "line": 118,
+          "kind": "entry"
+        },
+        {
+          "name": "householder_q_columns_identity",
+          "line": 134,
+          "kind": "entry"
+        },
+        {
+          "name": "positive_phase_real",
+          "line": 151,
+          "kind": "helper"
+        },
+        {
+          "name": "positive_phase_c32",
+          "line": 164,
+          "kind": "helper"
+        },
+        {
+          "name": "positive_phase_c64",
+          "line": 174,
+          "kind": "helper"
+        },
+        {
+          "name": "qr_diagonal_offset",
+          "line": 184,
+          "kind": "helper"
+        },
+        {
+          "name": "qr_phase_offset",
+          "line": 200,
+          "kind": "helper"
+        },
+        {
+          "name": "qr_phase_real",
+          "line": 216,
+          "kind": "entry"
+        },
+        {
+          "name": "qr_phase_c32",
+          "line": 232,
+          "kind": "entry"
+        },
+        {
+          "name": "qr_phase_c64",
+          "line": 242,
+          "kind": "entry"
+        },
+        {
+          "name": "qr_apply_phase_real",
+          "line": 252,
+          "kind": "entry"
+        },
+        {
+          "name": "qr_apply_phase_complex",
+          "line": 275,
+          "kind": "entry"
+        },
+        {
+          "name": "upper_trapezoidal_violation",
+          "line": 297,
+          "kind": "entry"
+        },
+        {
+          "name": "householder_from_factors_assemble",
+          "line": 314,
+          "kind": "entry"
+        },
+        {
+          "name": "lu_extract_outputs",
+          "line": 344,
+          "kind": "entry"
+        },
+        {
+          "name": "lu_parity",
+          "line": 419,
+          "kind": "entry"
+        },
+        {
+          "name": "lu_apply_pivots",
+          "line": 441,
+          "kind": "entry"
+        }
+      ]
+    },
+    {
+      "path": "crates/tenferro-linalg/src/gpu/kernels/rank_revealing_qr.rs",
+      "lines": 762,
+      "functions": [
+        {
+          "name": "rrqr_zero",
+          "line": 14,
+          "kind": "helper"
+        },
+        {
+          "name": "rrqr_one",
+          "line": 19,
+          "kind": "helper"
+        },
+        {
+          "name": "initialize_permutation",
+          "line": 24,
+          "kind": "entry"
+        },
+        {
+          "name": "column_norms_real",
+          "line": 32,
+          "kind": "entry"
+        },
+        {
+          "name": "column_norms_c32",
+          "line": 79,
+          "kind": "entry"
+        },
+        {
+          "name": "column_norms_c64",
+          "line": 128,
+          "kind": "entry"
+        },
+        {
+          "name": "select_pivot",
+          "line": 177,
+          "kind": "entry"
+        },
+        {
+          "name": "swap_columns",
+          "line": 232,
+          "kind": "entry"
+        },
+        {
+          "name": "reflector_real",
+          "line": 265,
+          "kind": "entry"
+        },
+        {
+          "name": "c32_from_real",
+          "line": 325,
+          "kind": "helper"
+        },
+        {
+          "name": "c64_from_real",
+          "line": 330,
+          "kind": "helper"
+        },
+        {
+          "name": "reflector_c32",
+          "line": 335,
+          "kind": "entry"
+        },
+        {
+          "name": "reflector_c64",
+          "line": 394,
+          "kind": "entry"
+        },
+        {
+          "name": "apply_reflector_real",
+          "line": 453,
+          "kind": "entry"
+        },
+        {
+          "name": "apply_reflector_c32",
+          "line": 499,
+          "kind": "entry"
+        },
+        {
+          "name": "apply_reflector_c64",
+          "line": 547,
+          "kind": "entry"
+        },
+        {
+          "name": "initialize_q",
+          "line": 595,
+          "kind": "entry"
+        },
+        {
+          "name": "extract_r",
+          "line": 609,
+          "kind": "entry"
+        },
+        {
+          "name": "prefix_rank_real",
+          "line": 630,
+          "kind": "entry"
+        },
+        {
+          "name": "prefix_rank_c32",
+          "line": 676,
+          "kind": "entry"
+        },
+        {
+          "name": "prefix_rank_c64",
+          "line": 720,
+          "kind": "entry"
+        }
+      ]
+    }
+  ]
+}

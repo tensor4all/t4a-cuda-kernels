@@ -23,7 +23,7 @@ use core::fmt;
 /// Maximum supported tensor rank. Deeper layouts need a later ABI revision.
 pub const MAX_RANK: usize = 8;
 /// Version of the C ABI described by this crate.
-pub const ABI_REVISION: u32 = 3;
+pub const ABI_REVISION: u32 = 4;
 /// Threads per block for the flat (element-wise) entries.
 pub const FLAT_BLOCK: u32 = 256;
 /// Largest block count for grid dimensions y and z.
@@ -148,6 +148,8 @@ pub enum Error {
     InvalidPlaneWidth,
     /// The split tuple is inconsistent with the reduction length.
     InvalidSplit,
+    /// The index vector size differs from the start/scatter map length.
+    IndexVectorMismatch,
 }
 
 impl fmt::Display for Error {
@@ -176,6 +178,7 @@ impl fmt::Display for Error {
             Error::StrategyMismatch => "reduction strategy does not fit the axis length",
             Error::InvalidPlaneWidth => "plane width must be 8, 16 or 32",
             Error::InvalidSplit => "inconsistent split tuple",
+            Error::IndexVectorMismatch => "index vector size differs from the map length",
         };
         f.write_str(text)
     }
@@ -431,10 +434,12 @@ pub enum Entry {
     ExtractInvalidRealCast,
     Reduce,
     ReducePartials,
+    Gather,
+    ScatterAdd,
 }
 
 impl Entry {
-    pub const ALL: [Entry; 25] = [
+    pub const ALL: [Entry; 27] = [
         Entry::FillZero,
         Entry::FillZeroView,
         Entry::CopyExact,
@@ -460,6 +465,8 @@ impl Entry {
         Entry::ExtractInvalidRealCast,
         Entry::Reduce,
         Entry::ReducePartials,
+        Entry::Gather,
+        Entry::ScatterAdd,
     ];
 
     /// Exported CUDA symbol; equal to the name documented in the ABI.
@@ -490,6 +497,8 @@ impl Entry {
             Entry::ExtractInvalidRealCast => "t4a_cuda_extract_invalid_real_cast",
             Entry::Reduce => "t4a_cuda_reduce",
             Entry::ReducePartials => "t4a_cuda_reduce_partials",
+            Entry::Gather => "t4a_cuda_gather",
+            Entry::ScatterAdd => "t4a_cuda_scatter_add",
         }
     }
 
@@ -511,6 +520,7 @@ impl Entry {
                 DType::C32,
                 DType::C64,
             ],
+            Entry::ScatterAdd => &[DType::F32, DType::F64, DType::C32, DType::C64],
             Entry::Reduce | Entry::ReducePartials => &[
                 DType::F32,
                 DType::F64,
@@ -723,6 +733,228 @@ pub fn plan_tiled_transpose(
 // MIT OR Apache-2.0. See THIRD_PARTY_NOTICES.md. Tenferro changes carried over:
 // single-axis keepdims output, the floor split and non-recursive combine.
 //
+/// XLA-style gather dimension maps. All vectors are validated by
+/// [`plan_gather`]; the entry takes them as a by-value POD.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GatherPlan {
+    /// Operand axis per window position.
+    pub window_dims: Vec<u32>,
+    /// Output axis per window position.
+    pub offset_dims: Vec<u32>,
+    /// Operand axis per start component.
+    pub start_index_map: Vec<u32>,
+    /// Window extent per operand axis (one on collapsed axes).
+    pub slice_sizes: Vec<i64>,
+    /// Index vector axis in the index tensor, or `indices.rank` when absent.
+    pub index_vector_dim: u32,
+}
+
+/// Additive-scatter dimension maps. The window shape comes from the updates
+/// extents at `update_window_dims`, so there are no slice sizes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScatterPlan {
+    /// Operand axis per window position.
+    pub window_dims: Vec<u32>,
+    /// Updates axis per window position.
+    pub update_window_dims: Vec<u32>,
+    /// Operand axis per start component.
+    pub scatter_dims: Vec<u32>,
+    /// Index vector axis in the index tensor, or `indices.rank` when absent.
+    pub index_vector_dim: u32,
+}
+
+/// Operand axes that carry a window, i.e. every axis not collapsed.
+pub fn window_dims(operand_rank: u32, collapsed: &[u32]) -> Vec<u32> {
+    (0..operand_rank)
+        .filter(|axis| !collapsed.contains(axis))
+        .collect()
+}
+
+fn require_unique_axes(axes: &[u32], rank: u32) -> Result<(), Error> {
+    let mut seen = Vec::with_capacity(axes.len());
+    for &axis in axes {
+        if axis >= rank {
+            return Err(Error::InvalidAxis);
+        }
+        if seen.contains(&axis) {
+            return Err(Error::DuplicateAxis);
+        }
+        seen.push(axis);
+    }
+    Ok(())
+}
+
+fn require_index_dtype(index_dtype: DType) -> Result<(), Error> {
+    match index_dtype {
+        DType::F32 | DType::F64 | DType::I32 | DType::I64 => Ok(()),
+        _ => Err(Error::UnsupportedDType),
+    }
+}
+
+/// Index vector size: the vector axis extent, or 1 when the vector axis is
+/// absent (a scalar start per batch), matching the baseline.
+fn index_vector_size(indices: &Layout, index_vector_dim: u32) -> Result<i64, Error> {
+    if index_vector_dim == indices.rank() {
+        return Ok(1);
+    }
+    if index_vector_dim > indices.rank() {
+        return Err(Error::InvalidAxis);
+    }
+    Ok(indices.extents()[index_vector_dim as usize])
+}
+
+/// Index batch extents: the index extents without the vector axis, in order.
+fn index_batch_extents(indices: &Layout, index_vector_dim: u32) -> Vec<i64> {
+    indices
+        .extents()
+        .iter()
+        .enumerate()
+        .filter(|(axis, _)| *axis as u32 != index_vector_dim)
+        .map(|(_, &extent)| extent)
+        .collect()
+}
+
+/// Plan [`Entry::Gather`]. Returns the launch and the output element count the
+/// kernel expects; the derived output extents must equal `out_layout`'s.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_gather(
+    dtype: DType,
+    index_dtype: DType,
+    out_layout: &Layout,
+    out_len: i64,
+    operand_layout: &Layout,
+    operand_len: i64,
+    indices_layout: &Layout,
+    indices_len: i64,
+    plan: &GatherPlan,
+) -> Result<(Launch, i64), Error> {
+    check_dtype(Entry::Gather, dtype)?;
+    require_index_dtype(index_dtype)?;
+    require_compact(indices_layout)?;
+    let operand_rank = operand_layout.rank();
+    if plan.slice_sizes.len() != operand_rank as usize {
+        return Err(Error::RankLength);
+    }
+    if plan.slice_sizes.iter().any(|&extent| extent < 0) {
+        return Err(Error::NegativeExtent);
+    }
+    require_unique_axes(&plan.start_index_map, operand_rank)?;
+    require_unique_axes(&plan.window_dims, operand_rank)?;
+    if plan.window_dims.len() != plan.offset_dims.len() {
+        return Err(Error::RankLength);
+    }
+    let index_size = index_vector_size(indices_layout, plan.index_vector_dim)?;
+    if index_size != plan.start_index_map.len() as i64 {
+        return Err(Error::IndexVectorMismatch);
+    }
+    // Every operand axis is either a window axis (its slice must fit) or a
+    // collapsed axis (its slice must be exactly one: the start addresses it).
+    for axis in 0..operand_rank {
+        let slice = plan.slice_sizes[axis as usize];
+        if plan.window_dims.contains(&axis) {
+            if slice > operand_layout.extents()[axis as usize] {
+                return Err(Error::ShapeMismatch);
+            }
+        } else if slice != 1 {
+            return Err(Error::ShapeMismatch);
+        }
+    }
+    // Output extents: the window extent on offset axes, the batch extent
+    // elsewhere, in ascending output-axis order.
+    let batch = index_batch_extents(indices_layout, plan.index_vector_dim);
+    let out_rank = batch.len() + plan.offset_dims.len();
+    if plan
+        .offset_dims
+        .iter()
+        .any(|&axis| axis as usize >= out_rank)
+    {
+        return Err(Error::InvalidAxis);
+    }
+    require_unique_axes(&plan.offset_dims, out_rank as u32)?;
+    let mut derived = vec![0i64; out_rank];
+    let mut filled = vec![false; out_rank];
+    for (position, &out_axis) in plan.offset_dims.iter().enumerate() {
+        derived[out_axis as usize] = plan.slice_sizes[plan.window_dims[position] as usize];
+        filled[out_axis as usize] = true;
+    }
+    let mut batch_axis = 0usize;
+    for out_axis in 0..out_rank {
+        if !filled[out_axis] {
+            if batch_axis >= batch.len() {
+                return Err(Error::ShapeMismatch);
+            }
+            derived[out_axis] = batch[batch_axis];
+            batch_axis += 1;
+        }
+    }
+    if batch_axis != batch.len() {
+        return Err(Error::ShapeMismatch);
+    }
+    if out_layout.rank() as usize != out_rank || out_layout.extents() != derived.as_slice() {
+        return Err(Error::ShapeMismatch);
+    }
+    require_destination(out_layout)?;
+    // Gather reads its operand directly and writes the destination, so the two
+    // must be disjoint; the caller proves that, as for every other entry.
+    operand_layout.check_span(operand_len, dtype.size())?;
+    indices_layout.check_span(indices_len, index_dtype.size())?;
+    out_layout.check_span(out_len, dtype.size())?;
+    let output_len = out_layout.element_count()?;
+    Ok((flat_launch(output_len)?, output_len))
+}
+
+/// Plan [`Entry::ScatterAdd`]. The destination already holds the operand copy;
+/// its extents are the operand extents.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_scatter_add(
+    dtype: DType,
+    index_dtype: DType,
+    out_layout: &Layout,
+    out_len: i64,
+    indices_layout: &Layout,
+    indices_len: i64,
+    updates_layout: &Layout,
+    updates_len: i64,
+    plan: &ScatterPlan,
+) -> Result<Launch, Error> {
+    check_dtype(Entry::ScatterAdd, dtype)?;
+    require_index_dtype(index_dtype)?;
+    require_compact(indices_layout)?;
+    let operand_rank = out_layout.rank();
+    let updates_rank = updates_layout.rank();
+    require_unique_axes(&plan.scatter_dims, operand_rank)?;
+    require_unique_axes(&plan.window_dims, operand_rank)?;
+    require_unique_axes(&plan.update_window_dims, updates_rank)?;
+    if plan.window_dims.len() != plan.update_window_dims.len() {
+        return Err(Error::RankLength);
+    }
+    let index_size = index_vector_size(indices_layout, plan.index_vector_dim)?;
+    if index_size != plan.scatter_dims.len() as i64 {
+        return Err(Error::IndexVectorMismatch);
+    }
+    // Non-window updates axes, in order, are the index batch shape.
+    let batch_from_updates: Vec<i64> = updates_layout
+        .extents()
+        .iter()
+        .enumerate()
+        .filter(|(axis, _)| !plan.update_window_dims.contains(&(*axis as u32)))
+        .map(|(_, &extent)| extent)
+        .collect();
+    let batch_from_indices = index_batch_extents(indices_layout, plan.index_vector_dim);
+    if batch_from_updates != batch_from_indices {
+        return Err(Error::ShapeMismatch);
+    }
+    let update_len = updates_layout.element_count()?;
+    require_destination(out_layout)?;
+    out_layout.check_span(out_len, dtype.size())?;
+    indices_layout.check_span(indices_len, index_dtype.size())?;
+    updates_layout.check_span(updates_len, dtype.size())?;
+    if out_layout.element_count()? == 0 {
+        return Ok(Launch::EMPTY);
+    }
+    flat_launch(update_len)
+}
+
 /// Supported warp-plane widths. Every NVIDIA target has 32; 8 and 16 are
 /// accepted so the subwarp paths stay covered and testable.
 pub const PLANE_WIDTHS: [u32; 3] = [8, 16, 32];
@@ -1606,4 +1838,128 @@ const _: () = {
     assert!(core::mem::align_of::<CAxisValues>() == 8);
     assert!(core::mem::offset_of!(CAxisValues, reserved) == 4);
     assert!(core::mem::offset_of!(CAxisValues, values) == 8);
+};
+
+/// C ABI mirror of [`GatherPlan`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CGatherPlan {
+    pub operand_rank: i32,
+    pub out_rank: i32,
+    pub index_vector_dim: i32,
+    pub window_rank: i32,
+    pub start_map_len: i32,
+    pub reserved: i32,
+    pub window_dims: [i64; MAX_RANK],
+    pub offset_dims: [i64; MAX_RANK],
+    pub start_index_map: [i64; MAX_RANK],
+    pub slice_sizes: [i64; MAX_RANK],
+}
+
+impl CGatherPlan {
+    /// `out_rank` is the output rank the plan resolves to; the mirror records it
+    /// so a consumer's manifest is accurate.
+    pub fn new(plan: &GatherPlan, out_rank: u32) -> Result<CGatherPlan, Error> {
+        if plan.window_dims.len() > MAX_RANK
+            || plan.start_index_map.len() > MAX_RANK
+            || plan.slice_sizes.len() > MAX_RANK
+        {
+            return Err(Error::RankOutOfRange);
+        }
+        if plan.window_dims.len() != plan.offset_dims.len() {
+            return Err(Error::RankLength);
+        }
+        let mut mirror = CGatherPlan {
+            operand_rank: plan.slice_sizes.len() as i32,
+            out_rank: out_rank as i32,
+            index_vector_dim: plan.index_vector_dim as i32,
+            window_rank: plan.window_dims.len() as i32,
+            start_map_len: plan.start_index_map.len() as i32,
+            reserved: 0,
+            window_dims: [0; MAX_RANK],
+            offset_dims: [0; MAX_RANK],
+            start_index_map: [0; MAX_RANK],
+            slice_sizes: [0; MAX_RANK],
+        };
+        for (position, (&axis, &out_axis)) in plan
+            .window_dims
+            .iter()
+            .zip(plan.offset_dims.iter())
+            .enumerate()
+        {
+            mirror.window_dims[position] = i64::from(axis);
+            mirror.offset_dims[position] = i64::from(out_axis);
+        }
+        // slice_sizes is per operand axis, not per window position.
+        for (axis, &slice) in plan.slice_sizes.iter().enumerate() {
+            mirror.slice_sizes[axis] = slice;
+        }
+        for (component, &axis) in plan.start_index_map.iter().enumerate() {
+            mirror.start_index_map[component] = i64::from(axis);
+        }
+        Ok(mirror)
+    }
+}
+
+/// C ABI mirror of [`ScatterPlan`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CScatterPlan {
+    pub operand_rank: i32,
+    pub updates_rank: i32,
+    pub index_vector_dim: i32,
+    pub window_rank: i32,
+    pub scatter_map_len: i32,
+    pub reserved: i32,
+    pub window_dims: [i64; MAX_RANK],
+    pub update_window_dims: [i64; MAX_RANK],
+    pub scatter_dims: [i64; MAX_RANK],
+}
+
+impl CScatterPlan {
+    pub fn new(
+        operand_rank: u32,
+        updates_rank: u32,
+        plan: &ScatterPlan,
+    ) -> Result<CScatterPlan, Error> {
+        if plan.window_dims.len() > MAX_RANK || plan.scatter_dims.len() > MAX_RANK {
+            return Err(Error::RankOutOfRange);
+        }
+        if plan.window_dims.len() != plan.update_window_dims.len() {
+            return Err(Error::RankLength);
+        }
+        let mut mirror = CScatterPlan {
+            operand_rank: operand_rank as i32,
+            updates_rank: updates_rank as i32,
+            index_vector_dim: plan.index_vector_dim as i32,
+            window_rank: plan.window_dims.len() as i32,
+            scatter_map_len: plan.scatter_dims.len() as i32,
+            reserved: 0,
+            window_dims: [0; MAX_RANK],
+            update_window_dims: [0; MAX_RANK],
+            scatter_dims: [0; MAX_RANK],
+        };
+        for (position, (&axis, &update_axis)) in plan
+            .window_dims
+            .iter()
+            .zip(plan.update_window_dims.iter())
+            .enumerate()
+        {
+            mirror.window_dims[position] = i64::from(axis);
+            mirror.update_window_dims[position] = i64::from(update_axis);
+        }
+        for (component, &axis) in plan.scatter_dims.iter().enumerate() {
+            mirror.scatter_dims[component] = i64::from(axis);
+        }
+        Ok(mirror)
+    }
+}
+
+const _: () = {
+    assert!(core::mem::size_of::<CGatherPlan>() == 280);
+    assert!(core::mem::align_of::<CGatherPlan>() == 8);
+    assert!(core::mem::offset_of!(CGatherPlan, window_dims) == 24);
+    assert!(core::mem::size_of::<CScatterPlan>() == 216);
+    assert!(core::mem::align_of::<CScatterPlan>() == 8);
+    assert!(core::mem::offset_of!(CScatterPlan, window_dims) == 24);
 };

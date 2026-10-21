@@ -14,7 +14,7 @@ use std::sync::{Mutex, OnceLock};
 
 use cudarc::driver::result as drv;
 use cudarc::driver::sys;
-use t4a_cuda_kernels::{CAxisValues, CLayout, CTransposeConfig, Launch};
+use t4a_cuda_kernels::{CAxisValues, CGatherPlan, CLayout, CScatterPlan, CTransposeConfig, Launch};
 
 thread_local! {
     static LAUNCHES: Cell<usize> = const { Cell::new(0) };
@@ -64,12 +64,18 @@ fn cubin(source: &str) -> PathBuf {
 /// One CUDA context, stream and loaded module, owned by the test.
 pub struct Session {
     device: sys::CUdevice,
-    module: sys::CUmodule,
+    modules: Vec<sys::CUmodule>,
     stream: sys::CUstream,
 }
 
 impl Session {
     pub fn new(source: &str) -> Session {
+        Session::with_modules(&[source])
+    }
+
+    /// One context and stream with several kernel modules loaded, so a
+    /// multi-entry composition stays stream-ordered.
+    pub fn with_modules(sources: &[&str]) -> Session {
         drv::init().expect("cuInit failed");
         let device = drv::device::get(0).expect("no usable CUDA device");
         let context =
@@ -77,19 +83,28 @@ impl Session {
         unsafe { drv::ctx::set_current(context) }.expect("cuCtxSetCurrent");
         let stream =
             drv::stream::create(drv::stream::StreamKind::NonBlocking).expect("cuStreamCreate");
-        let image = std::fs::read(cubin(source)).expect("cubin");
-        let module =
-            unsafe { drv::module::load_data(image.as_ptr().cast()) }.expect("cuModuleLoadData");
+        let modules = sources
+            .iter()
+            .map(|source| {
+                let image = std::fs::read(cubin(source)).expect("cubin");
+                unsafe { drv::module::load_data(image.as_ptr().cast()) }.expect("cuModuleLoadData")
+            })
+            .collect();
         Session {
             device,
-            module,
+            modules,
             stream,
         }
     }
 
     pub fn function(&self, name: &str) -> sys::CUfunction {
-        let name = CString::new(name).unwrap();
-        unsafe { drv::module::get_function(self.module, name) }.expect("cuModuleGetFunction")
+        let symbol = CString::new(name).unwrap();
+        for module in &self.modules {
+            if let Ok(function) = unsafe { drv::module::get_function(*module, symbol.clone()) } {
+                return function;
+            }
+        }
+        panic!("cuModuleGetFunction: {name} not found in the loaded modules");
     }
 
     pub fn stream(&self) -> sys::CUstream {
@@ -100,7 +115,9 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         unsafe { drv::stream::synchronize(self.stream) }.unwrap();
-        unsafe { drv::module::unload(self.module) }.unwrap();
+        for module in self.modules.drain(..) {
+            unsafe { drv::module::unload(module) }.unwrap();
+        }
         unsafe { drv::stream::destroy(self.stream) }.unwrap();
         unsafe { drv::primary_ctx::release(self.device) }.unwrap();
     }
@@ -197,12 +214,12 @@ pub fn download<T: Copy>(session: &Session, buf: &Buf, count: usize) -> Vec<T> {
 /// bytes for argument `i` from the pointer handed to `cuLaunchKernel`, so every
 /// by-value argument (including the 144-byte layout) fits here.
 #[repr(C, align(16))]
-pub struct Slot([u8; 160]);
+pub struct Slot([u8; 384]);
 
 impl Slot {
     fn store<T: Copy>(value: &T) -> Slot {
-        assert!(std::mem::size_of::<T>() <= 160);
-        let mut slot = Slot([0u8; 160]);
+        assert!(std::mem::size_of::<T>() <= 384);
+        let mut slot = Slot([0u8; 384]);
         slot.0[..std::mem::size_of::<T>()].copy_from_slice(as_bytes(std::slice::from_ref(value)));
         slot
     }
@@ -224,6 +241,14 @@ impl Slot {
     }
 
     pub fn axis_values(value: &CAxisValues) -> Slot {
+        Slot::store(value)
+    }
+
+    pub fn gather_plan(value: &CGatherPlan) -> Slot {
+        Slot::store(value)
+    }
+
+    pub fn scatter_plan(value: &CScatterPlan) -> Slot {
         Slot::store(value)
     }
 

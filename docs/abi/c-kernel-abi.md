@@ -1,4 +1,4 @@
-# C kernel ABI (revision 3)
+# C kernel ABI (revision 4)
 
 Every entry is an `extern "C" __global__` CUDA function in `cuda/src/`. A caller
 loads the compiled module into its own context, looks the symbol up by the name
@@ -18,9 +18,10 @@ nothing, so the same text compiles under NVCC and NVRTC.
 
 ## Revision
 
-`T4A_CUDA_ABI_REVISION == 3`. Revision 2 added `t4a_cuda_axis_values` and the
-diagonal, windowing and validation-status entries; revision 3 adds the reduction
-entries. Nothing in revisions 1-2 changed. Any change to a struct layout, an entry signature, an element type
+`T4A_CUDA_ABI_REVISION == 4`. Revision 2 added `t4a_cuda_axis_values` and the
+diagonal, windowing and validation-status entries; revision 3 added the reduction
+entries; revision 4 adds the gather and additive-scatter entries. Nothing in
+revisions 1-3 changed. Any change to a struct layout, an entry signature, an element type
 mapping or a launch contract requires a further revision bump and an entry in the
 compilation/artifact key of any consumer that caches compiled code.
 
@@ -31,6 +32,8 @@ compilation/artifact key of any consumer that caches compiled code.
 | `t4a_cuda_layout` | 144 | 8 | by-value launch argument |
 | `t4a_cuda_transpose_config` | 16 | 4 | by-value launch argument |
 | `t4a_cuda_axis_values` | 72 | 8 | per-axis runtime values (revision 2) |
+| `t4a_cuda_gather_plan` | 280 | 8 | gather dimension maps (revision 4) |
+| `t4a_cuda_scatter_plan` | 216 | 8 | scatter dimension maps (revision 4) |
 | `t4a_cuda_c32` | 8 | 4 | interleaved `re, im`; matches `num_complex::Complex32`, not `float2` (align 8) |
 | `t4a_cuda_c64` | 16 | 8 | interleaved `re, im`; matches `num_complex::Complex64`, not `double2` (align 16) |
 
@@ -259,8 +262,90 @@ Semantics:
 Supported dtypes: `SUM`/`PROD` F32/F64/I32/I64/C32/C64, `SUM_SQUARES`
 F32/F64, `MAX`/`MIN` F32/F64/I32/I64.
 
+### Revision 4: gather and additive scatter
+
+| Symbol | Arguments |
+| --- | --- |
+| `t4a_cuda_gather` | `(void* out, const void* operand, const void* indices, int dtype, int index_dtype, t4a_cuda_layout out, t4a_cuda_layout operand, t4a_cuda_layout indices, t4a_cuda_gather_plan plan, long long output_len)` |
+| `t4a_cuda_scatter_add` | `(void* out, const void* indices, const void* updates, int dtype, int index_dtype, t4a_cuda_layout out, t4a_cuda_layout indices, t4a_cuda_layout updates, t4a_cuda_scatter_plan plan, long long update_len)` |
+
+```c
+typedef struct {              /* offsets: rank fields 0-20, window_dims 24, ... */
+  int operand_rank;           /* 1..=8 */
+  int out_rank;               /* 0..=8; a scalar gather has rank 0 */
+  int index_vector_dim;       /* 0..=start_indices_rank; == rank when absent */
+  int window_rank;            /* number of window positions */
+  int start_map_len;          /* equal to the index vector size */
+  int reserved;               /* 0 */
+  long long window_dims[8];     /* operand axis per window position */
+  long long offset_dims[8];     /* output axis per window position */
+  long long start_index_map[8]; /* operand axis per start component */
+  long long slice_sizes[8];     /* window extent per operand axis */
+} t4a_cuda_gather_plan;
+
+typedef struct {
+  int operand_rank;
+  int updates_rank;
+  int index_vector_dim;
+  int window_rank;
+  int scatter_map_len;        /* equal to the index vector size */
+  int reserved;
+  long long window_dims[8];         /* operand axis per window position */
+  long long update_window_dims[8];  /* updates axis per window position */
+  long long scatter_dims[8];        /* operand axis per start component */
+} t4a_cuda_scatter_plan;
+
+void t4a_cuda_gather(void* out, const void* operand, const void* indices,
+                     int dtype, int index_dtype, t4a_cuda_layout out_layout,
+                     t4a_cuda_layout operand_layout, t4a_cuda_layout indices_layout,
+                     t4a_cuda_gather_plan plan, long long output_len);
+void t4a_cuda_scatter_add(void* out, const void* indices, const void* updates,
+                          int dtype, int index_dtype, t4a_cuda_layout out_layout,
+                          t4a_cuda_layout indices_layout, t4a_cuda_layout updates_layout,
+                          t4a_cuda_scatter_plan plan, long long update_len);
+```
+
+- **Gather.** Window offsets fill the `window_dims` positions of the output
+  coordinate, the remaining output coordinates fill the index batch shape in
+  order, and each start component `c` (read at `index_vector_dim`, or from the
+  flat batch position when that axis is absent) sets operand axis
+  `start_index_map[c]` through `clamp_window_start`: `start <= 0 -> 0`, else
+  `min(trunc(start), extent - window)`. The operand is read directly at its
+  strided address. A rank-0 output is a valid scalar gather.
+- **Scatter add.** One thread per update element. The window shape is the
+  updates extent at each `update_window_dims` position (one on every other
+  operand axis); the batch coordinates are the remaining updates axes, which must
+  equal the index batch shape; the operand base is the clamped start per
+  `scatter_dims`; a window that does not fit is skipped, per element, so scatter
+  does not reject a window larger than the operand. The update is added with
+  `atomicAdd` (complex updates add both components). The entry takes no operand
+  pointer: the caller has already initialized `out` with an operand copy, and
+  `out` carries every extent the fit check needs.
+- **Index tensors** are compact, device-resident F32/F64/I32/I64. Their values
+  must be validated integral starts within `|v| <= 2^24` (F32) and `<= 2^53`
+  (F64); the entry does not re-validate and never reads them on the host.
+- **Collisions.** Concurrent additive updates to one destination are
+  nondeterministic, as in the baseline; the caller needs device atomics for the
+  element type.
+- **Initialization and empty cases.** The additive scatter must be preceded by a
+  copy of the operand into `out` on the same stream. Use `t4a_cuda_copy_exact`
+  only when both buffers are compact; use `t4a_cuda_contiguous_to_view` or
+  `t4a_cuda_strided_to_strided` when either side is a view (the exact copy
+  ignores offsets and strides). A zero update length plans no additive launch but
+  still needs the copy when the destination is nonempty.
+- **Launch geometry**: flat, `block = (256, 1, 1)`, `grid = ceil(len/256)`.
+
+Supported dtypes: gather moves every data dtype with F32/F64/I32/I64 indices;
+additive scatter serves F32/F64/C32/C64 with the same index dtypes.
+
 ## Overlap and aliasing
 
+- Gather writes only its destination: the destination must be disjoint from the
+  operand and from the index tensor, and it must be injective.
+- Additive scatter reads `indices` and `updates` while other threads write `out`
+  atomically, so both must be disjoint from `out` (logical collision in the
+  scatter does not make aliasing safe). The destination must be injective for the
+  preceding operand copy.
 - Reduction destinations (output and partials) must be injective and disjoint
   from the source of their own pass. Partials are pass 2's source, so they must
   be disjoint from the original input and from the final output.
@@ -282,6 +367,7 @@ proof, as it already is in the consumer planners.
 | --- | --- | --- | --- |
 | flat entries | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |
 | reductions | see the revision-3 section | `(plane_width, 1, 1)` | 0 |
+| gather / scatter add | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |
 | one-thread entries (`init_validation`, `extract_invalid_*`) | `(1, 1, 1)` | `(1, 1, 1)` | 0 |
 | `validate_real_cast` | `(ceil(len/stride/256), 1, 1)` | `(256, 1, 1)` | 0 |
 | `t4a_cuda_tiled_transpose` | `(ceil(M/tile), ceil(N/tile), batches)` | `(tile/vector_width, block_rows, 1)` | `tile*(tile+padding)*element_size` |

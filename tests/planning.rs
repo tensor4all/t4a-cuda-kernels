@@ -293,7 +293,8 @@ fn entry_names_are_unique_and_exported_by_the_sources() {
         include_str!("../cuda/src/diagonal.cu"),
         include_str!("../cuda/src/window.cu"),
         include_str!("../cuda/src/validation.cu"),
-        include_str!("../cuda/src/reduce.cu")
+        include_str!("../cuda/src/reduce.cu"),
+        include_str!("../cuda/src/gather_scatter.cu")
     );
     for (index, entry) in Entry::ALL.iter().enumerate() {
         let name = entry.name();
@@ -1082,4 +1083,359 @@ fn partials_plans_enforce_the_floor_split() {
         ),
         Err(Error::ShapeMismatch)
     );
+}
+
+// --- revision 4: gather and scatter -----------------------------------------
+
+use t4a_cuda_kernels::{
+    plan_gather, plan_scatter_add, window_dims, CGatherPlan, CScatterPlan, GatherPlan, ScatterPlan,
+};
+
+fn gather_case() -> (Layout, Layout, Layout, GatherPlan) {
+    // Operand [4, 3]: axis 0 is collapsed, so the window lives on axis 1.
+    let operand = Layout::compact(&[4, 3]).unwrap();
+    // Index tensor [2, 5]: two batches of one start component.
+    let indices = Layout::compact(&[2, 1]).unwrap();
+    let out = Layout::compact(&[2, 3]).unwrap();
+    let plan = GatherPlan {
+        window_dims: window_dims(2, &[0]),
+        offset_dims: vec![1],
+        start_index_map: vec![0],
+        slice_sizes: vec![1, 3],
+        index_vector_dim: 1,
+    };
+    (operand, indices, out, plan)
+}
+
+#[test]
+fn gather_derives_the_output_and_plans_one_flat_launch() {
+    let (operand, indices, out, plan) = gather_case();
+    let (launch, output_len) = plan_gather(
+        DType::F32,
+        DType::I64,
+        &out,
+        6,
+        &operand,
+        12,
+        &indices,
+        2,
+        &plan,
+    )
+    .unwrap();
+    assert_eq!(output_len, 6);
+    assert_eq!(launch.grid, [1, 1, 1]);
+
+    // A mismatched output layout is refused instead of reinterpreted.
+    let wrong = Layout::compact(&[2, 2]).unwrap();
+    assert_eq!(
+        plan_gather(
+            DType::F32,
+            DType::I64,
+            &wrong,
+            4,
+            &operand,
+            12,
+            &indices,
+            2,
+            &plan
+        ),
+        Err(Error::ShapeMismatch)
+    );
+    // The index vector size must match the start map length.
+    let bad_vector = GatherPlan {
+        index_vector_dim: 0,
+        ..plan.clone()
+    };
+    assert_eq!(
+        plan_gather(
+            DType::F32,
+            DType::I64,
+            &out,
+            6,
+            &operand,
+            12,
+            &indices,
+            2,
+            &bad_vector
+        ),
+        Err(Error::IndexVectorMismatch)
+    );
+    // A slice larger than the operand axis is refused.
+    let big = GatherPlan {
+        slice_sizes: vec![1, 5],
+        ..plan.clone()
+    };
+    assert_eq!(
+        plan_gather(
+            DType::F32,
+            DType::I64,
+            &out,
+            6,
+            &operand,
+            12,
+            &indices,
+            2,
+            &big
+        ),
+        Err(Error::ShapeMismatch)
+    );
+    // Duplicate or out-of-range axes are refused.
+    let duplicate = GatherPlan {
+        start_index_map: vec![0, 0],
+        ..plan.clone()
+    };
+    assert!(matches!(
+        plan_gather(
+            DType::F32,
+            DType::I64,
+            &out,
+            6,
+            &operand,
+            12,
+            &indices,
+            2,
+            &duplicate
+        ),
+        Err(Error::IndexVectorMismatch) | Err(Error::DuplicateAxis)
+    ));
+    // Index tensors must be compact: an offset view would need strides the
+    // entries do not transport.
+    let offset_indices = Layout::new(&[2, 1], &[1, 2], 3).unwrap();
+    assert_eq!(
+        plan_gather(
+            DType::F32,
+            DType::I64,
+            &out,
+            6,
+            &operand,
+            12,
+            &offset_indices,
+            8,
+            &plan
+        ),
+        Err(Error::NotCompact)
+    );
+    // A rank-0 output is a scalar gather of one element.
+    let scalar_plan = GatherPlan {
+        window_dims: vec![],
+        offset_dims: vec![],
+        start_index_map: vec![0],
+        slice_sizes: vec![1],
+        index_vector_dim: 0,
+    };
+    let scalar_operand = Layout::compact(&[5]).unwrap();
+    let scalar_indices = Layout::compact(&[1]).unwrap();
+    let scalar_out = Layout::compact(&[]).unwrap();
+    let (launch, output_len) = plan_gather(
+        DType::F64,
+        DType::I32,
+        &scalar_out,
+        1,
+        &scalar_operand,
+        5,
+        &scalar_indices,
+        1,
+        &scalar_plan,
+    )
+    .unwrap();
+    assert_eq!(output_len, 1);
+    assert_eq!(launch.grid, [1, 1, 1]);
+}
+
+#[test]
+fn scatter_validates_the_batch_shape_and_ignores_operand_fit() {
+    // Operand [6], indices [4, 1], updates [4, 2]: four batches, window 2.
+    let out = Layout::compact(&[6]).unwrap();
+    let indices = Layout::compact(&[4, 1]).unwrap();
+    let updates = Layout::compact(&[4, 2]).unwrap();
+    let plan = ScatterPlan {
+        window_dims: vec![0],
+        update_window_dims: vec![1],
+        scatter_dims: vec![0],
+        index_vector_dim: 1,
+    };
+    let launch = plan_scatter_add(
+        DType::F32,
+        DType::I64,
+        &out,
+        6,
+        &indices,
+        4,
+        &updates,
+        8,
+        &plan,
+    )
+    .unwrap();
+    assert_eq!(launch.grid, [1, 1, 1]);
+
+    // The batch extents come from the updates non-window axes; a mismatch is a
+    // shape error rather than a silent reinterpretation.
+    let wrong_updates = Layout::compact(&[3, 2]).unwrap();
+    assert_eq!(
+        plan_scatter_add(
+            DType::F32,
+            DType::I64,
+            &out,
+            6,
+            &indices,
+            4,
+            &wrong_updates,
+            6,
+            &plan
+        ),
+        Err(Error::ShapeMismatch)
+    );
+    // A window larger than the operand axis is allowed: the kernel skips those
+    // windows element by element.
+    let big_window = Layout::compact(&[4, 9]).unwrap();
+    assert!(plan_scatter_add(
+        DType::F32,
+        DType::I64,
+        &out,
+        6,
+        &indices,
+        4,
+        &big_window,
+        36,
+        &plan
+    )
+    .is_ok());
+    // Integer and boolean data are not additive-scatter types.
+    assert_eq!(
+        plan_scatter_add(
+            DType::I32,
+            DType::I64,
+            &out,
+            6,
+            &indices,
+            4,
+            &updates,
+            8,
+            &plan
+        ),
+        Err(Error::UnsupportedDType)
+    );
+    // Index tensors must be compact.
+    let offset_indices = Layout::new(&[4, 1], &[1, 2], 1).unwrap();
+    assert_eq!(
+        plan_scatter_add(
+            DType::F32,
+            DType::I64,
+            &out,
+            6,
+            &offset_indices,
+            8,
+            &updates,
+            8,
+            &plan
+        ),
+        Err(Error::NotCompact)
+    );
+}
+
+#[test]
+fn gather_and_scatter_mirrors_have_the_documented_layout() {
+    let (_, _, _, plan) = gather_case();
+    let mirror = CGatherPlan::new(&plan, 2).unwrap();
+    assert_eq!(mirror.operand_rank, 2);
+    assert_eq!(mirror.out_rank, 2);
+    assert_eq!(mirror.window_rank, 1);
+    assert_eq!(mirror.start_map_len, 1);
+    assert_eq!(mirror.index_vector_dim, 1);
+    assert_eq!(&mirror.window_dims[..2], &[1, 0]);
+    assert_eq!(&mirror.offset_dims[..2], &[1, 0]);
+    assert_eq!(&mirror.slice_sizes[..3], &[1, 3, 0]);
+    assert_eq!(std::mem::size_of::<CGatherPlan>(), 280);
+
+    let scatter = ScatterPlan {
+        window_dims: vec![0],
+        update_window_dims: vec![1],
+        scatter_dims: vec![0],
+        index_vector_dim: 1,
+    };
+    let mirror = CScatterPlan::new(1, 2, &scatter).unwrap();
+    assert_eq!(mirror.window_rank, 1);
+    assert_eq!(mirror.scatter_map_len, 1);
+    assert_eq!(std::mem::size_of::<CScatterPlan>(), 216);
+}
+
+#[test]
+fn window_dims_helper_drops_collapsed_axes() {
+    assert_eq!(window_dims(3, &[1]), vec![0, 2]);
+    assert_eq!(window_dims(2, &[]), vec![0, 1]);
+    assert_eq!(window_dims(1, &[0]), Vec::<u32>::new());
+}
+
+#[test]
+fn gather_requires_unit_slices_on_collapsed_axes() {
+    // Operand [5]: a start map on axis 0 with a collapsed (non-window) axis must
+    // still carry slice size 1, or the kernel would read outside the operand.
+    let operand = Layout::compact(&[5]).unwrap();
+    let indices = Layout::compact(&[1]).unwrap();
+    let out = Layout::compact(&[]).unwrap();
+    let bad = GatherPlan {
+        window_dims: vec![],
+        offset_dims: vec![],
+        start_index_map: vec![0],
+        slice_sizes: vec![0],
+        index_vector_dim: 0,
+    };
+    assert_eq!(
+        plan_gather(
+            DType::F32,
+            DType::I64,
+            &out,
+            1,
+            &operand,
+            5,
+            &indices,
+            5,
+            &bad
+        ),
+        Err(Error::ShapeMismatch)
+    );
+    let good = GatherPlan {
+        slice_sizes: vec![1],
+        ..bad
+    };
+    assert!(plan_gather(
+        DType::F32,
+        DType::I64,
+        &out,
+        1,
+        &operand,
+        5,
+        &indices,
+        5,
+        &good
+    )
+    .is_ok());
+    // Gather moves Bool data.
+    assert_eq!(Entry::Gather.supported_dtypes(), &DType::ALL);
+}
+
+#[test]
+fn scatter_with_an_empty_destination_plans_nothing() {
+    let out = Layout::compact(&[0]).unwrap();
+    let indices = Layout::compact(&[1]).unwrap();
+    let updates = Layout::compact(&[1]).unwrap();
+    let plan = ScatterPlan {
+        window_dims: vec![],
+        update_window_dims: vec![],
+        scatter_dims: vec![0],
+        index_vector_dim: 1,
+    };
+    let launch = plan_scatter_add(
+        DType::F32,
+        DType::I64,
+        &out,
+        0,
+        &indices,
+        1,
+        &updates,
+        1,
+        &plan,
+    )
+    .unwrap();
+    assert!(launch.is_empty());
 }

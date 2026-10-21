@@ -1,11 +1,12 @@
 # Runtime-independent CUDA kernel migration
 
-Status: design and source inventory, 2026-10-20. Three slices are implemented
-and GPU-validated: C ABI, movement and elementary arithmetic
+Status: design and source inventory, 2026-10-20. Four slices are implemented and
+GPU-validated: C ABI, movement and elementary arithmetic
 ([plan](slice-abi-movement-arithmetic.md)); diagonal, windowing and validation
-status ([plan](slice-diagonal-window-validation.md)); and reductions
-([plan](slice-reductions.md)). Conversions, gather/scatter, linalg helpers and
-the fusion emitter are still design-only.
+status ([plan](slice-diagonal-window-validation.md)); reductions
+([plan](slice-reductions.md)); and gather with additive scatter
+([plan](slice-gather-scatter.md)). Conversions, linalg helpers, the fusion
+emitter and the prepare/cache path are still design-only.
 
 This repository, **tensor4all/t4a-cuda-kernels**, will provide the Rust crate `t4a-cuda-kernels` (import `t4a_cuda_kernels`) and reusable CUDA C++ sources. It is a separate repository from [t4a-gpu-backend](https://github.com/tensor4all/t4a-gpu-backend).
 

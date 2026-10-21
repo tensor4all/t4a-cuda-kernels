@@ -6,9 +6,10 @@ Runtime-independent CUDA kernels for tensor4all and external CUDA consumers.
 
 ## Status
 
-Three slices implemented and GPU-validated: C ABI revision 3, checked host
+Four slices implemented and GPU-validated: C ABI revision 4, checked host
 planning, the movement and elementary-arithmetic families, the diagonal,
-windowing and validation-status families, and single-axis reductions.
+windowing and validation-status families, single-axis reductions, and
+XLA-style gather with additive scatter.
 
 | Entry | Ported from | Dtypes |
 | --- | --- | --- |
@@ -22,17 +23,20 @@ windowing and validation-status families, and single-axis reductions.
 | `t4a_cuda_slice`, `_dynamic_slice`, `_pad` | `slice_kernel`, `dynamic_slice_kernel`, `pad_kernel` | all |
 | `t4a_cuda_init_validation`, `_validate_float_indices`, `_extract_invalid_float_index`, `_validate_real_cast`, `_extract_invalid_real_cast` | `init_float_index_validation_flag`, `validate_float_indices_kernel`, `extract_invalid_float_index_kernel`, `validate_real_cast`, `extract_invalid_real_cast` | F32/F64 |
 | `t4a_cuda_reduce`, `_reduce_partials` | `reduce_{sum,prod,sum_squares,max,min}*`, `_plane`, `_chunked` | sum/prod: F32/F64/I32/I64/C32/C64; sum-of-squares F32/F64; max/min F32/F64/I32/I64 |
+| `t4a_cuda_gather`, `_scatter_add` | `gather_kernel`, `scatter_{float,complex}_kernel` | all data dtypes with F32/F64/I32/I64 indices; scatter F32/F64/C32/C64 |
 
-Conversions, gather/scatter, linalg/RRQR helpers, the fused-expression emitter,
-NVRTC prepare/cache and complex division are not implemented yet.
+Conversions, linalg/RRQR helpers, the fused-expression emitter, NVRTC
+prepare/cache and complex division are not implemented yet.
 
 - [C kernel ABI](docs/abi/c-kernel-abi.md)
 - [Slice plan: ABI, movement, arithmetic](docs/design/slice-abi-movement-arithmetic.md)
 - [Slice plan: diagonal, windowing, validation](docs/design/slice-diagonal-window-validation.md)
 - [Slice plan: reductions](docs/design/slice-reductions.md)
+- [Slice plan: gather and scatter](docs/design/slice-gather-scatter.md)
 - [Local GPU evidence: movement and arithmetic](docs/worklogs/2026-10-20-abi-movement-arithmetic-slice.md)
 - [Local GPU evidence: diagonal, windowing, validation](docs/worklogs/2026-10-20-diagonal-window-validation-slice.md)
 - [Local GPU evidence: reductions](docs/worklogs/2026-10-20-reductions-slice.md)
+- [Local GPU evidence: gather and scatter](docs/worklogs/2026-10-20-gather-scatter-slice.md)
 - [Third-party notices](THIRD_PARTY_NOTICES.md)
 - [Migration design](docs/design/cubecl-kernel-port.md)
 - [CubeCL performance preservation contract](docs/design/cubecl-performance-parity.md)

@@ -16,7 +16,7 @@
 #endif
 
 #define T4A_CUDA_MAX_RANK 8
-#define T4A_CUDA_ABI_REVISION 3
+#define T4A_CUDA_ABI_REVISION 4
 
 static_assert(sizeof(int) == 4, "the C ABI requires 32-bit int");
 static_assert(sizeof(long long) == 8, "the C ABI requires 64-bit long long");
@@ -77,6 +77,34 @@ typedef struct {
   long long values[T4A_CUDA_MAX_RANK];
 } t4a_cuda_axis_values;
 
+// Dimension maps of the XLA-style gather (revision 4).
+typedef struct {
+  int operand_rank;
+  int out_rank;
+  int index_vector_dim;
+  int window_rank;
+  int start_map_len;
+  int reserved;
+  long long window_dims[T4A_CUDA_MAX_RANK];
+  long long offset_dims[T4A_CUDA_MAX_RANK];
+  long long start_index_map[T4A_CUDA_MAX_RANK];
+  long long slice_sizes[T4A_CUDA_MAX_RANK];
+} t4a_cuda_gather_plan;
+
+// Dimension maps of the additive scatter. The window shape comes from the
+// updates extents at `update_window_dims`, so the plan carries no slice sizes.
+typedef struct {
+  int operand_rank;
+  int updates_rank;
+  int index_vector_dim;
+  int window_rank;
+  int scatter_map_len;
+  int reserved;
+  long long window_dims[T4A_CUDA_MAX_RANK];
+  long long update_window_dims[T4A_CUDA_MAX_RANK];
+  long long scatter_dims[T4A_CUDA_MAX_RANK];
+} t4a_cuda_scatter_plan;
+
 // Algorithm configuration of the tiled transpose, selected at runtime.
 typedef struct {
   int tile;
@@ -93,6 +121,14 @@ static_assert(__builtin_offsetof(t4a_cuda_layout, strides) == 80, "t4a_cuda_layo
 static_assert(alignof(t4a_cuda_transpose_config) == 4, "t4a_cuda_transpose_config ABI alignment");
 static_assert(sizeof(t4a_cuda_transpose_config) == 16, "t4a_cuda_transpose_config ABI size");
 static_assert(sizeof(t4a_cuda_axis_values) == 72, "t4a_cuda_axis_values ABI size");
+static_assert(sizeof(t4a_cuda_gather_plan) == 280, "t4a_cuda_gather_plan ABI size");
+static_assert(alignof(t4a_cuda_gather_plan) == 8, "t4a_cuda_gather_plan ABI alignment");
+static_assert(__builtin_offsetof(t4a_cuda_gather_plan, window_dims) == 24,
+              "t4a_cuda_gather_plan.window_dims offset");
+static_assert(sizeof(t4a_cuda_scatter_plan) == 216, "t4a_cuda_scatter_plan ABI size");
+static_assert(alignof(t4a_cuda_scatter_plan) == 8, "t4a_cuda_scatter_plan ABI alignment");
+static_assert(__builtin_offsetof(t4a_cuda_scatter_plan, window_dims) == 24,
+              "t4a_cuda_scatter_plan.window_dims offset");
 static_assert(alignof(t4a_cuda_axis_values) == 8, "t4a_cuda_axis_values ABI alignment");
 static_assert(__builtin_offsetof(t4a_cuda_axis_values, values) == 8, "t4a_cuda_axis_values.values offset");
 static_assert(sizeof(t4a_cuda_c32) == 8, "t4a_cuda_c32 ABI size");

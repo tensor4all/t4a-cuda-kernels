@@ -292,7 +292,8 @@ fn entry_names_are_unique_and_exported_by_the_sources() {
         include_str!("../cuda/src/arithmetic.cu"),
         include_str!("../cuda/src/diagonal.cu"),
         include_str!("../cuda/src/window.cu"),
-        include_str!("../cuda/src/validation.cu")
+        include_str!("../cuda/src/validation.cu"),
+        include_str!("../cuda/src/reduce.cu")
     );
     for (index, entry) in Entry::ALL.iter().enumerate() {
         let name = entry.name();
@@ -609,4 +610,476 @@ fn c_axis_values_mirror_layout() {
     assert_eq!(&mirror.values[..4], &[1, -2, 3, 0]);
     assert_eq!(std::mem::size_of::<CAxisValues>(), 72);
     assert_eq!(CAxisValues::new(&[0; 9]), Err(Error::RankOutOfRange));
+}
+
+// --- revision 3: reductions -------------------------------------------------
+
+use t4a_cuda_kernels::{
+    plan_reduce, plan_reduce_partials, plan_reduction, split_policy, ReduceOp, ReduceStrategy,
+    ReductionPlan, Split, MAX_SPLITS,
+};
+
+fn reduced_layouts(extents: &[i64], axis: usize) -> (Layout, Layout) {
+    let input = Layout::compact(extents).unwrap();
+    let mut out_extents = extents.to_vec();
+    out_extents[axis] = 1;
+    (input, Layout::compact(&out_extents).unwrap())
+}
+
+#[test]
+fn split_policy_matches_the_baseline() {
+    // min_chunk = plane_width * 8 = 256 at width 32.
+    assert_eq!(split_policy(255, 32), Ok(None));
+    assert_eq!(split_policy(256, 32), Ok(None));
+    assert_eq!(
+        split_policy(512, 32),
+        Ok(Some(Split {
+            splits: 2,
+            chunk_len: 256
+        }))
+    );
+    assert_eq!(
+        split_policy(513, 32),
+        Ok(Some(Split {
+            splits: 2,
+            chunk_len: 256
+        }))
+    );
+    assert_eq!(
+        split_policy(1000, 32),
+        Ok(Some(Split {
+            splits: 3,
+            chunk_len: 333
+        }))
+    );
+    // 33 chunks: the combine pass is a plane reduction again.
+    assert_eq!(
+        split_policy(8448, 32),
+        Ok(Some(Split {
+            splits: 33,
+            chunk_len: 256
+        }))
+    );
+    // 1e7 elements: capped at 4096 chunks, floor chunk length.
+    let capped = split_policy(10_000_000, 32).unwrap().unwrap();
+    assert_eq!(capped.splits, MAX_SPLITS);
+    assert_eq!(capped.chunk_len, 10_000_000 / MAX_SPLITS);
+    // Narrower planes split later.
+    assert_eq!(
+        split_policy(256, 16),
+        Ok(Some(Split {
+            splits: 2,
+            chunk_len: 128
+        }))
+    );
+    assert_eq!(
+        split_policy(255, 8),
+        Ok(Some(Split {
+            splits: 3,
+            chunk_len: 85
+        }))
+    );
+    assert_eq!(split_policy(0, 32), Ok(None));
+    assert_eq!(split_policy(512, 0), Err(Error::InvalidPlaneWidth));
+}
+
+#[test]
+fn strategy_boundary_is_the_plane_width() {
+    let (input, output) = reduced_layouts(&[32, 3], 0);
+    assert!(plan_reduce(
+        DType::F32,
+        ReduceOp::Sum,
+        ReduceStrategy::Unit,
+        &output,
+        3,
+        &input,
+        96,
+        0,
+        32
+    )
+    .is_ok());
+    // Exactly one plane is a valid plane reduction.
+    assert!(plan_reduce(
+        DType::F32,
+        ReduceOp::Sum,
+        ReduceStrategy::Plane,
+        &output,
+        3,
+        &input,
+        96,
+        0,
+        32
+    )
+    .is_ok());
+    // One element short of a plane cannot be a plane reduction.
+    let (short_input, short_output) = reduced_layouts(&[31, 3], 0);
+    assert_eq!(
+        plan_reduce(
+            DType::F32,
+            ReduceOp::Sum,
+            ReduceStrategy::Plane,
+            &short_output,
+            3,
+            &short_input,
+            93,
+            0,
+            32
+        ),
+        Err(Error::StrategyMismatch)
+    );
+    let (input, output) = reduced_layouts(&[33, 3], 0);
+    assert_eq!(
+        plan_reduce(
+            DType::F32,
+            ReduceOp::Sum,
+            ReduceStrategy::Unit,
+            &output,
+            3,
+            &input,
+            99,
+            0,
+            32
+        ),
+        Err(Error::StrategyMismatch)
+    );
+    assert!(plan_reduce(
+        DType::F32,
+        ReduceOp::Sum,
+        ReduceStrategy::Plane,
+        &output,
+        3,
+        &input,
+        99,
+        0,
+        32
+    )
+    .is_ok());
+    assert_eq!(
+        plan_reduce(
+            DType::F32,
+            ReduceOp::Sum,
+            ReduceStrategy::Plane,
+            &output,
+            3,
+            &input,
+            99,
+            0,
+            24
+        ),
+        Err(Error::InvalidPlaneWidth)
+    );
+}
+
+#[test]
+fn reduction_geometry_and_shapes() {
+    let (input, output) = reduced_layouts(&[4, 64, 2], 1);
+    // 4 * 2 = 8 outputs, axis 64 > 32: plane, one block per output.
+    let launch = plan_reduce(
+        DType::F32,
+        ReduceOp::Max,
+        ReduceStrategy::Plane,
+        &output,
+        8,
+        &input,
+        512,
+        1,
+        32,
+    )
+    .unwrap();
+    assert_eq!(launch.grid, [8, 1, 1]);
+    assert_eq!(launch.block, [32, 1, 1]);
+
+    // A short axis uses one thread per output.
+    let (input, output) = reduced_layouts(&[4, 4, 2], 1);
+    let launch = plan_reduce(
+        DType::F32,
+        ReduceOp::Sum,
+        ReduceStrategy::Unit,
+        &output,
+        8,
+        &input,
+        32,
+        1,
+        8,
+    )
+    .unwrap();
+    assert_eq!(launch.grid, [1, 1, 1]);
+
+    // Non-keepdims output, mismatched extents and a zero axis are rejected.
+    let (input, _output) = reduced_layouts(&[4, 64], 1);
+    let not_keepdims = Layout::compact(&[4]).unwrap();
+    assert_eq!(
+        plan_reduce(
+            DType::F32,
+            ReduceOp::Sum,
+            ReduceStrategy::Plane,
+            &not_keepdims,
+            4,
+            &input,
+            256,
+            1,
+            32
+        )
+        .map(|_| ()),
+        Err(Error::RankLength)
+    );
+    let (input, _output) = reduced_layouts(&[4, 64], 1);
+    let wrong = Layout::compact(&[5, 1]).unwrap();
+    assert_eq!(
+        plan_reduce(
+            DType::F32,
+            ReduceOp::Sum,
+            ReduceStrategy::Plane,
+            &wrong,
+            5,
+            &input,
+            256,
+            1,
+            32
+        ),
+        Err(Error::ShapeMismatch)
+    );
+    let (zero_axis_in, zero_axis_out) = reduced_layouts(&[4, 0], 1);
+    assert_eq!(
+        plan_reduce(
+            DType::F32,
+            ReduceOp::Sum,
+            ReduceStrategy::Unit,
+            &zero_axis_out,
+            4,
+            &zero_axis_in,
+            0,
+            1,
+            32
+        ),
+        Err(Error::NegativeCount)
+    );
+    // An empty output on another axis plans no launch.
+    let (input, output) = reduced_layouts(&[0, 64], 1);
+    let launch = plan_reduce(
+        DType::F32,
+        ReduceOp::Sum,
+        ReduceStrategy::Plane,
+        &output,
+        0,
+        &input,
+        0,
+        1,
+        32,
+    )
+    .unwrap();
+    assert!(launch.is_empty());
+}
+
+#[test]
+fn reduction_dtype_gates_follow_the_operation() {
+    let (input, output) = reduced_layouts(&[64, 2], 0);
+    assert_eq!(
+        plan_reduce(
+            DType::C64,
+            ReduceOp::Max,
+            ReduceStrategy::Plane,
+            &output,
+            2,
+            &input,
+            128,
+            0,
+            32
+        ),
+        Err(Error::UnsupportedDType)
+    );
+    assert_eq!(
+        plan_reduce(
+            DType::I32,
+            ReduceOp::SumSquares,
+            ReduceStrategy::Plane,
+            &output,
+            2,
+            &input,
+            128,
+            0,
+            32
+        ),
+        Err(Error::UnsupportedDType)
+    );
+    assert!(plan_reduce(
+        DType::C64,
+        ReduceOp::Prod,
+        ReduceStrategy::Plane,
+        &output,
+        2,
+        &input,
+        128,
+        0,
+        32
+    )
+    .is_ok());
+    assert_eq!(ReduceOp::SumSquares.combine(), ReduceOp::Sum);
+    assert_eq!(ReduceOp::Max.combine(), ReduceOp::Max);
+}
+
+#[test]
+fn reduction_plan_applies_the_auto_policy() {
+    // Short axis: one direct pass.
+    let (input, output) = reduced_layouts(&[64, 4], 0);
+    match plan_reduction(DType::F64, ReduceOp::Sum, &output, 4, &input, 256, 0, 32).unwrap() {
+        ReductionPlan::Direct { strategy, launch } => {
+            assert_eq!(strategy, ReduceStrategy::Plane);
+            assert_eq!(launch.grid, [4, 1, 1]);
+        }
+        other => panic!("expected a direct plan, got {other:?}"),
+    }
+
+    // 512-long axis: two partials chunks, then a direct combine (2 <= 32).
+    let (input, output) = reduced_layouts(&[512, 4], 0);
+    match plan_reduction(DType::F64, ReduceOp::Sum, &output, 4, &input, 2048, 0, 32).unwrap() {
+        ReductionPlan::Split {
+            split,
+            pass1,
+            combine_strategy,
+            combine_op,
+            pass2,
+            ..
+        } => {
+            assert_eq!(
+                split,
+                Split {
+                    splits: 2,
+                    chunk_len: 256
+                }
+            );
+            assert_eq!(pass1.grid, [8, 1, 1]);
+            assert_eq!(pass1.block, [32, 1, 1]);
+            assert_eq!(combine_strategy, ReduceStrategy::Unit);
+            assert_eq!(combine_op, ReduceOp::Sum);
+            assert_eq!(pass2.grid, [1, 1, 1]);
+        }
+        other => panic!("expected a split plan, got {other:?}"),
+    }
+
+    // 8448-long axis: 33 chunks, so the combine is a plane reduction, and
+    // sum-of-squares combines as a plain sum.
+    let (input, output) = reduced_layouts(&[8448, 2], 0);
+    match plan_reduction(
+        DType::F32,
+        ReduceOp::SumSquares,
+        &output,
+        2,
+        &input,
+        16896,
+        0,
+        32,
+    )
+    .unwrap()
+    {
+        ReductionPlan::Split {
+            split,
+            combine_strategy,
+            combine_op,
+            pass2,
+            ..
+        } => {
+            assert_eq!(split.splits, 33);
+            assert_eq!(combine_strategy, ReduceStrategy::Plane);
+            assert_eq!(combine_op, ReduceOp::Sum);
+            assert_eq!(pass2.grid, [2, 1, 1]);
+        }
+        other => panic!("expected a split plan, got {other:?}"),
+    }
+}
+
+#[test]
+fn partials_plans_enforce_the_floor_split() {
+    let (input, _) = reduced_layouts(&[512, 4], 0);
+    let partials = Layout::compact(&[2, 4]).unwrap();
+    let split = Split {
+        splits: 2,
+        chunk_len: 256,
+    };
+    let launch = plan_reduce_partials(
+        DType::F32,
+        ReduceOp::Sum,
+        &partials,
+        8,
+        &input,
+        2048,
+        0,
+        split,
+        32,
+    )
+    .unwrap();
+    assert_eq!(launch.grid, [8, 1, 1]);
+
+    // A chunk shorter than a plane, or not the floor split, is refused: a lane
+    // would seed outside its own slice.
+    let too_short = Split {
+        splits: 64,
+        chunk_len: 1,
+    };
+    assert_eq!(
+        plan_reduce_partials(
+            DType::F32,
+            ReduceOp::Sum,
+            &partials,
+            8,
+            &input,
+            2048,
+            0,
+            too_short,
+            32
+        ),
+        Err(Error::InvalidSplit)
+    );
+    let not_floor = Split {
+        splits: 2,
+        chunk_len: 200,
+    };
+    assert_eq!(
+        plan_reduce_partials(
+            DType::F32,
+            ReduceOp::Sum,
+            &partials,
+            8,
+            &input,
+            2048,
+            0,
+            not_floor,
+            32
+        ),
+        Err(Error::InvalidSplit)
+    );
+    let single = Split {
+        splits: 1,
+        chunk_len: 512,
+    };
+    assert_eq!(
+        plan_reduce_partials(
+            DType::F32,
+            ReduceOp::Sum,
+            &partials,
+            8,
+            &input,
+            2048,
+            0,
+            single,
+            32
+        ),
+        Err(Error::InvalidSplit)
+    );
+    // The partials axis extent must equal the split count.
+    let wrong = Layout::compact(&[3, 4]).unwrap();
+    assert_eq!(
+        plan_reduce_partials(
+            DType::F32,
+            ReduceOp::Sum,
+            &wrong,
+            12,
+            &input,
+            2048,
+            0,
+            split,
+            32
+        ),
+        Err(Error::ShapeMismatch)
+    );
 }

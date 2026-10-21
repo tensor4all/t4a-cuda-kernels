@@ -16,7 +16,7 @@
 #endif
 
 #define T4A_CUDA_MAX_RANK 8
-#define T4A_CUDA_ABI_REVISION 2
+#define T4A_CUDA_ABI_REVISION 3
 
 static_assert(sizeof(int) == 4, "the C ABI requires 32-bit int");
 static_assert(sizeof(long long) == 8, "the C ABI requires 64-bit long long");
@@ -54,6 +54,20 @@ typedef struct {
   long long extents[T4A_CUDA_MAX_RANK];
   long long strides[T4A_CUDA_MAX_RANK];
 } t4a_cuda_layout;
+
+// Reduction operation and strategy tags (revision 3).
+typedef enum {
+  T4A_CUDA_REDUCE_SUM = 0,
+  T4A_CUDA_REDUCE_PROD = 1,
+  T4A_CUDA_REDUCE_SUM_SQUARES = 2,
+  T4A_CUDA_REDUCE_MAX = 3,
+  T4A_CUDA_REDUCE_MIN = 4
+} t4a_cuda_reduce_op;
+
+typedef enum {
+  T4A_CUDA_REDUCE_UNIT = 0,
+  T4A_CUDA_REDUCE_PLANE = 1
+} t4a_cuda_reduce_strategy;
 
 // Per-axis runtime values of the windowing operations (slice starts and steps,
 // padding amounts). `rank` must equal the operation rank.
@@ -113,6 +127,61 @@ static_assert(alignof(t4a_cuda_c64) == 8, "t4a_cuda_c64 ABI alignment");
       break;                               \
     default:                               \
       break;                               \
+  }
+
+// Dtype subsets for the reduction entries.
+#define T4A_CUDA_NUMERIC_DTYPE_SWITCH(dtype, BODY) \
+  switch (dtype) {                                 \
+    case T4A_CUDA_F32:                             \
+      BODY(float);                                 \
+      break;                                       \
+    case T4A_CUDA_F64:                             \
+      BODY(double);                                \
+      break;                                       \
+    case T4A_CUDA_I32:                             \
+      BODY(int);                                   \
+      break;                                       \
+    case T4A_CUDA_I64:                             \
+      BODY(long long);                             \
+      break;                                       \
+    case T4A_CUDA_C32:                             \
+      BODY(t4a_cuda_c32);                          \
+      break;                                       \
+    case T4A_CUDA_C64:                             \
+      BODY(t4a_cuda_c64);                          \
+      break;                                       \
+    default:                                       \
+      break;                                       \
+  }
+
+#define T4A_CUDA_ORDERED_DTYPE_SWITCH(dtype, BODY) \
+  switch (dtype) {                                 \
+    case T4A_CUDA_F32:                             \
+      BODY(float);                                 \
+      break;                                       \
+    case T4A_CUDA_F64:                             \
+      BODY(double);                                \
+      break;                                       \
+    case T4A_CUDA_I32:                             \
+      BODY(int);                                   \
+      break;                                       \
+    case T4A_CUDA_I64:                             \
+      BODY(long long);                             \
+      break;                                       \
+    default:                                       \
+      break;                                       \
+  }
+
+#define T4A_CUDA_FLOAT_DTYPE_SWITCH(dtype, BODY) \
+  switch (dtype) {                               \
+    case T4A_CUDA_F32:                           \
+      BODY(float);                               \
+      break;                                     \
+    case T4A_CUDA_F64:                           \
+      BODY(double);                              \
+      break;                                     \
+    default:                                     \
+      break;                                     \
   }
 
 // Address of logical element `flat` in `layout`, or the address of the same
@@ -272,6 +341,132 @@ __device__ __forceinline__ bool t4a_cuda_is_finite(double value) {
 // facade, matching the 32-bit status word.
 __device__ __forceinline__ void t4a_cuda_note_invalid(unsigned int* flag, long long position) {
   atomicMin(flag, static_cast<unsigned int>(position));
+}
+
+// Warp-plane collectives. Offsets ascend (1, 2, 4, ... < plane_width) to keep the
+// baseline's combination order; `mask` names exactly the participating lanes.
+__device__ __forceinline__ unsigned int t4a_cuda_plane_mask(int plane_width) {
+  return plane_width >= 32 ? 0xFFFFFFFFu : ((1u << plane_width) - 1u);
+}
+
+__device__ __forceinline__ float t4a_cuda_shfl_xor(float value, int offset, unsigned int mask) {
+  return __shfl_xor_sync(mask, value, offset);
+}
+
+__device__ __forceinline__ double t4a_cuda_shfl_xor(double value, int offset, unsigned int mask) {
+  return __shfl_xor_sync(mask, value, offset);
+}
+
+__device__ __forceinline__ int t4a_cuda_shfl_xor(int value, int offset, unsigned int mask) {
+  return __shfl_xor_sync(mask, value, offset);
+}
+
+__device__ __forceinline__ long long t4a_cuda_shfl_xor(long long value, int offset,
+                                                      unsigned int mask) {
+  return __shfl_xor_sync(mask, value, offset);
+}
+
+__device__ __forceinline__ t4a_cuda_c32 t4a_cuda_shfl_xor(t4a_cuda_c32 value, int offset,
+                                                          unsigned int mask) {
+  t4a_cuda_c32 result = {__shfl_xor_sync(mask, value.re, offset),
+                         __shfl_xor_sync(mask, value.im, offset)};
+  return result;
+}
+
+__device__ __forceinline__ t4a_cuda_c64 t4a_cuda_shfl_xor(t4a_cuda_c64 value, int offset,
+                                                          unsigned int mask) {
+  t4a_cuda_c64 result = {__shfl_xor_sync(mask, value.re, offset),
+                         __shfl_xor_sync(mask, value.im, offset)};
+  return result;
+}
+
+// NaN-propagating extrema: a NaN operand wins, otherwise the ordered maximum.
+__device__ __forceinline__ float t4a_cuda_nan_max(float lhs, float rhs) {
+  if (lhs != lhs) {
+    return lhs;
+  }
+  if (rhs != rhs) {
+    return rhs;
+  }
+  return fmaxf(lhs, rhs);
+}
+
+__device__ __forceinline__ double t4a_cuda_nan_max(double lhs, double rhs) {
+  if (lhs != lhs) {
+    return lhs;
+  }
+  if (rhs != rhs) {
+    return rhs;
+  }
+  return fmax(lhs, rhs);
+}
+
+__device__ __forceinline__ float t4a_cuda_nan_min(float lhs, float rhs) {
+  if (lhs != lhs) {
+    return lhs;
+  }
+  if (rhs != rhs) {
+    return rhs;
+  }
+  return fminf(lhs, rhs);
+}
+
+__device__ __forceinline__ double t4a_cuda_nan_min(double lhs, double rhs) {
+  if (lhs != lhs) {
+    return lhs;
+  }
+  if (rhs != rhs) {
+    return rhs;
+  }
+  return fmin(lhs, rhs);
+}
+
+// Integer extrema: plain ordering.
+template <typename T>
+__device__ __forceinline__ T t4a_cuda_max(T lhs, T rhs) {
+  return lhs > rhs ? lhs : rhs;
+}
+
+template <>
+__device__ __forceinline__ float t4a_cuda_max<float>(float lhs, float rhs) {
+  return t4a_cuda_nan_max(lhs, rhs);
+}
+
+template <>
+__device__ __forceinline__ double t4a_cuda_max<double>(double lhs, double rhs) {
+  return t4a_cuda_nan_max(lhs, rhs);
+}
+
+template <typename T>
+__device__ __forceinline__ T t4a_cuda_min(T lhs, T rhs) {
+  return lhs < rhs ? lhs : rhs;
+}
+
+template <>
+__device__ __forceinline__ float t4a_cuda_min<float>(float lhs, float rhs) {
+  return t4a_cuda_nan_min(lhs, rhs);
+}
+
+template <>
+__device__ __forceinline__ double t4a_cuda_min<double>(double lhs, double rhs) {
+  return t4a_cuda_nan_min(lhs, rhs);
+}
+
+// Square through fma so the square rounds before any later addition and the
+// compiler cannot contract it into that addition.
+template <typename T>
+__device__ __forceinline__ T t4a_cuda_square(T value) {
+  return value * value;
+}
+
+template <>
+__device__ __forceinline__ float t4a_cuda_square<float>(float value) {
+  return __fmaf_rn(value, value, 0.0f);
+}
+
+template <>
+__device__ __forceinline__ double t4a_cuda_square<double>(double value) {
+  return __fma_rn(value, value, 0.0);
 }
 
 // Division is float-only in this ABI revision; complex division keeps the

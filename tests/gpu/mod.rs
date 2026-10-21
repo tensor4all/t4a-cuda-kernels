@@ -236,9 +236,15 @@ impl Slot {
     }
 }
 
-/// Launch and wait. A validated empty plan is skipped, matching the ABI
-/// contract, and counts as zero physical launches.
-pub fn launch(function: sys::CUfunction, plan: &Launch, stream: sys::CUstream, slots: &mut [Slot]) {
+/// Enqueue a launch without waiting, so a multi-pass operation can be submitted
+/// as one stream-ordered unit. A validated empty plan is skipped, matching the
+/// ABI contract, and counts as zero physical launches.
+pub fn launch_async(
+    function: sys::CUfunction,
+    plan: &Launch,
+    stream: sys::CUstream,
+    slots: &mut [Slot],
+) {
     if plan.is_empty() {
         return;
     }
@@ -260,5 +266,15 @@ pub fn launch(function: sys::CUfunction, plan: &Launch, stream: sys::CUstream, s
     }
     .expect("cuLaunchKernel");
     LAUNCHES.with(|count| count.set(count.get() + 1));
+}
+
+/// Launch and wait.
+pub fn launch(function: sys::CUfunction, plan: &Launch, stream: sys::CUstream, slots: &mut [Slot]) {
+    launch_async(function, plan, stream, slots);
+    pub_sync(stream);
+}
+
+/// Wait for the stream's submitted work.
+pub fn pub_sync(stream: sys::CUstream) {
     unsafe { drv::stream::synchronize(stream) }.expect("cuStreamSynchronize");
 }

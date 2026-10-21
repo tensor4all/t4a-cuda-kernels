@@ -23,7 +23,7 @@ use core::fmt;
 /// Maximum supported tensor rank. Deeper layouts need a later ABI revision.
 pub const MAX_RANK: usize = 8;
 /// Version of the C ABI described by this crate.
-pub const ABI_REVISION: u32 = 2;
+pub const ABI_REVISION: u32 = 3;
 /// Threads per block for the flat (element-wise) entries.
 pub const FLAT_BLOCK: u32 = 256;
 /// Largest block count for grid dimensions y and z.
@@ -142,6 +142,12 @@ pub enum Error {
     DomainTooLarge,
     /// A sampling stride below one.
     InvalidStride,
+    /// The reduction strategy does not fit the axis length.
+    StrategyMismatch,
+    /// Unsupported plane width.
+    InvalidPlaneWidth,
+    /// The split tuple is inconsistent with the reduction length.
+    InvalidSplit,
 }
 
 impl fmt::Display for Error {
@@ -167,6 +173,9 @@ impl fmt::Display for Error {
             Error::InvalidPadding => "interior padding must be non-negative",
             Error::DomainTooLarge => "validation domain exceeds the 32-bit status word",
             Error::InvalidStride => "sampling stride must be at least one",
+            Error::StrategyMismatch => "reduction strategy does not fit the axis length",
+            Error::InvalidPlaneWidth => "plane width must be 8, 16 or 32",
+            Error::InvalidSplit => "inconsistent split tuple",
         };
         f.write_str(text)
     }
@@ -420,10 +429,12 @@ pub enum Entry {
     ExtractInvalidFloatIndex,
     ValidateRealCast,
     ExtractInvalidRealCast,
+    Reduce,
+    ReducePartials,
 }
 
 impl Entry {
-    pub const ALL: [Entry; 23] = [
+    pub const ALL: [Entry; 25] = [
         Entry::FillZero,
         Entry::FillZeroView,
         Entry::CopyExact,
@@ -447,6 +458,8 @@ impl Entry {
         Entry::ExtractInvalidFloatIndex,
         Entry::ValidateRealCast,
         Entry::ExtractInvalidRealCast,
+        Entry::Reduce,
+        Entry::ReducePartials,
     ];
 
     /// Exported CUDA symbol; equal to the name documented in the ABI.
@@ -475,6 +488,8 @@ impl Entry {
             Entry::ExtractInvalidFloatIndex => "t4a_cuda_extract_invalid_float_index",
             Entry::ValidateRealCast => "t4a_cuda_validate_real_cast",
             Entry::ExtractInvalidRealCast => "t4a_cuda_extract_invalid_real_cast",
+            Entry::Reduce => "t4a_cuda_reduce",
+            Entry::ReducePartials => "t4a_cuda_reduce_partials",
         }
     }
 
@@ -489,6 +504,14 @@ impl Entry {
             | Entry::ValidateRealCast
             | Entry::ExtractInvalidRealCast => &[DType::F32, DType::F64],
             Entry::Add | Entry::Sub | Entry::Mul => &[
+                DType::F32,
+                DType::F64,
+                DType::I32,
+                DType::I64,
+                DType::C32,
+                DType::C64,
+            ],
+            Entry::Reduce | Entry::ReducePartials => &[
                 DType::F32,
                 DType::F64,
                 DType::I32,
@@ -529,8 +552,9 @@ impl Launch {
         shared_bytes: 0,
     };
 
+    /// No work: at least one grid dimension is zero, so the caller skips it.
     pub fn is_empty(&self) -> bool {
-        self.grid == [0, 0, 0]
+        self.grid.contains(&0)
     }
 }
 
@@ -684,6 +708,441 @@ pub fn plan_tiled_transpose(
         });
     }
     Ok(launch)
+}
+
+// Reduction planning below is translated from tenferro-rs at
+// 14bc1ab933e3c7a9c966e08355670331ab9d993c:
+// crates/tenferro-gpu/src/kernels/reduce/{routines,launch}.rs (split policy,
+// Auto strategy resolution, per-strategy launch settings) and
+// crates/tenferro-gpu/src/cubecl/mod.rs (partials shape and pass-2 wiring).
+// Those upstream files are adapted from CubeK Reduce
+// (https://github.com/tracel-ai/cubek, commit
+// 9cf90b797107d46829e1c9d9355ce801c3dd4a7d, crates/cubek-reduce/src/launch/
+// {base,strategy}.rs and routines/{unit,blueprint}.rs),
+// Copyright (c) 2022 Nathaniel Simard & CubeCL Framework Contributors,
+// MIT OR Apache-2.0. See THIRD_PARTY_NOTICES.md. Tenferro changes carried over:
+// single-axis keepdims output, the floor split and non-recursive combine.
+//
+/// Supported warp-plane widths. Every NVIDIA target has 32; 8 and 16 are
+/// accepted so the subwarp paths stay covered and testable.
+pub const PLANE_WIDTHS: [u32; 3] = [8, 16, 32];
+/// Baseline floor-split constant: each chunk keeps at least `plane_width * 8`
+/// elements, so every lane always seeds from inside its own chunk.
+pub const MIN_CHUNK_PLANES: i64 = 8;
+/// Baseline cap on the number of split chunks.
+pub const MAX_SPLITS: i64 = 4096;
+
+/// Reduction operation carried by [`Entry::Reduce`] and
+/// [`Entry::ReducePartials`], as a runtime tag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReduceOp {
+    Sum,
+    Prod,
+    SumSquares,
+    Max,
+    Min,
+}
+
+impl ReduceOp {
+    pub const ALL: [ReduceOp; 5] = [
+        ReduceOp::Sum,
+        ReduceOp::Prod,
+        ReduceOp::SumSquares,
+        ReduceOp::Max,
+        ReduceOp::Min,
+    ];
+
+    pub const fn tag(self) -> i32 {
+        match self {
+            ReduceOp::Sum => 0,
+            ReduceOp::Prod => 1,
+            ReduceOp::SumSquares => 2,
+            ReduceOp::Max => 3,
+            ReduceOp::Min => 4,
+        }
+    }
+
+    /// Dtypes this operation serves, matching the baseline's per-op entry set.
+    pub const fn supported_dtypes(self) -> &'static [DType] {
+        match self {
+            ReduceOp::Sum | ReduceOp::Prod => &[
+                DType::F32,
+                DType::F64,
+                DType::I32,
+                DType::I64,
+                DType::C32,
+                DType::C64,
+            ],
+            ReduceOp::SumSquares => &[DType::F32, DType::F64],
+            ReduceOp::Max | ReduceOp::Min => &[DType::F32, DType::F64, DType::I32, DType::I64],
+        }
+    }
+
+    pub fn supports(self, dtype: DType) -> bool {
+        self.supported_dtypes().contains(&dtype)
+    }
+
+    /// Operation of the combine pass: sum-of-squares partials are already
+    /// squared, so their combine is a plain sum.
+    pub const fn combine(self) -> ReduceOp {
+        match self {
+            ReduceOp::SumSquares => ReduceOp::Sum,
+            other => other,
+        }
+    }
+}
+
+/// Reduction strategy carried as a runtime tag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReduceStrategy {
+    /// One thread per output; only allowed for a bounded axis.
+    Unit,
+    /// One block (plane) per output.
+    Plane,
+}
+
+impl ReduceStrategy {
+    pub const fn tag(self) -> i32 {
+        match self {
+            ReduceStrategy::Unit => 0,
+            ReduceStrategy::Plane => 1,
+        }
+    }
+}
+
+/// A floor split of the reduce axis.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Split {
+    pub splits: i64,
+    pub chunk_len: i64,
+}
+
+/// The baseline's split policy: `splits = clamp(len / (plane_width * 8), 1, 4096)`
+/// with a floor chunk length; `Ok(None)` means one pass.
+pub fn split_policy(reduce_len: i64, plane_width: u32) -> Result<Option<Split>, Error> {
+    check_plane_width(plane_width)?;
+    if reduce_len < 1 {
+        return Ok(None);
+    }
+    let min_chunk = i64::from(plane_width) * MIN_CHUNK_PLANES;
+    let splits = (reduce_len / min_chunk).clamp(1, MAX_SPLITS);
+    if splits <= 1 {
+        return Ok(None);
+    }
+    Ok(Some(Split {
+        splits,
+        chunk_len: reduce_len / splits,
+    }))
+}
+
+/// Resolved reduction: one direct pass, or a partials pass plus a combine pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReductionPlan {
+    Direct {
+        strategy: ReduceStrategy,
+        launch: Launch,
+    },
+    Split {
+        split: Split,
+        pass1: Launch,
+        combine_strategy: ReduceStrategy,
+        combine_op: ReduceOp,
+        pass2: Launch,
+    },
+}
+
+fn check_plane_width(plane_width: u32) -> Result<(), Error> {
+    if PLANE_WIDTHS.contains(&plane_width) {
+        Ok(())
+    } else {
+        Err(Error::InvalidPlaneWidth)
+    }
+}
+
+/// Validate the common reduction metadata and return `(reduce_len, output_len)`.
+fn reduce_problem(
+    dtype: DType,
+    op: ReduceOp,
+    out_layout: &Layout,
+    out_len: i64,
+    in_layout: &Layout,
+    in_len: i64,
+    axis: u32,
+) -> Result<(i64, i64), Error> {
+    if !op.supports(dtype) {
+        return Err(Error::UnsupportedDType);
+    }
+    require_axis(axis, in_layout.rank())?;
+    if out_layout.rank() != in_layout.rank() {
+        return Err(Error::RankLength);
+    }
+    for other in 0..in_layout.rank() {
+        if other == axis {
+            continue;
+        }
+        if out_layout.extents()[other as usize] != in_layout.extents()[other as usize] {
+            return Err(Error::ShapeMismatch);
+        }
+    }
+    // Keepdims: the reduced axis has extent one in the output.
+    if out_layout.extents()[axis as usize] != 1 {
+        return Err(Error::ShapeMismatch);
+    }
+    let reduce_len = in_layout.extents()[axis as usize];
+    if reduce_len < 1 {
+        return Err(Error::NegativeCount);
+    }
+    let output_len = out_layout.element_count()?;
+    require_destination(out_layout)?;
+    in_layout.check_span(in_len, dtype.size())?;
+    out_layout.check_span(out_len, dtype.size())?;
+    Ok((reduce_len, output_len))
+}
+
+fn strategy_for(reduce_len: i64, plane_width: u32) -> ReduceStrategy {
+    if reduce_len <= i64::from(plane_width) {
+        ReduceStrategy::Unit
+    } else {
+        ReduceStrategy::Plane
+    }
+}
+
+fn launch_for(
+    strategy: ReduceStrategy,
+    output_len: i64,
+    plane_width: u32,
+) -> Result<Launch, Error> {
+    let block = [plane_width, 1, 1];
+    match strategy {
+        ReduceStrategy::Unit => {
+            let blocks = u64::try_from(output_len)
+                .map_err(|_| Error::NegativeCount)?
+                .div_ceil(u64::from(plane_width));
+            let blocks = u32::try_from(blocks).map_err(|_| Error::LaunchLimit)?;
+            if blocks > MAX_GRID_X {
+                return Err(Error::LaunchLimit);
+            }
+            if output_len == 0 {
+                return Ok(Launch {
+                    grid: [0, 0, 0],
+                    block,
+                    shared_bytes: 0,
+                });
+            }
+            Ok(Launch {
+                grid: [blocks, 1, 1],
+                block,
+                shared_bytes: 0,
+            })
+        }
+        ReduceStrategy::Plane => {
+            let blocks = u32::try_from(output_len).map_err(|_| Error::LaunchLimit)?;
+            if blocks > MAX_GRID_X {
+                return Err(Error::LaunchLimit);
+            }
+            Ok(Launch {
+                grid: [blocks, 1, 1],
+                block,
+                shared_bytes: 0,
+            })
+        }
+    }
+}
+
+fn check_strategy(
+    strategy: ReduceStrategy,
+    reduce_len: i64,
+    plane_width: u32,
+) -> Result<(), Error> {
+    match strategy {
+        // A bounded serial walk: the axis must not exceed one plane.
+        ReduceStrategy::Unit if reduce_len > i64::from(plane_width) => Err(Error::StrategyMismatch),
+        // Every lane must seed from inside the axis and participate in the shuffles.
+        ReduceStrategy::Plane if reduce_len < i64::from(plane_width) => {
+            Err(Error::StrategyMismatch)
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Plan [`Entry::Reduce`] with an explicit strategy. This is also how the
+/// combine pass of a split reduction is planned (it is never split again).
+#[allow(clippy::too_many_arguments)]
+pub fn plan_reduce(
+    dtype: DType,
+    op: ReduceOp,
+    strategy: ReduceStrategy,
+    out_layout: &Layout,
+    out_len: i64,
+    in_layout: &Layout,
+    in_len: i64,
+    axis: u32,
+    plane_width: u32,
+) -> Result<Launch, Error> {
+    check_plane_width(plane_width)?;
+    let (reduce_len, output_len) =
+        reduce_problem(dtype, op, out_layout, out_len, in_layout, in_len, axis)?;
+    check_strategy(strategy, reduce_len, plane_width)?;
+    launch_for(strategy, output_len, plane_width)
+}
+
+/// Plan [`Entry::ReducePartials`], pass 1 of a split reduction.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_reduce_partials(
+    dtype: DType,
+    op: ReduceOp,
+    partials_layout: &Layout,
+    partials_len: i64,
+    in_layout: &Layout,
+    in_len: i64,
+    axis: u32,
+    split: Split,
+    plane_width: u32,
+) -> Result<Launch, Error> {
+    check_plane_width(plane_width)?;
+    if !op.supports(dtype) {
+        return Err(Error::UnsupportedDType);
+    }
+    require_axis(axis, in_layout.rank())?;
+    if partials_layout.rank() != in_layout.rank() {
+        return Err(Error::RankLength);
+    }
+    for other in 0..in_layout.rank() {
+        if other == axis {
+            continue;
+        }
+        if partials_layout.extents()[other as usize] != in_layout.extents()[other as usize] {
+            return Err(Error::ShapeMismatch);
+        }
+    }
+    let reduce_len = in_layout.extents()[axis as usize];
+    if reduce_len < 1 {
+        return Err(Error::NegativeCount);
+    }
+    // The floor split, with every chunk at least one plane wide: a shorter chunk
+    // would let a lane seed outside its own slice.
+    if split.splits < 2
+        || split.chunk_len < i64::from(plane_width)
+        || split.chunk_len != reduce_len / split.splits
+        || split.splits > MAX_SPLITS
+    {
+        return Err(Error::InvalidSplit);
+    }
+    if partials_layout.extents()[axis as usize] != split.splits {
+        return Err(Error::ShapeMismatch);
+    }
+    require_destination(partials_layout)?;
+    in_layout.check_span(in_len, dtype.size())?;
+    partials_layout.check_span(partials_len, dtype.size())?;
+
+    // The number of output elements is the product of the other extents.
+    let output_len =
+        partials_layout
+            .extents()
+            .iter()
+            .enumerate()
+            .try_fold(1i64, |acc, (dim, &extent)| {
+                if dim as u32 == axis {
+                    acc.checked_mul(1).ok_or(Error::Overflow)
+                } else {
+                    acc.checked_mul(extent).ok_or(Error::Overflow)
+                }
+            })?;
+    if output_len < 0 {
+        return Err(Error::NegativeCount);
+    }
+    let blocks = u64::try_from(output_len)
+        .map_err(|_| Error::NegativeCount)?
+        .checked_mul(u64::try_from(split.splits).map_err(|_| Error::Overflow)?)
+        .ok_or(Error::Overflow)?;
+    let blocks = u32::try_from(blocks).map_err(|_| Error::LaunchLimit)?;
+    if blocks > MAX_GRID_X {
+        return Err(Error::LaunchLimit);
+    }
+    Ok(Launch {
+        grid: [blocks, 1, 1],
+        block: [plane_width, 1, 1],
+        shared_bytes: 0,
+    })
+}
+
+/// Plan a whole reduction with the baseline's Auto policy: unit or plane for a
+/// short axis, otherwise pass 1 partials plus a non-recursive combine pass.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_reduction(
+    dtype: DType,
+    op: ReduceOp,
+    out_layout: &Layout,
+    out_len: i64,
+    in_layout: &Layout,
+    in_len: i64,
+    axis: u32,
+    plane_width: u32,
+) -> Result<ReductionPlan, Error> {
+    check_plane_width(plane_width)?;
+    let (reduce_len, _) = reduce_problem(dtype, op, out_layout, out_len, in_layout, in_len, axis)?;
+    let strategy = strategy_for(reduce_len, plane_width);
+    match split_policy(reduce_len, plane_width)? {
+        None => Ok(ReductionPlan::Direct {
+            strategy,
+            launch: plan_reduce(
+                dtype,
+                op,
+                strategy,
+                out_layout,
+                out_len,
+                in_layout,
+                in_len,
+                axis,
+                plane_width,
+            )?,
+        }),
+        Some(split) => {
+            let partials_layout = partials_layout_for(in_layout, axis, split.splits)?;
+            let partials_len = partials_layout.element_count()?;
+            let pass1 = plan_reduce_partials(
+                dtype,
+                op,
+                &partials_layout,
+                partials_len,
+                in_layout,
+                in_len,
+                axis,
+                split,
+                plane_width,
+            )?;
+            let combine_op = op.combine();
+            // The partials axis is `splits` long; the combine pass is never
+            // split again.
+            let combine_strategy = strategy_for(split.splits, plane_width);
+            let pass2 = plan_reduce(
+                dtype,
+                combine_op,
+                combine_strategy,
+                out_layout,
+                out_len,
+                &partials_layout,
+                partials_len,
+                axis,
+                plane_width,
+            )?;
+            Ok(ReductionPlan::Split {
+                split,
+                pass1,
+                combine_strategy,
+                combine_op,
+                pass2,
+            })
+        }
+    }
+}
+
+/// Partials layout a split needs: the input's non-axis extents with the reduce
+/// axis set to `splits`, in a fresh compact layout.
+fn partials_layout_for(in_layout: &Layout, axis: u32, splits: i64) -> Result<Layout, Error> {
+    let mut extents = in_layout.extents().to_vec();
+    extents[axis as usize] = splits;
+    Layout::compact(&extents)
 }
 
 /// Diagonal output axis for extraction: the caller derives it from the two input

@@ -36,3 +36,8 @@ required-features = ["gpu-tests"]
 name = "gpu_slice_b"
 path = "tests/gpu_slice_b.rs"
 required-features = ["gpu-tests"]
+
+[[test]]
+name = "gpu_reduce"
+path = "tests/gpu_reduce.rs"
+required-features = ["gpu-tests"]

@@ -1,4 +1,4 @@
-# C kernel ABI (revision 2)
+# C kernel ABI (revision 3)
 
 Every entry is an `extern "C" __global__` CUDA function in `cuda/src/`. A caller
 loads the compiled module into its own context, looks the symbol up by the name
@@ -18,9 +18,9 @@ nothing, so the same text compiles under NVCC and NVRTC.
 
 ## Revision
 
-`T4A_CUDA_ABI_REVISION == 2`. Revision 2 adds `t4a_cuda_axis_values` and the
-diagonal, windowing and validation-status entries below; nothing in revision 1
-changed. Any change to a struct layout, an entry signature, an element type
+`T4A_CUDA_ABI_REVISION == 3`. Revision 2 added `t4a_cuda_axis_values` and the
+diagonal, windowing and validation-status entries; revision 3 adds the reduction
+entries. Nothing in revisions 1-2 changed. Any change to a struct layout, an entry signature, an element type
 mapping or a launch contract requires a further revision bump and an entry in the
 compilation/artifact key of any consumer that caches compiled code.
 
@@ -199,8 +199,71 @@ Contract notes:
   range test (and, for float indices, the integrality test). Infinite bounds do
   not weaken this: an infinite value always reports invalid, as in the baseline.
 
+### Revision 3: reductions
+
+```c
+typedef enum {
+  T4A_CUDA_REDUCE_SUM = 0, T4A_CUDA_REDUCE_PROD = 1, T4A_CUDA_REDUCE_SUM_SQUARES = 2,
+  T4A_CUDA_REDUCE_MAX = 3, T4A_CUDA_REDUCE_MIN = 4,
+} t4a_cuda_reduce_op;
+
+typedef enum {
+  T4A_CUDA_REDUCE_UNIT = 0, T4A_CUDA_REDUCE_PLANE = 1,
+} t4a_cuda_reduce_strategy;
+```
+
+| Symbol | Arguments |
+| --- | --- |
+| `t4a_cuda_reduce` | `(void* out, const void* in, int dtype, int op, int strategy, t4a_cuda_layout out, t4a_cuda_layout in, int axis, long long output_len)` |
+| `t4a_cuda_reduce_partials` | `(void* partials, const void* in, int dtype, int op, t4a_cuda_layout partials, t4a_cuda_layout in, int axis, long long output_len, long long splits, long long chunk_len)` |
+
+Semantics:
+
+- **Keepdims.** `out` has the input rank with `out.extents[axis] == 1`;
+  `output_len == out.element_count()`. The reduced axis is one axis and
+  `in.extents[axis] >= 1`.
+- **First-element seeding.** The accumulator starts from the axis' first element
+  (or its square for `SUM_SQUARES`), so a length-1 axis returns `x` for sum, prod,
+  max and min (`SUM([-0.0])` keeps its sign, a complex `PROD` never acquires a NaN
+  component from a complex identity) and `x * x` for sum-of-squares.
+- **Unit** (one thread per output) is only valid when
+  `reduce_len <= plane_width`; **plane** (one block per output, lanes striding by
+  `plane_width`) only when `reduce_len >= plane_width`. The planner enforces both
+  bounds; a unit reduction never walks a long axis.
+- **Plane collectives** use `__shfl_xor_sync` with ascending offsets
+  `1, 2, 4, ... < plane_width` and a mask of exactly the participating lanes.
+  The block is exactly `plane_width` (8, 16 or 32), every lane participates, and
+  lane 0 writes.
+- **Split pass 1** runs one block per `(output, split)` with
+  `cube = output_index * splits + split`, reduces the half-open axis range
+  `[split*chunk_len, end)` with `end = axis_len` for the last split and
+  `start + chunk_len` otherwise, and writes one partial at reduce-axis
+  coordinate `split`. The partials layout keeps the output's non-axis extents and
+  sets the axis extent to `splits`; its strides are the caller's own. A chunk
+  must hold at least one plane (`chunk_len >= plane_width`) and must be the floor
+  split (`chunk_len == reduce_len / splits`), so every lane seeds inside its own
+  slice; the last chunk absorbs `reduce_len % splits`.
+- **Pass 2** is `t4a_cuda_reduce` over the partials, with `SUM` when pass 1 was
+  `SUM_SQUARES` and the same op otherwise, and is never split again.
+- **Arithmetic.** Integer `SUM`/`PROD` wrap. `SUM_SQUARES` squares each element
+  through `fma(v, v, 0)` so the square rounds before the addition and cannot be
+  contracted into it. Complex `SUM`/`PROD` use the revision-1 element-wise
+  complex forms.
+- **NaN.** Float `MAX`/`MIN` propagate NaN (a NaN operand wins) both inside a
+  lane and across the plane, so a NaN anywhere in the axis yields NaN. The NaN
+  payload is not part of the contract; only "is NaN" is.
+- **Launch geometry.** Unit: `grid = ceil(output_len/plane_width)`. Plane:
+  `grid = output_len`. Pass 1: `grid = output_len * splits`, `block =
+  plane_width`. No shared memory is used.
+
+Supported dtypes: `SUM`/`PROD` F32/F64/I32/I64/C32/C64, `SUM_SQUARES`
+F32/F64, `MAX`/`MIN` F32/F64/I32/I64.
+
 ## Overlap and aliasing
 
+- Reduction destinations (output and partials) must be injective and disjoint
+  from the source of their own pass. Partials are pass 2's source, so they must
+  be disjoint from the original input and from the final output.
 - Movement destinations must be injective and must not overlap their source.
   `t4a_cuda_fill_zero_view` is included: two threads storing to one address is a
   data race even when both store zero.
@@ -218,6 +281,7 @@ proof, as it already is in the consumer planners.
 | Entry | Grid | Block | Shared |
 | --- | --- | --- | --- |
 | flat entries | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |
+| reductions | see the revision-3 section | `(plane_width, 1, 1)` | 0 |
 | one-thread entries (`init_validation`, `extract_invalid_*`) | `(1, 1, 1)` | `(1, 1, 1)` | 0 |
 | `validate_real_cast` | `(ceil(len/stride/256), 1, 1)` | `(256, 1, 1)` | 0 |
 | `t4a_cuda_tiled_transpose` | `(ceil(M/tile), ceil(N/tile), batches)` | `(tile/vector_width, block_rows, 1)` | `tile*(tile+padding)*element_size` |

@@ -259,6 +259,12 @@ impl Slot {
     pub fn ptr(value: &Buf) -> Slot {
         Slot::store(&value.ptr)
     }
+
+    /// Device pointer advanced by `bytes`, for subspan alignment tests.
+    pub fn ptr_offset(value: &Buf, bytes: usize) -> Slot {
+        assert!(bytes < value.bytes);
+        Slot::store(&(value.ptr + bytes as u64))
+    }
 }
 
 /// Enqueue a launch without waiting, so a multi-pass operation can be submitted

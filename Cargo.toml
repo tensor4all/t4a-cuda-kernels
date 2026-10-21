@@ -46,3 +46,8 @@ required-features = ["gpu-tests"]
 name = "gpu_gather_scatter"
 path = "tests/gpu_gather_scatter.rs"
 required-features = ["gpu-tests"]
+
+[[test]]
+name = "gpu_convert"
+path = "tests/gpu_convert.rs"
+required-features = ["gpu-tests"]

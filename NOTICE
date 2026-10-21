@@ -9,6 +9,9 @@ CUDA kernels written in CubeCL in the tenferro-rs project, at commit
   crates/tenferro-gpu/src/kernels/structural.rs
   crates/tenferro-gpu/src/kernels/elementwise.rs
   crates/tenferro-gpu/src/kernels/helpers.rs
+  crates/tenferro-gpu/src/kernels/diagonal.rs
+  crates/tenferro-gpu/src/kernels/indexing.rs
+  crates/tenferro-gpu/src/cubecl/mod.rs     (host-side shape derivation)
 
 Copyright (c) 2026 Hiroshi Shinaoka and tenferro-rs contributors
 Licensed under the MIT license or the Apache License, Version 2.0.

@@ -1,16 +1,20 @@
 //! GPU test harness: nvcc-compiled cubins, the raw CUDA driver API and
 //! by-value argument marshalling. Deliberately independent of
 //! `t4a-cuda-runtime`.
+//!
+//! Both GPU test binaries include this module and use different subsets.
+#![allow(dead_code)]
 
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::ffi::{c_void, CString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use cudarc::driver::result as drv;
 use cudarc::driver::sys;
-use t4a_cuda_kernels::{CLayout, CTransposeConfig, Launch};
+use t4a_cuda_kernels::{CAxisValues, CLayout, CTransposeConfig, Launch};
 
 thread_local! {
     static LAUNCHES: Cell<usize> = const { Cell::new(0) };
@@ -26,15 +30,14 @@ fn repo_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
 }
 
-fn cubin(source: &str) -> &'static Path {
-    static MOVEMENT: OnceLock<PathBuf> = OnceLock::new();
-    static ARITHMETIC: OnceLock<PathBuf> = OnceLock::new();
-    let slot = match source {
-        "movement" => &MOVEMENT,
-        "arithmetic" => &ARITHMETIC,
-        other => panic!("unknown kernel source {other}"),
-    };
-    slot.get_or_init(|| {
+fn cubin(source: &str) -> PathBuf {
+    static CUBINS: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
+    let cache = CUBINS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().unwrap();
+    if let Some(path) = cache.get(source) {
+        return path.clone();
+    }
+    let path = {
         let arch = std::env::var("T4A_CUDA_ARCH").unwrap_or_else(|_| "sm_80".to_string());
         let out = std::env::temp_dir().join(format!(
             "t4a-cuda-kernels-{}-{source}.cubin",
@@ -53,7 +56,9 @@ fn cubin(source: &str) -> &'static Path {
             .expect("nvcc not found: the GPU tests need the CUDA toolkit");
         assert!(status.success(), "nvcc failed for cuda/src/{source}.cu");
         out
-    })
+    };
+    cache.insert(source.to_string(), path.clone());
+    path
 }
 
 /// One CUDA context, stream and loaded module, owned by the test.
@@ -216,6 +221,14 @@ impl Slot {
 
     pub fn config(value: &CTransposeConfig) -> Slot {
         Slot::store(value)
+    }
+
+    pub fn axis_values(value: &CAxisValues) -> Slot {
+        Slot::store(value)
+    }
+
+    pub fn f64(value: f64) -> Slot {
+        Slot::store(&value)
     }
 
     pub fn ptr(value: &Buf) -> Slot {

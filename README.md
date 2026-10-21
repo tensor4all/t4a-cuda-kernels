@@ -6,8 +6,9 @@ Runtime-independent CUDA kernels for tensor4all and external CUDA consumers.
 
 ## Status
 
-First slice implemented and GPU-validated: C ABI revision 1, checked host
-planning, and the movement and elementary-arithmetic kernel families.
+Two slices implemented and GPU-validated: C ABI revision 2, checked host
+planning, the movement and elementary-arithmetic families, and the diagonal,
+windowing and validation-status families.
 
 | Entry | Ported from | Dtypes |
 | --- | --- | --- |
@@ -16,14 +17,20 @@ planning, and the movement and elementary-arithmetic kernel families.
 | `t4a_cuda_materialize_strided`, `_contiguous_to_view`, `_strided_to_strided` | `materialize_strided_kernel`, `contiguous_to_view_kernel`, `strided_to_strided_kernel` | all |
 | `t4a_cuda_tiled_transpose` | `tiled_transpose_kernel` | all |
 | `t4a_cuda_add`, `_sub`, `_mul`, `_div` | `add_*`, `sub_*`, `mul_*`, `div_float` | F32/F64/I32/I64/C32/C64; div F32/F64 |
+| `t4a_cuda_extract_diagonal`, `_embed_diagonal_copy` | `extract_diagonal_kernel`, `embed_diagonal_copy_kernel` | all |
+| `t4a_cuda_tril`, `_triu` | `tril_kernel`, `triu_kernel` | all |
+| `t4a_cuda_slice`, `_dynamic_slice`, `_pad` | `slice_kernel`, `dynamic_slice_kernel`, `pad_kernel` | all |
+| `t4a_cuda_init_validation`, `_validate_float_indices`, `_extract_invalid_float_index`, `_validate_real_cast`, `_extract_invalid_real_cast` | `init_float_index_validation_flag`, `validate_float_indices_kernel`, `extract_invalid_float_index_kernel`, `validate_real_cast`, `extract_invalid_real_cast` | F32/F64 |
 
-Reductions, conversions, indexing/scatter, diagonal, linalg/RRQR helpers, the
+Reductions, conversions, gather/scatter, linalg/RRQR helpers, the
 fused-expression emitter, NVRTC prepare/cache and complex division are not
 implemented yet.
 
 - [C kernel ABI](docs/abi/c-kernel-abi.md)
-- [Slice plan](docs/design/slice-abi-movement-arithmetic.md)
-- [Local GPU evidence](docs/worklogs/2026-10-20-abi-movement-arithmetic-slice.md)
+- [Slice plan: ABI, movement, arithmetic](docs/design/slice-abi-movement-arithmetic.md)
+- [Slice plan: diagonal, windowing, validation](docs/design/slice-diagonal-window-validation.md)
+- [Local GPU evidence: movement and arithmetic](docs/worklogs/2026-10-20-abi-movement-arithmetic-slice.md)
+- [Local GPU evidence: diagonal, windowing, validation](docs/worklogs/2026-10-20-diagonal-window-validation-slice.md)
 - [Migration design](docs/design/cubecl-kernel-port.md)
 - [CubeCL performance preservation contract](docs/design/cubecl-performance-parity.md)
 - [Pinned source/symbol inventory](docs/kernel-inventory.md)

@@ -1,4 +1,4 @@
-# C kernel ABI (revision 1)
+# C kernel ABI (revision 2)
 
 Every entry is an `extern "C" __global__` CUDA function in `cuda/src/`. A caller
 loads the compiled module into its own context, looks the symbol up by the name
@@ -18,9 +18,11 @@ nothing, so the same text compiles under NVCC and NVRTC.
 
 ## Revision
 
-`T4A_CUDA_ABI_REVISION == 1`. Any change to a struct layout, an entry signature,
-an element type mapping or a launch contract requires a revision bump and an
-entry in the compilation/artifact key of any consumer that caches compiled code.
+`T4A_CUDA_ABI_REVISION == 2`. Revision 2 adds `t4a_cuda_axis_values` and the
+diagonal, windowing and validation-status entries below; nothing in revision 1
+changed. Any change to a struct layout, an entry signature, an element type
+mapping or a launch contract requires a further revision bump and an entry in the
+compilation/artifact key of any consumer that caches compiled code.
 
 ## Types
 
@@ -28,6 +30,7 @@ entry in the compilation/artifact key of any consumer that caches compiled code.
 | --- | --- | --- | --- |
 | `t4a_cuda_layout` | 144 | 8 | by-value launch argument |
 | `t4a_cuda_transpose_config` | 16 | 4 | by-value launch argument |
+| `t4a_cuda_axis_values` | 72 | 8 | per-axis runtime values (revision 2) |
 | `t4a_cuda_c32` | 8 | 4 | interleaved `re, im`; matches `num_complex::Complex32`, not `float2` (align 8) |
 | `t4a_cuda_c64` | 16 | 8 | interleaved `re, im`; matches `num_complex::Complex64`, not `double2` (align 16) |
 
@@ -46,6 +49,12 @@ typedef struct {
   int padding;                /* 0 | 1 */
   int vector_width;           /* 1 | 2 | 4, tile % vector_width == 0 */
 } t4a_cuda_transpose_config;
+
+typedef struct {              /* offsets: rank 0, reserved 4, values 8 */
+  int rank;                   /* must equal the operation rank */
+  int reserved;               /* must be 0 */
+  long long values[8];
+} t4a_cuda_axis_values;
 ```
 
 `t4a_cuda_kernels::CLayout` / `CTransposeConfig` are the `#[repr(C)]` Rust
@@ -123,6 +132,73 @@ transposed read and write patterns.
 - Division is float-only; complex division must port the scaled Baudin–Smith
   form and is not part of revision 1.
 
+### Revision 2: diagonal, windowing and validation entries
+
+| Symbol | Arguments | Semantics |
+| --- | --- | --- |
+| `t4a_cuda_extract_diagonal` | `(void* out, const void* in, int dtype, t4a_cuda_layout out, t4a_cuda_layout in, int axis_a, int axis_b, long long len)` | gather the diagonal over `axis_a`/`axis_b` |
+| `t4a_cuda_embed_diagonal_copy` | `(void* out, const void* in, int dtype, t4a_cuda_layout out, t4a_cuda_layout in, int axis_a, int axis_b, long long len)` | write `in` onto the diagonal of a pre-zeroed `out` |
+| `t4a_cuda_tril` / `t4a_cuda_triu` | `(void* out, const void* in, int dtype, long long k, long long rows, long long cols, long long len)` | triangle mask on axes 0/1, batched over higher axes |
+| `t4a_cuda_slice` | `(void* out, const void* in, int dtype, t4a_cuda_layout out, t4a_cuda_layout in, t4a_cuda_axis_values starts, t4a_cuda_axis_values steps, long long len)` | static starts and steps |
+| `t4a_cuda_dynamic_slice` | `(void* out, const void* in, const void* starts, int dtype, int index_dtype, t4a_cuda_layout out, t4a_cuda_layout in, long long len)` | device-resident starts, window = output extents |
+| `t4a_cuda_pad` | `(void* out, const void* in, int dtype, t4a_cuda_layout out, t4a_cuda_layout in, t4a_cuda_axis_values edge_low, t4a_cuda_axis_values edge_high, t4a_cuda_axis_values interior, long long len)` | zero-padded copy; `edge_high` only defines the output extent |
+| `t4a_cuda_init_validation` | `(unsigned int* flag, void* value, int dtype)` | `flag = UINT32_MAX`, `value = 0`; one thread |
+| `t4a_cuda_validate_float_indices` | `(const void* indices, unsigned int* flag, int dtype, double max_exact_integer, long long len)` | NaN, Inf, non-integral and out-of-range positions; lowest wins |
+| `t4a_cuda_extract_invalid_float_index` | `(const void* indices, const unsigned int* flag, void* value, int dtype)` | copy the offending index value; one thread |
+| `t4a_cuda_validate_real_cast` | `(const void* input, unsigned int* flag, int dtype, double min, double max, long long stride, int max_inclusive, long long len)` | sample every `stride`-th element; NaN, Inf and range violations; the flag holds the **sampling position** (element index / stride) |
+| `t4a_cuda_extract_invalid_real_cast` | `(const void* input, const unsigned int* flag, void* value, int dtype, long long stride)` | copy the offending sampled value; one thread |
+
+Contract notes:
+
+- **Compactness.** The baseline stores at the flat position while decoding
+  coordinates from a layout, so it requires compact operands there. In revision 2
+  `out` is compact for extract-diagonal, tril/triu, slice, dynamic-slice and pad;
+  `in` is compact for embed-diagonal and tril/triu. The strided operand keeps
+  signed strides.
+- **Diagonal extraction corrects a baseline defect.** The baseline consumes the
+  diagonal output coordinate where a remaining non-diagonal coordinate is
+  required: it never skips the diagonal output axis while walking the other
+  output coordinates, so any rank >= 3 layout with at least two remaining output
+  axes reads the wrong input coordinate (input `[2,3,4]` with axes `(0,2)` and
+  output coordinate `(0,1)` reads input `(0,0,0)` instead of `(0,1,0)`). This ABI
+  implements the intended map; the diagonal output position is
+  `axis_a - (axis_b < axis_a)` and is derived, not passed.
+- **Embedding** uses `axis_a` in the input rank and `axis_b` as an insertion
+  position in `[0, in.rank]`, so `axis_a == axis_b` is valid. Only diagonal
+  positions are written: the caller must zero-fill `out` first, and the two
+  launches are ordered on the caller's stream.
+- **tril/triu** accept any rank >= 2: `rows` and `cols` are the extents of axes
+  0 and 1, and `len` is a whole number of `rows * cols` matrices. The whole
+  output is written. Comparisons use `col - row` so that extreme `k` values
+  (`i64::MIN`, `i64::MAX`) are well defined instead of overflowing.
+- **slice** requires `0 <= starts[a] <= in.extents[a]`, `steps[a] >= 1`, and
+  `out.extents[a] <= ceil((in.extents[a] - starts[a]) / steps[a])`. The output
+  extent is the slice length, which lets a caller stop before the input edge (the
+  baseline expresses the same thing with an explicit `limit`).
+- **dynamic_slice** requires `out.extents[a] <= in.extents[a]` and a
+  device-resident starts vector of `in.rank` values. Starts must already be
+  validated (integral and representable), matching the baseline, which runs the
+  validator first; clamping is `start <= 0 -> 0`, else
+  `min(trunc(start), extent - window)`.
+- **pad** requires `interior >= 0` and
+  `out.extents[a] == edge_low[a] + edge_high[a] + (in.extents[a] == 0 ? 0 :
+  (in.extents[a]-1)*(interior[a]+1) + 1)`. Negative edge lows keep the baseline's
+  unsigned-magnitude treatment; positions outside the input write zero.
+- **Validation flags** are one 4-byte, 4-byte-aligned `uint32_t` word holding the
+  lowest invalid position, initialized to `UINT32_MAX`. The value slot is
+  `element_size` bytes with the dtype's alignment. Both must be distinct
+  allocations, must not overlap the validated input, and are written only by
+  `init_validation` / the validation entry; the caller orders
+  initialize -> validate -> extract on one stream and decides when to read the
+  value back with its own synchronization. The flag holds a *sample or element
+  position*, so the domain must satisfy `samples <= UINT32_MAX`: for
+  `validate_float_indices` the element count, and for `validate_real_cast` the
+  sample count `ceil(len / stride)`; the planner rejects larger domains. The
+  extracted value is the offending source value, not its position.
+- **Validation predicates** reject NaN and +/-Infinity explicitly, then apply the
+  range test (and, for float indices, the integrality test). Infinite bounds do
+  not weaken this: an infinite value always reports invalid, as in the baseline.
+
 ## Overlap and aliasing
 
 - Movement destinations must be injective and must not overlap their source.
@@ -142,6 +218,8 @@ proof, as it already is in the consumer planners.
 | Entry | Grid | Block | Shared |
 | --- | --- | --- | --- |
 | flat entries | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |
+| one-thread entries (`init_validation`, `extract_invalid_*`) | `(1, 1, 1)` | `(1, 1, 1)` | 0 |
+| `validate_real_cast` | `(ceil(len/stride/256), 1, 1)` | `(256, 1, 1)` | 0 |
 | `t4a_cuda_tiled_transpose` | `(ceil(M/tile), ceil(N/tile), batches)` | `(tile/vector_width, block_rows, 1)` | `tile*(tile+padding)*element_size` |
 
 `grid.x <= 2^31-1` and `grid.y, grid.z <= 65535`, each checked by the facade.

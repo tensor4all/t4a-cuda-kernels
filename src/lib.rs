@@ -8,6 +8,13 @@
 //!
 //! The kernel sources live in `cuda/`; [`Entry`] names every entry point and
 //! its supported dtypes, and the ABI is documented in `docs/abi/c-kernel-abi.md`.
+//!
+//! The host-side shape derivation of the diagonal and pad entries is translated
+//! from tenferro-rs@14bc1ab933e3c7a9c966e08355670331ab9d993c
+//! `crates/tenferro-gpu/src/cubecl/mod.rs` (`extract_diagonal_shape` L5352,
+//! `embed_diagonal_shape` L5369, `pad_output_shape` L5504, `slice_output_shape`).
+//! Copyright (c) 2026 Hiroshi Shinaoka and tenferro-rs contributors;
+//! MIT OR Apache-2.0.
 
 #![forbid(unsafe_code)]
 
@@ -16,7 +23,7 @@ use core::fmt;
 /// Maximum supported tensor rank. Deeper layouts need a later ABI revision.
 pub const MAX_RANK: usize = 8;
 /// Version of the C ABI described by this crate.
-pub const ABI_REVISION: u32 = 1;
+pub const ABI_REVISION: u32 = 2;
 /// Threads per block for the flat (element-wise) entries.
 pub const FLAT_BLOCK: u32 = 256;
 /// Largest block count for grid dimensions y and z.
@@ -119,6 +126,22 @@ pub enum Error {
     LaunchLimit,
     /// Unsupported or inconsistent transpose configuration.
     InvalidTransposeConfig,
+    /// Axis index outside the operand rank.
+    InvalidAxis,
+    /// The same axis used for both sides of an axis pair.
+    DuplicateAxis,
+    /// An operand that the entry requires to be compact is not.
+    NotCompact,
+    /// Operand extents or ranks are inconsistent with the operation.
+    ShapeMismatch,
+    /// A slice step below one.
+    InvalidStep,
+    /// Negative interior padding.
+    InvalidPadding,
+    /// A validation domain above the 32-bit status word.
+    DomainTooLarge,
+    /// A sampling stride below one.
+    InvalidStride,
 }
 
 impl fmt::Display for Error {
@@ -136,6 +159,14 @@ impl fmt::Display for Error {
             Error::NotElementwise => "entry is not a flat element-wise entry",
             Error::LaunchLimit => "launch geometry exceeds the device limits",
             Error::InvalidTransposeConfig => "invalid or unsupported transpose configuration",
+            Error::InvalidAxis => "axis outside the operand rank",
+            Error::DuplicateAxis => "the same axis appears twice",
+            Error::NotCompact => "operand must be compact",
+            Error::ShapeMismatch => "operand extents do not match the operation",
+            Error::InvalidStep => "slice step must be at least one",
+            Error::InvalidPadding => "interior padding must be non-negative",
+            Error::DomainTooLarge => "validation domain exceeds the 32-bit status word",
+            Error::InvalidStride => "sampling stride must be at least one",
         };
         f.write_str(text)
     }
@@ -242,6 +273,24 @@ impl Layout {
             total = total.checked_add(step).ok_or(Error::Overflow)?;
         }
         Ok(total)
+    }
+
+    /// Whether the layout is the compact form of its extents with offset zero.
+    pub fn is_compact(&self) -> bool {
+        if self.offset != 0 {
+            return false;
+        }
+        let mut stride: i64 = 1;
+        for axis in 0..self.rank as usize {
+            if self.strides[axis] != stride {
+                return false;
+            }
+            match stride.checked_mul(self.extents[axis]) {
+                Some(next) => stride = next,
+                None => return false,
+            }
+        }
+        true
     }
 
     /// Necessary condition for an injective layout: no broadcast axis with more
@@ -359,10 +408,22 @@ pub enum Entry {
     Sub,
     Mul,
     Div,
+    ExtractDiagonal,
+    EmbedDiagonalCopy,
+    Tril,
+    Triu,
+    Slice,
+    DynamicSlice,
+    Pad,
+    InitValidation,
+    ValidateFloatIndices,
+    ExtractInvalidFloatIndex,
+    ValidateRealCast,
+    ExtractInvalidRealCast,
 }
 
 impl Entry {
-    pub const ALL: [Entry; 11] = [
+    pub const ALL: [Entry; 23] = [
         Entry::FillZero,
         Entry::FillZeroView,
         Entry::CopyExact,
@@ -374,6 +435,18 @@ impl Entry {
         Entry::Sub,
         Entry::Mul,
         Entry::Div,
+        Entry::ExtractDiagonal,
+        Entry::EmbedDiagonalCopy,
+        Entry::Tril,
+        Entry::Triu,
+        Entry::Slice,
+        Entry::DynamicSlice,
+        Entry::Pad,
+        Entry::InitValidation,
+        Entry::ValidateFloatIndices,
+        Entry::ExtractInvalidFloatIndex,
+        Entry::ValidateRealCast,
+        Entry::ExtractInvalidRealCast,
     ];
 
     /// Exported CUDA symbol; equal to the name documented in the ABI.
@@ -390,6 +463,18 @@ impl Entry {
             Entry::Sub => "t4a_cuda_sub",
             Entry::Mul => "t4a_cuda_mul",
             Entry::Div => "t4a_cuda_div",
+            Entry::ExtractDiagonal => "t4a_cuda_extract_diagonal",
+            Entry::EmbedDiagonalCopy => "t4a_cuda_embed_diagonal_copy",
+            Entry::Tril => "t4a_cuda_tril",
+            Entry::Triu => "t4a_cuda_triu",
+            Entry::Slice => "t4a_cuda_slice",
+            Entry::DynamicSlice => "t4a_cuda_dynamic_slice",
+            Entry::Pad => "t4a_cuda_pad",
+            Entry::InitValidation => "t4a_cuda_init_validation",
+            Entry::ValidateFloatIndices => "t4a_cuda_validate_float_indices",
+            Entry::ExtractInvalidFloatIndex => "t4a_cuda_extract_invalid_float_index",
+            Entry::ValidateRealCast => "t4a_cuda_validate_real_cast",
+            Entry::ExtractInvalidRealCast => "t4a_cuda_extract_invalid_real_cast",
         }
     }
 
@@ -397,7 +482,12 @@ impl Entry {
     /// baseline dispatch; division is float-only.
     pub const fn supported_dtypes(self) -> &'static [DType] {
         match self {
-            Entry::Div => &[DType::F32, DType::F64],
+            Entry::Div
+            | Entry::InitValidation
+            | Entry::ValidateFloatIndices
+            | Entry::ExtractInvalidFloatIndex
+            | Entry::ValidateRealCast
+            | Entry::ExtractInvalidRealCast => &[DType::F32, DType::F64],
             Entry::Add | Entry::Sub | Entry::Mul => &[
                 DType::F32,
                 DType::F64,
@@ -596,6 +686,349 @@ pub fn plan_tiled_transpose(
     Ok(launch)
 }
 
+/// Diagonal output axis for extraction: the caller derives it from the two input
+/// axes (`axis_a - (axis_b < axis_a)`), matching the baseline caller.
+fn diagonal_output_axis(axis_a: u32, axis_b: u32) -> u32 {
+    if axis_a < axis_b {
+        axis_a
+    } else {
+        axis_a - 1
+    }
+}
+
+/// Expected output extents of [`Entry::ExtractDiagonal`].
+fn extract_diagonal_extents(
+    in_layout: &Layout,
+    axis_a: u32,
+    axis_b: u32,
+) -> Result<Vec<i64>, Error> {
+    let mut extents: Vec<i64> = in_layout
+        .extents()
+        .iter()
+        .enumerate()
+        .filter(|(axis, _)| *axis as u32 != axis_b)
+        .map(|(_, &extent)| extent)
+        .collect();
+    let diagonal = in_layout.extents()[axis_a as usize].min(in_layout.extents()[axis_b as usize]);
+    let axis = diagonal_output_axis(axis_a, axis_b) as usize;
+    extents[axis] = diagonal;
+    Ok(extents)
+}
+
+/// Expected output extents of [`Entry::EmbedDiagonalCopy`].
+fn embed_diagonal_extents(in_layout: &Layout, axis_a: u32, axis_b: u32) -> Vec<i64> {
+    let mut extents = in_layout.extents().to_vec();
+    let diagonal = in_layout.extents()[axis_a as usize];
+    extents.insert(axis_b as usize, diagonal);
+    extents
+}
+
+fn require_compact(layout: &Layout) -> Result<(), Error> {
+    if layout.is_compact() {
+        Ok(())
+    } else {
+        Err(Error::NotCompact)
+    }
+}
+
+fn require_axis(axis: u32, rank: u32) -> Result<(), Error> {
+    if axis < rank {
+        Ok(())
+    } else {
+        Err(Error::InvalidAxis)
+    }
+}
+
+fn expected_out_extents(out_layout: &Layout, expected: &[i64]) -> Result<(), Error> {
+    if out_layout.extents() == expected {
+        Ok(())
+    } else {
+        Err(Error::ShapeMismatch)
+    }
+}
+
+/// Plan [`Entry::ExtractDiagonal`]. The output layout must be the compact
+/// `in` without `axis_b` and with the diagonal length at
+/// `axis_a - (axis_b < axis_a)`.
+pub fn plan_extract_diagonal(
+    dtype: DType,
+    in_layout: &Layout,
+    in_len: i64,
+    out_layout: &Layout,
+    out_len: i64,
+    axis_a: u32,
+    axis_b: u32,
+) -> Result<Launch, Error> {
+    check_dtype(Entry::ExtractDiagonal, dtype)?;
+    require_axis(axis_a, in_layout.rank())?;
+    require_axis(axis_b, in_layout.rank())?;
+    if axis_a == axis_b {
+        return Err(Error::DuplicateAxis);
+    }
+    let expected = extract_diagonal_extents(in_layout, axis_a, axis_b)?;
+    expected_out_extents(out_layout, &expected)?;
+    require_compact(out_layout)?;
+    let len = out_layout.element_count()?;
+    in_layout.check_span(in_len, dtype.size())?;
+    out_layout.check_span(out_len, dtype.size())?;
+    flat_launch(len)
+}
+
+/// Plan [`Entry::EmbedDiagonalCopy`]. The input must be compact and the output
+/// must be zero-filled before the launch, because only diagonal positions are
+/// written; `axis_b` is an insertion position in `[0, in.rank]`.
+pub fn plan_embed_diagonal_copy(
+    dtype: DType,
+    in_layout: &Layout,
+    in_len: i64,
+    out_layout: &Layout,
+    out_len: i64,
+    axis_a: u32,
+    axis_b: u32,
+) -> Result<Launch, Error> {
+    check_dtype(Entry::EmbedDiagonalCopy, dtype)?;
+    require_axis(axis_a, in_layout.rank())?;
+    if axis_b > in_layout.rank() {
+        return Err(Error::InvalidAxis);
+    }
+    require_compact(in_layout)?;
+    require_destination(out_layout)?;
+    let expected = embed_diagonal_extents(in_layout, axis_a, axis_b);
+    expected_out_extents(out_layout, &expected)?;
+    let len = in_layout.element_count()?;
+    in_layout.check_span(in_len, dtype.size())?;
+    out_layout.check_span(out_len, dtype.size())?;
+    flat_launch(len)
+}
+
+fn plan_triangular(
+    entry: Entry,
+    dtype: DType,
+    rows: i64,
+    cols: i64,
+    len: i64,
+) -> Result<Launch, Error> {
+    check_dtype(entry, dtype)?;
+    if rows < 0 || cols < 0 || len < 0 {
+        return Err(Error::NegativeCount);
+    }
+    let matrix = rows.checked_mul(cols).ok_or(Error::Overflow)?;
+    if matrix == 0 {
+        if len == 0 {
+            return Ok(Launch::EMPTY);
+        }
+        return Err(Error::ShapeMismatch);
+    }
+    // Higher axes batch the mask, so the length is a whole number of matrices.
+    if len % matrix != 0 {
+        return Err(Error::ShapeMismatch);
+    }
+    flat_launch(len)
+}
+
+/// Plan [`Entry::Tril`] over compact operands with `rows` and `cols` on axes 0
+/// and 1; any higher axis batches the mask.
+pub fn plan_tril(dtype: DType, rows: i64, cols: i64, len: i64) -> Result<Launch, Error> {
+    plan_triangular(Entry::Tril, dtype, rows, cols, len)
+}
+
+/// Plan [`Entry::Triu`]; see [`plan_tril`].
+pub fn plan_triu(dtype: DType, rows: i64, cols: i64, len: i64) -> Result<Launch, Error> {
+    plan_triangular(Entry::Triu, dtype, rows, cols, len)
+}
+
+/// Plan [`Entry::Slice`]. `steps[a] >= 1`, `0 <= starts[a] <= in.extents[a]`,
+/// and `out.extents[a]` is the slice length: at most the reachable count
+/// `(in - start).div_ceil(step)`. A shorter length is the caller's explicit
+/// slice limit, which the baseline expresses with its `limit` argument.
+pub fn plan_slice(
+    dtype: DType,
+    out_layout: &Layout,
+    out_len: i64,
+    in_layout: &Layout,
+    in_len: i64,
+    starts: &[i64],
+    steps: &[i64],
+) -> Result<Launch, Error> {
+    check_dtype(Entry::Slice, dtype)?;
+    require_compact(out_layout)?;
+    let rank = in_layout.rank() as usize;
+    if out_layout.rank() as usize != rank || starts.len() != rank || steps.len() != rank {
+        return Err(Error::RankLength);
+    }
+    for axis in 0..rank {
+        let extent = in_layout.extents()[axis];
+        let start = starts[axis];
+        let step = steps[axis];
+        if start < 0 || start > extent {
+            return Err(Error::OffsetOutOfSpan);
+        }
+        if step < 1 {
+            return Err(Error::InvalidStep);
+        }
+        let reachable = ceil_div(extent.checked_sub(start).ok_or(Error::Overflow)?, step);
+        // A shorter output is the caller's slice limit, not an error.
+        if out_layout.extents()[axis] > reachable {
+            return Err(Error::ShapeMismatch);
+        }
+    }
+    let len = out_layout.element_count()?;
+    in_layout.check_span(in_len, dtype.size())?;
+    out_layout.check_span(out_len, dtype.size())?;
+    flat_launch(len)
+}
+
+/// Plan [`Entry::DynamicSlice`]. `starts` is a device-resident vector of
+/// `starts_rank == in.rank` index values; the window sizes are the output
+/// extents, which must not exceed the input extents.
+pub fn plan_dynamic_slice(
+    dtype: DType,
+    index_dtype: DType,
+    out_layout: &Layout,
+    out_len: i64,
+    in_layout: &Layout,
+    in_len: i64,
+    starts_rank: u32,
+) -> Result<Launch, Error> {
+    check_dtype(Entry::DynamicSlice, dtype)?;
+    if !matches!(
+        index_dtype,
+        DType::F32 | DType::F64 | DType::I32 | DType::I64
+    ) {
+        return Err(Error::UnsupportedDType);
+    }
+    require_compact(out_layout)?;
+    let rank = in_layout.rank();
+    if out_layout.rank() != rank || starts_rank != rank {
+        return Err(Error::RankLength);
+    }
+    for axis in 0..rank as usize {
+        if out_layout.extents()[axis] > in_layout.extents()[axis] {
+            return Err(Error::ShapeMismatch);
+        }
+    }
+    let len = out_layout.element_count()?;
+    in_layout.check_span(in_len, dtype.size())?;
+    out_layout.check_span(out_len, dtype.size())?;
+    flat_launch(len)
+}
+
+/// Plan [`Entry::Pad`]. Interior padding must be non-negative and the output
+/// extents must equal the padded extents derived from the input.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_pad(
+    dtype: DType,
+    out_layout: &Layout,
+    out_len: i64,
+    in_layout: &Layout,
+    in_len: i64,
+    edge_low: &[i64],
+    edge_high: &[i64],
+    interior: &[i64],
+) -> Result<Launch, Error> {
+    check_dtype(Entry::Pad, dtype)?;
+    require_compact(out_layout)?;
+    let rank = in_layout.rank() as usize;
+    if out_layout.rank() as usize != rank
+        || edge_low.len() != rank
+        || edge_high.len() != rank
+        || interior.len() != rank
+    {
+        return Err(Error::RankLength);
+    }
+    for axis in 0..rank {
+        if interior[axis] < 0 {
+            return Err(Error::InvalidPadding);
+        }
+        let spacing = interior[axis].checked_add(1).ok_or(Error::Overflow)?;
+        let extent = in_layout.extents()[axis];
+        let base = if extent == 0 {
+            0
+        } else {
+            extent
+                .checked_sub(1)
+                .and_then(|value| value.checked_mul(spacing))
+                .and_then(|value| value.checked_add(1))
+                .ok_or(Error::Overflow)?
+        };
+        let expected = edge_low[axis]
+            .checked_add(edge_high[axis])
+            .and_then(|value| value.checked_add(base))
+            .ok_or(Error::Overflow)?;
+        if expected < 0 || out_layout.extents()[axis] != expected {
+            return Err(Error::ShapeMismatch);
+        }
+    }
+    let len = out_layout.element_count()?;
+    in_layout.check_span(in_len, dtype.size())?;
+    out_layout.check_span(out_len, dtype.size())?;
+    flat_launch(len)
+}
+
+/// One thread in one block, for the validation status entries.
+fn ceil_div(value: i64, divisor: i64) -> i64 {
+    // `value >= 0` and `divisor >= 1` at every call site.
+    value / divisor + i64::from(value % divisor != 0)
+}
+
+fn single_thread_launch() -> Launch {
+    Launch {
+        grid: [1, 1, 1],
+        block: [1, 1, 1],
+        shared_bytes: 0,
+    }
+}
+
+fn check_validation_domain(len: i64) -> Result<(), Error> {
+    if len < 0 {
+        return Err(Error::NegativeCount);
+    }
+    if len > i64::from(u32::MAX) {
+        return Err(Error::DomainTooLarge);
+    }
+    Ok(())
+}
+
+/// Plan [`Entry::InitValidation`]: one thread writes the flag and the value slot.
+pub fn plan_init_validation(dtype: DType) -> Result<Launch, Error> {
+    check_dtype(Entry::InitValidation, dtype)?;
+    Ok(single_thread_launch())
+}
+
+/// Plan [`Entry::ValidateFloatIndices`].
+pub fn plan_validate_float_indices(dtype: DType, len: i64) -> Result<Launch, Error> {
+    check_dtype(Entry::ValidateFloatIndices, dtype)?;
+    check_validation_domain(len)?;
+    flat_launch(len)
+}
+
+/// Plan [`Entry::ExtractInvalidFloatIndex`]: one thread reads the flag.
+pub fn plan_extract_invalid_float_index(dtype: DType) -> Result<Launch, Error> {
+    check_dtype(Entry::ExtractInvalidFloatIndex, dtype)?;
+    Ok(single_thread_launch())
+}
+
+/// Plan [`Entry::ValidateRealCast`] sampling every `stride`-th element of a
+/// `len`-element buffer. The status word holds a sampling position, so the cap
+/// applies to the sample count `ceil(len / stride)`, not to `len` itself.
+pub fn plan_validate_real_cast(dtype: DType, len: i64, stride: i64) -> Result<Launch, Error> {
+    check_dtype(Entry::ValidateRealCast, dtype)?;
+    if len < 0 {
+        return Err(Error::NegativeCount);
+    }
+    if stride < 1 {
+        return Err(Error::InvalidStride);
+    }
+    check_validation_domain(ceil_div(len, stride))?;
+    flat_launch(ceil_div(len, stride))
+}
+
+/// Plan [`Entry::ExtractInvalidRealCast`]: one thread reads the flag.
+pub fn plan_extract_invalid_real_cast(dtype: DType) -> Result<Launch, Error> {
+    check_dtype(Entry::ExtractInvalidRealCast, dtype)?;
+    Ok(single_thread_launch())
+}
+
 fn div_ceil_u32(extent: i64, tile: u32) -> Result<u32, Error> {
     let extent = u64::try_from(extent).map_err(|_| Error::NegativeCount)?;
     let blocks = extent.div_ceil(u64::from(tile));
@@ -682,4 +1115,36 @@ const _: () = {
     assert!(core::mem::size_of::<CTransposeConfig>() == 16);
     assert!(core::mem::offset_of!(CTransposeConfig, block_rows) == 4);
     assert!(core::mem::offset_of!(CTransposeConfig, vector_width) == 12);
+};
+
+/// C ABI mirror of the per-axis runtime values of the windowing entries.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CAxisValues {
+    pub rank: i32,
+    pub reserved: i32,
+    pub values: [i64; MAX_RANK],
+}
+
+impl CAxisValues {
+    /// Mirror a per-axis vector; the length becomes the rank.
+    pub fn new(values: &[i64]) -> Result<CAxisValues, Error> {
+        if values.len() > MAX_RANK {
+            return Err(Error::RankOutOfRange);
+        }
+        let mut mirror = CAxisValues {
+            rank: values.len() as i32,
+            reserved: 0,
+            values: [0; MAX_RANK],
+        };
+        mirror.values[..values.len()].copy_from_slice(values);
+        Ok(mirror)
+    }
+}
+
+const _: () = {
+    assert!(core::mem::size_of::<CAxisValues>() == 72);
+    assert!(core::mem::align_of::<CAxisValues>() == 8);
+    assert!(core::mem::offset_of!(CAxisValues, reserved) == 4);
+    assert!(core::mem::offset_of!(CAxisValues, values) == 8);
 };

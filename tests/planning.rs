@@ -8,6 +8,23 @@ use t4a_cuda_kernels::{
 };
 
 #[test]
+fn abi_revision_matches_the_c_header() {
+    let header = include_str!("../cuda/include/t4a/abi.cuh");
+    let declared = header
+        .lines()
+        .find(|line| line.starts_with("#define T4A_CUDA_ABI_REVISION "))
+        .expect("the header declares the ABI revision")
+        .rsplit(' ')
+        .next()
+        .expect("a numeric revision");
+    assert_eq!(
+        declared.trim().parse::<u32>().unwrap(),
+        ABI_REVISION,
+        "the C header and the Rust crate must declare the same revision"
+    );
+}
+
+#[test]
 fn abi_revision_is_documented() {
     let abi = include_str!("../docs/abi/c-kernel-abi.md");
     assert!(abi.contains(&format!("revision {ABI_REVISION}")) || abi.contains("Revision"));
@@ -294,7 +311,8 @@ fn entry_names_are_unique_and_exported_by_the_sources() {
         include_str!("../cuda/src/window.cu"),
         include_str!("../cuda/src/validation.cu"),
         include_str!("../cuda/src/reduce.cu"),
-        include_str!("../cuda/src/gather_scatter.cu")
+        include_str!("../cuda/src/gather_scatter.cu"),
+        include_str!("../cuda/src/convert.cu")
     );
     for (index, entry) in Entry::ALL.iter().enumerate() {
         let name = entry.name();
@@ -1438,4 +1456,41 @@ fn scatter_with_an_empty_destination_plans_nothing() {
     )
     .unwrap();
     assert!(launch.is_empty());
+}
+
+// --- revision 5: conversions ------------------------------------------------
+
+use t4a_cuda_kernels::plan_convert;
+
+#[test]
+fn convert_accepts_every_unequal_pair_and_rejects_identity() {
+    let mut accepted = 0;
+    for dst in DType::ALL {
+        for src in DType::ALL {
+            let plan = plan_convert(dst, src, 257);
+            if dst == src {
+                assert_eq!(plan, Err(Error::ShapeMismatch), "{dst:?} -> {src:?}");
+            } else {
+                let plan = plan.unwrap();
+                assert_eq!(plan.grid, [2, 1, 1]);
+                assert_eq!(plan.block, [256, 1, 1]);
+                accepted += 1;
+            }
+        }
+    }
+    assert_eq!(accepted, 42, "all unequal pairs of the seven dtypes");
+    assert_eq!(
+        plan_convert(DType::F32, DType::F64, -1),
+        Err(Error::NegativeCount)
+    );
+    assert_eq!(
+        plan_convert(DType::F32, DType::F64, 0).unwrap(),
+        Launch::EMPTY
+    );
+    let too_many = i64::from(i32::MAX) * i64::from(FLAT_BLOCK) + 1;
+    assert_eq!(
+        plan_convert(DType::F32, DType::F64, too_many),
+        Err(Error::LaunchLimit)
+    );
+    assert_eq!(Entry::Convert.supported_dtypes(), &DType::ALL);
 }

@@ -1,4 +1,4 @@
-# C kernel ABI (revision 4)
+# C kernel ABI (revision 5)
 
 Every entry is an `extern "C" __global__` CUDA function in `cuda/src/`. A caller
 loads the compiled module into its own context, looks the symbol up by the name
@@ -18,10 +18,10 @@ nothing, so the same text compiles under NVCC and NVRTC.
 
 ## Revision
 
-`T4A_CUDA_ABI_REVISION == 4`. Revision 2 added `t4a_cuda_axis_values` and the
+`T4A_CUDA_ABI_REVISION == 5`. Revision 2 added `t4a_cuda_axis_values` and the
 diagonal, windowing and validation-status entries; revision 3 added the reduction
-entries; revision 4 adds the gather and additive-scatter entries. Nothing in
-revisions 1-3 changed. Any change to a struct layout, an entry signature, an element type
+entries; revision 4 added gather and additive scatter; revision 5 adds the dtype
+conversion entry. Nothing in revisions 1-4 changed. Any change to a struct layout, an entry signature, an element type
 mapping or a launch contract requires a further revision bump and an entry in the
 compilation/artifact key of any consumer that caches compiled code.
 
@@ -338,6 +338,40 @@ void t4a_cuda_scatter_add(void* out, const void* indices, const void* updates,
 Supported dtypes: gather moves every data dtype with F32/F64/I32/I64 indices;
 additive scatter serves F32/F64/C32/C64 with the same index dtypes.
 
+### Revision 5: dtype conversions
+
+| Symbol | Arguments |
+| --- | --- |
+| `t4a_cuda_convert` | `(void* out, const void* in, int dst_dtype, int src_dtype, long long len)` |
+
+Flat (`block = (256,1,1)`, `grid = ceil(len/256)`), `len` logical elements,
+source capacity `len * src_size`, destination capacity `len * dst_size`. Every
+unequal pair of the seven dtypes is defined; an identity pair is not a
+conversion (use `t4a_cuda_copy_exact` for a same-dtype copy).
+
+- **Cast** follows the language cast `Out::cast_from(In)` lowers to: integer
+  narrowing keeps the low bits, integer widening sign-extends, floats round to
+  nearest-even, float→integer truncates toward zero, and Bool is a byte holding
+  0 or 1.
+- **Real→complex** writes `(cast(x), 0)`; **complex→real** writes `re`, never the
+  magnitude; **C32↔C64** casts both components.
+- **Bool destination** is a predicate: `x != 0` for numeric sources and
+  `re != 0 || im != 0` for complex sources, writing exactly `1u8` or `0u8`.
+  **Bool source** casts the 0/1 byte.
+- **Floating-component → signed-integer precondition.** C++ float→int casts are
+  undefined for NaN, infinity and out-of-range values, so the caller must run
+  `t4a_cuda_validate_real_cast` and see no invalid position before converting:
+
+  | Route | Validated buffer | Stride | Acceptance |
+  | --- | --- | --- | --- |
+  | F32/F64 → I32 | `len` | 1 | finite, `[-2^31, 2^31)` (F32 source) or `[-2^31, 2^31-1]` (F64 source) |
+  | F32/F64 → I64 | `len` | 1 | finite, `[-2^63, 2^63)` |
+  | C32/C64 → I32/I64 | `2 * len` | 2 | the same bounds on the real component; the imaginary slots are not read |
+
+  The kernels do not re-validate: the planner cannot inspect values.
+- **Aliasing**: source and destination byte spans must be disjoint, because a
+  conversion can change the element width.
+
 ## Overlap and aliasing
 
 - Gather writes only its destination: the destination must be disjoint from the
@@ -367,7 +401,7 @@ proof, as it already is in the consumer planners.
 | --- | --- | --- | --- |
 | flat entries | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |
 | reductions | see the revision-3 section | `(plane_width, 1, 1)` | 0 |
-| gather / scatter add | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |
+| gather / scatter add / convert | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |
 | one-thread entries (`init_validation`, `extract_invalid_*`) | `(1, 1, 1)` | `(1, 1, 1)` | 0 |
 | `validate_real_cast` | `(ceil(len/stride/256), 1, 1)` | `(256, 1, 1)` | 0 |
 | `t4a_cuda_tiled_transpose` | `(ceil(M/tile), ceil(N/tile), batches)` | `(tile/vector_width, block_rows, 1)` | `tile*(tile+padding)*element_size` |

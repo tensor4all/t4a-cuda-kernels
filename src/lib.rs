@@ -23,7 +23,7 @@ use core::fmt;
 /// Maximum supported tensor rank. Deeper layouts need a later ABI revision.
 pub const MAX_RANK: usize = 8;
 /// Version of the C ABI described by this crate.
-pub const ABI_REVISION: u32 = 4;
+pub const ABI_REVISION: u32 = 5;
 /// Threads per block for the flat (element-wise) entries.
 pub const FLAT_BLOCK: u32 = 256;
 /// Largest block count for grid dimensions y and z.
@@ -436,10 +436,11 @@ pub enum Entry {
     ReducePartials,
     Gather,
     ScatterAdd,
+    Convert,
 }
 
 impl Entry {
-    pub const ALL: [Entry; 27] = [
+    pub const ALL: [Entry; 28] = [
         Entry::FillZero,
         Entry::FillZeroView,
         Entry::CopyExact,
@@ -467,6 +468,7 @@ impl Entry {
         Entry::ReducePartials,
         Entry::Gather,
         Entry::ScatterAdd,
+        Entry::Convert,
     ];
 
     /// Exported CUDA symbol; equal to the name documented in the ABI.
@@ -499,6 +501,7 @@ impl Entry {
             Entry::ReducePartials => "t4a_cuda_reduce_partials",
             Entry::Gather => "t4a_cuda_gather",
             Entry::ScatterAdd => "t4a_cuda_scatter_add",
+            Entry::Convert => "t4a_cuda_convert",
         }
     }
 
@@ -733,6 +736,19 @@ pub fn plan_tiled_transpose(
 // MIT OR Apache-2.0. See THIRD_PARTY_NOTICES.md. Tenferro changes carried over:
 // single-axis keepdims output, the floor split and non-recursive combine.
 //
+/// Plan [`Entry::Convert`] over `len` contiguous elements.
+///
+/// Every unequal pair of the seven dtypes has a defined conversion; an identity
+/// pair is rejected because a same-dtype copy belongs to
+/// [`Entry::CopyExact`]. Floating-component to signed-integer routes require the
+/// revision-2 validator first; see `docs/abi/c-kernel-abi.md`.
+pub fn plan_convert(dst_dtype: DType, src_dtype: DType, len: i64) -> Result<Launch, Error> {
+    if dst_dtype == src_dtype {
+        return Err(Error::ShapeMismatch);
+    }
+    flat_launch(len)
+}
+
 /// XLA-style gather dimension maps. All vectors are validated by
 /// [`plan_gather`]; the entry takes them as a by-value POD.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -35,37 +35,6 @@
 
 namespace {
 
-// --- float math overloads ---------------------------------------------------
-
-__device__ __forceinline__ float t4a_float_exp(float x) { return expf(x); }
-__device__ __forceinline__ double t4a_float_exp(double x) { return exp(x); }
-__device__ __forceinline__ float t4a_float_log(float x) { return logf(x); }
-__device__ __forceinline__ double t4a_float_log(double x) { return log(x); }
-__device__ __forceinline__ float t4a_float_sin(float x) { return sinf(x); }
-__device__ __forceinline__ double t4a_float_sin(double x) { return sin(x); }
-__device__ __forceinline__ float t4a_float_cos(float x) { return cosf(x); }
-__device__ __forceinline__ double t4a_float_cos(double x) { return cos(x); }
-__device__ __forceinline__ float t4a_float_tanh(float x) { return tanhf(x); }
-__device__ __forceinline__ double t4a_float_tanh(double x) { return tanh(x); }
-__device__ __forceinline__ float t4a_float_sqrt(float x) { return sqrtf(x); }
-__device__ __forceinline__ double t4a_float_sqrt(double x) { return sqrt(x); }
-__device__ __forceinline__ float t4a_float_rsqrt(float x) { return rsqrtf(x); }
-__device__ __forceinline__ double t4a_float_rsqrt(double x) { return rsqrt(x); }
-__device__ __forceinline__ float t4a_float_expm1(float x) { return expm1f(x); }
-__device__ __forceinline__ double t4a_float_expm1(double x) { return expm1(x); }
-__device__ __forceinline__ float t4a_float_log1p(float x) { return log1pf(x); }
-__device__ __forceinline__ double t4a_float_log1p(double x) { return log1p(x); }
-__device__ __forceinline__ float t4a_float_erf(float x) { return erff(x); }
-__device__ __forceinline__ double t4a_float_erf(double x) { return erf(x); }
-__device__ __forceinline__ float t4a_float_fabs(float x) { return fabsf(x); }
-__device__ __forceinline__ double t4a_float_fabs(double x) { return fabs(x); }
-__device__ __forceinline__ float t4a_float_pow(float x, float y) { return powf(x, y); }
-__device__ __forceinline__ double t4a_float_pow(double x, double y) { return pow(x, y); }
-__device__ __forceinline__ float t4a_float_fmod(float x, float y) { return fmodf(x, y); }
-__device__ __forceinline__ double t4a_float_fmod(double x, double y) { return fmod(x, y); }
-__device__ __forceinline__ float t4a_float_hypot(float re, float im) { return hypotf(re, im); }
-__device__ __forceinline__ double t4a_float_hypot(double re, double im) { return hypot(re, im); }
-
 // --- unary ------------------------------------------------------------------
 
 template <typename F>
@@ -74,27 +43,27 @@ __device__ __forceinline__ F unary_float(int op, F x) {
     case T4A_CUDA_UNARY_NEG:
       return -x;
     case T4A_CUDA_UNARY_EXP:
-      return t4a_float_exp(x);
+      return t4a_cuda_exp(x);
     case T4A_CUDA_UNARY_LOG:
-      return t4a_float_log(x);
+      return t4a_cuda_log(x);
     case T4A_CUDA_UNARY_SIN:
-      return t4a_float_sin(x);
+      return t4a_cuda_sin(x);
     case T4A_CUDA_UNARY_COS:
-      return t4a_float_cos(x);
+      return t4a_cuda_cos(x);
     case T4A_CUDA_UNARY_TANH:
-      return t4a_float_tanh(x);
+      return t4a_cuda_tanh(x);
     case T4A_CUDA_UNARY_SQRT:
-      return t4a_float_sqrt(x);
+      return t4a_cuda_sqrt(x);
     case T4A_CUDA_UNARY_RSQRT:
-      return t4a_float_rsqrt(x);
+      return t4a_cuda_rsqrt(x);
     case T4A_CUDA_UNARY_EXPM1:
-      return t4a_float_expm1(x);
+      return t4a_cuda_expm1(x);
     case T4A_CUDA_UNARY_LOG1P:
-      return t4a_float_log1p(x);
+      return t4a_cuda_log1p(x);
     case T4A_CUDA_UNARY_ERF:
-      return t4a_float_erf(x);
+      return t4a_cuda_erf(x);
     case T4A_CUDA_UNARY_ABS:
-      return t4a_float_fabs(x);
+      return t4a_cuda_fabs(x);
     case T4A_CUDA_UNARY_SIGN:
       // INVARIANT: the baseline returns the literal +0 for either signed zero
       // (elementwise.rs:523), not the input, so this is not f32::signum.
@@ -141,7 +110,7 @@ __device__ __forceinline__ C unary_complex(int op, C value) {
       C zero = {F(0), F(0)};
       return zero;
     }
-    const F magnitude = t4a_float_hypot(value.re, value.im);
+    const F magnitude = t4a_cuda_abs_complex(value);
     C result = {value.re / magnitude, value.im / magnitude};
     return result;
   }
@@ -186,12 +155,12 @@ extern "C" __global__ void t4a_cuda_unary(void* out, const void* in, int dst_dty
   // ABS of a complex operand is the only unequal dtype pair (abs_complex32/64).
   if (dst_dtype == T4A_CUDA_F32 && src_dtype == T4A_CUDA_C32) {
     const t4a_cuda_c32 value = static_cast<const t4a_cuda_c32*>(in)[index];
-    static_cast<float*>(out)[index] = t4a_float_hypot(value.re, value.im);
+    static_cast<float*>(out)[index] = t4a_cuda_abs_complex(value);
     return;
   }
   if (dst_dtype == T4A_CUDA_F64 && src_dtype == T4A_CUDA_C64) {
     const t4a_cuda_c64 value = static_cast<const t4a_cuda_c64*>(in)[index];
-    static_cast<double*>(out)[index] = t4a_float_hypot(value.re, value.im);
+    static_cast<double*>(out)[index] = t4a_cuda_abs_complex(value);
     return;
   }
 }
@@ -220,10 +189,10 @@ __device__ __forceinline__ void binary_float_body(void* out, const void* lhs, co
       result = t4a_cuda_min<F>(l, r);
       break;
     case T4A_CUDA_BINARY_POW:
-      result = t4a_float_pow(l, r);
+      result = t4a_cuda_pow(l, r);
       break;
     case T4A_CUDA_BINARY_REM:
-      result = t4a_float_fmod(l, r);
+      result = t4a_cuda_fmod(l, r);
       break;
     case T4A_CUDA_BINARY_MUL:
       result = l * r;
@@ -494,16 +463,9 @@ __device__ __forceinline__ void clamp_body(void* out, const void* in, const void
   if (!t4a_cuda_tail_index(&index, len)) {
     return;
   }
-  const F value = static_cast<const F*>(in)[index];
-  const F low = static_cast<const F*>(lower)[index];
-  const F high = static_cast<const F*>(upper)[index];
-  F result = value;
-  if (value < low) {
-    result = low;
-  } else if (value > high) {
-    result = high;
-  }
-  static_cast<F*>(out)[index] = result;
+  static_cast<F*>(out)[index] = t4a_cuda_clamp(static_cast<const F*>(in)[index],
+                                               static_cast<const F*>(lower)[index],
+                                               static_cast<const F*>(upper)[index]);
 }
 
 }  // namespace

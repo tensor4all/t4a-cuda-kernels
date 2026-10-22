@@ -21,6 +21,7 @@ cudarc = { version = "=0.19.8", default-features = false, features = [
     "driver",
     "dynamic-loading",
     "cuda-12060",
+    "nvrtc",
 ], optional = true }
 
 [[test]]
@@ -65,4 +66,9 @@ required-features = ["gpu-tests"]
 [[test]]
 name = "gpu_rrqr"
 path = "tests/gpu_rrqr.rs"
+required-features = ["gpu-tests"]
+
+[[test]]
+name = "gpu_fusion"
+path = "tests/gpu_fusion.rs"
 required-features = ["gpu-tests"]

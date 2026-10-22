@@ -20,6 +20,14 @@
 
 use core::fmt;
 
+pub mod fusion;
+
+pub use fusion::{
+    artifact_key, emit_fusion, plan_fused, ArtifactKey, EmittedFusion, FusionInstruction,
+    FusionManifest, FusionOp, FusionOperand, FusionPlan, FUSION_ENTRY, MAX_FUSION_INSTRUCTIONS,
+    MAX_FUSION_PARAMETER_BYTES,
+};
+
 /// Maximum supported tensor rank. Deeper layouts need a later ABI revision.
 pub const MAX_RANK: usize = 8;
 /// Version of the C ABI described by this crate.
@@ -154,6 +162,16 @@ pub enum Error {
     IndexVectorMismatch,
     /// The operation tag is not defined for this dtype, operand side or length.
     UnsupportedOp,
+    /// A fusion plan with no inputs or no outputs.
+    FusionEmpty,
+    /// A fusion plan above `MAX_FUSION_INSTRUCTIONS`.
+    FusionTooLarge,
+    /// A fusion instruction whose operand count does not match its operation.
+    FusionArity,
+    /// A fusion operation outside the dtype's eligibility matrix.
+    FusionEligibility,
+    /// A fusion operand that names a missing input or a later instruction.
+    FusionOperand,
 }
 
 impl fmt::Display for Error {
@@ -184,6 +202,11 @@ impl fmt::Display for Error {
             Error::InvalidSplit => "inconsistent split tuple",
             Error::IndexVectorMismatch => "index vector size differs from the map length",
             Error::UnsupportedOp => "operation is not supported for this dtype or operand side",
+            Error::FusionEmpty => "fusion plan has no inputs or no outputs",
+            Error::FusionTooLarge => "fusion plan exceeds the instruction bound",
+            Error::FusionArity => "fusion instruction operand count does not match its op",
+            Error::FusionEligibility => "fusion op is not eligible for this dtype",
+            Error::FusionOperand => "fusion operand names a missing input or later value",
         };
         f.write_str(text)
     }

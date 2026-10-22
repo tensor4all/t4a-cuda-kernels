@@ -97,12 +97,37 @@ Keep default IEEE behavior. Do not obtain speedups by enabling broad fast math o
 
 ### Structural and numerical checks
 
-- [ ] Each compiled/template parameter has a classification; extents/strides and the other runtime values above never enter emitted constants or compilation keys.
-- [ ] At least four distinct layouts per fixed specialization vary extents, strides, offsets and relevant starts/padding/window/concatenation values, with reference-checked outputs and unchanged compilation counts.
-- [ ] Instrument the actual NVRTC boundary. The current [kernel_specialization_tests](https://github.com/tensor4all/tenferro-rs/blob/14bc1ab933e3c7a9c966e08355670331ab9d993c/crates/tenferro-gpu/src/cubecl/tests/kernel_specialization_tests.rs#L1) retain numerical checks but their compile-count assertion is disabled because the [observation hook is missing](https://github.com/tensor4all/tenferro-rs/blob/14bc1ab933e3c7a9c966e08355670331ab9d993c/docs/design/cubecl-011-compile-count-hook.md). Porting those test names does not prove reuse.
+- [x] Each compiled/template parameter has a classification; extents/strides and the other runtime values above never enter emitted constants or compilation keys.
+  *Fused path:* `docs/design/slice-fusion-emitter.md` §4 states the classification (dtype,
+  op set, arity and output count are compile-time; the element count, every address and
+  the launch geometry are runtime), and `tests/fusion.rs` pins it — the emitted source
+  takes only the buffer pointers and `len`, and the artifact key carries no runtime
+  value. The per-operation entries have no compilation step at all.
+- [x] At least four distinct layouts per fixed specialization vary extents, strides, offsets and relevant starts/padding/window/concatenation values, with reference-checked outputs and unchanged compilation counts.
+  *Extents:* `tests/gpu_fusion.rs` runs one artifact over four extents with reference-checked
+  outputs and exactly one NVRTC compile. *Strides/offsets:* the fused path accepts identity
+  views only, by design (the pinned baseline does the same); the strided layouts are covered
+  by the per-operation GPU suites, which have no compilation step to count.
+- [x] Instrument the actual NVRTC boundary. The current [kernel_specialization_tests](https://github.com/tensor4all/tenferro-rs/blob/14bc1ab933e3c7a9c966e08355670331ab9d993c/crates/tenferro-gpu/src/cubecl/tests/kernel_specialization_tests.rs#L1) retain numerical checks but their compile-count assertion is disabled because the [observation hook is missing](https://github.com/tensor4all/tenferro-rs/blob/14bc1ab933e3c7a9c966e08355670331ab9d993c/docs/design/cubecl-011-compile-count-hook.md). Porting those test names does not prove reuse.
 - [ ] Cover legitimate rank/attribute/algorithm/target changes separately, plus header/options invalidation and runtime-private cache clear/eviction. Measure compile attempts/successes, module loads and cache hits/misses independently.
-- [ ] Preserve compact/view reads, no preliminary full overwrite fill, tiled transpose, parallel scatter and split reductions through structural checks and real CUDA numerical tests.
-- [ ] Test multi-output fusion, correct dependency/completion coverage, and one physical launch for the eligible dense chain. Warm run has zero code-generation/NVRTC invocations.
+  *Partially covered, and recorded as such:* a changed op set, `fmad` option and
+  architecture each produce a new key and one more observed NVRTC compile; the compiler
+  identity is part of the key but is verified only in the host key test, not by an
+  observed compilation with a different compiler; two runtimes keep private module
+  caches and handles, and dropping one leaves the other's binding usable. *Not covered:*
+  header invalidation as a separate event (the header text is inside the source, so it
+  cannot change independently), a cache clear that retains live bindings, a
+  bounded-capacity eviction policy, per-cache hit/miss/success counters, and disk
+  persistence.
+- [x] Preserve compact/view reads, no preliminary full overwrite fill, tiled transpose, parallel scatter and split reductions through structural checks and real CUDA numerical tests.
+  *Evidence:* `tests/gpu_kernels.rs` (compact and view movement, tiled transpose),
+  `tests/gpu_gather_scatter.rs` (parallel scatter), `tests/gpu_reduce.rs` (split
+  reductions) and `docs/worklogs/2026-10-21-*-slice.md`.
+- [x] Test multi-output fusion, correct dependency/completion coverage, and one physical launch for the eligible dense chain. Warm run has zero code-generation/NVRTC invocations.
+  *Evidence:* `tests/gpu_fusion.rs` — two live-outs from one launch, one physical launch per
+  warm run (harness counter), zero NVRTC calls after the first compile, and the instruction
+  list is the dependency order by construction (a value operand must name an earlier
+  instruction).
 
 ### Initial paired benchmark matrix
 

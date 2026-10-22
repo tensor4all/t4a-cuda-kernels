@@ -1,4 +1,4 @@
-# C kernel ABI (revision 7)
+# C kernel ABI (revision 8)
 
 Every entry is an `extern "C" __global__` CUDA function in `cuda/src/`. A caller
 loads the compiled module into its own context, looks the symbol up by the name
@@ -18,11 +18,12 @@ nothing, so the same text compiles under NVCC and NVRTC.
 
 ## Revision
 
-`T4A_CUDA_ABI_REVISION == 7`. Revision 2 added `t4a_cuda_axis_values` and the
+`T4A_CUDA_ABI_REVISION == 8`. Revision 2 added `t4a_cuda_axis_values` and the
 diagonal, windowing and validation-status entries; revision 3 added the reduction
 entries; revision 4 added gather and additive scatter; revision 5 added the dtype
 conversion entry; revision 6 added the elementwise, comparison and
-strided-combination entries; revision 7 adds the linalg auxiliary entries. Nothing in revisions 1-5 changed. Any change to a struct layout, an entry signature, an element type
+strided-combination entries; revision 7 added the linalg auxiliary entries;
+revision 8 adds the rank-revealing QR primitives. Nothing in revisions 1-5 changed. Any change to a struct layout, an entry signature, an element type
 mapping or a launch contract requires a further revision bump and an entry in the
 compilation/artifact key of any consumer that caches compiled code.
 
@@ -559,6 +560,90 @@ Dtype coverage: `fill_one` serves all seven; `matrix_adjoint`,
 `upper_trapezoidal_violation` accepts all seven input dtypes and always writes
 `i32`.
 
+### Revision 8: rank-revealing QR primitives
+
+| Symbol | Arguments |
+| --- | --- |
+| `t4a_cuda_initialize_permutation` | `(void* permutation, long long n, long long len)` |
+| `t4a_cuda_column_norms` | `(const void* work, void* norms, int dtype, t4a_cuda_layout work_layout, t4a_cuda_layout norms_layout, long long step)` |
+| `t4a_cuda_select_pivot` | `(const void* norms, const void* permutation, void* pivots, void* status, int dtype, t4a_cuda_layout norms_layout, t4a_cuda_layout permutation_layout, long long step)` |
+| `t4a_cuda_swap_columns` | `(void* work, void* permutation, const void* pivots, int dtype, t4a_cuda_layout work_layout, t4a_cuda_layout permutation_layout, long long step)` |
+| `t4a_cuda_reflector` | `(void* work, void* coeff, int dtype, t4a_cuda_layout work_layout, t4a_cuda_layout coeff_layout, long long step)` |
+| `t4a_cuda_apply_reflector` | `(const void* packed, void* target, const void* coeff, int dtype, t4a_cuda_layout packed_layout, t4a_cuda_layout target_layout, t4a_cuda_layout coeff_layout, long long step, long long first_column, long long column_count)` |
+| `t4a_cuda_extract_r` | `(const void* work, void* r, int dtype, t4a_cuda_layout work_layout, t4a_cuda_layout r_layout)` |
+| `t4a_cuda_prefix_rank` | `(const void* r, void* rank, void* status, int dtype, t4a_cuda_layout r_layout, double rtol, double atol)` |
+
+`initialize_permutation` and `extract_r` are flat (`block = (256,1,1)`); the five
+reduction entries use **one 32-lane plane per block** (`block = (32,1,1)`, full warp
+mask) with `grid = tasks`, matching the baseline's `PLANE_DIM` and the caller's
+`RRQR_PLANE_WIDTH = 32`. A lane that owns no rows contributes its zero accumulator
+and never returns before a shuffle.
+
+Operand conventions:
+
+- `norms`, `permutation` and `coeff` are the one-axis-shorter operands: axis 0 is
+  the column or step index and axes 1.. are the matrix's axes 2.. (the same rule as
+  revision 7's `phase`).
+- `pivots`, `rank` and `status` are flat `int64_t` arrays with one entry per batch.
+  An RRQR pivot is a **0-based column index**; revision 7's LU pivots are 1-based
+  `int32_t` values and the two are never mixed.
+- `status[batch]` is a caller-zeroed `int64_t` word: `1` means "a participating
+  magnitude, or the norm computed from it, was nonfinite". The kernel writes it and
+  never reads it.
+
+Per entry:
+
+- `initialize_permutation`: `permutation[pos] = pos % n` for `pos < len`; no dtype
+  tag, the payload is `int64_t`. `n >= 1` is required (the planner rejects `n <= 0`,
+  because a zero modulus is a division by zero at the raw entry).
+- `column_norms`: one task per `(batch, column)` with
+  `column = step + task % (n - step)` and `batch = task / (n - step)`. The norm is the
+  2-norm of `work(step..m-1, column, batch)` in the baseline's max-scale form: a
+  plane maximum of the magnitudes, then the plane sum of the scaled squares, then
+  `scale * sqrt(sum)`. `norms(column, batch)` receives that norm, or `-1` when a
+  magnitude or the computed norm is nonfinite — the negative sentinel
+  `select_pivot` reads.
+- `select_pivot`: one task per batch. Lanes scan columns `step, step+32, ...`; a
+  negative norm raises the invalid flag; the plane picks the largest norm, ties
+  broken by the smaller original column `permutation(column, batch)`, then by the
+  smaller column index. Lane 0 writes `pivots[batch]` (the chosen column, or `step`
+  when nothing was chosen) and sets `status[batch] = 1` when a norm was invalid.
+- `swap_columns`: flat over `rows * batches`; thread `pos` handles
+  `(row = pos % rows, batch = pos / rows)` and, when `pivots[batch] != step`,
+  exchanges `work(row, step, batch)` with `work(row, pivots[batch], batch)`; the
+  `row == 0` thread also exchanges the two permutation entries. Pivot values must
+  lie in `[0, n)`; the kernels do not clamp them.
+- `reflector`: one task per batch, column `step`. `x0 = work(step, step, batch)` is
+  read by lane 0 and broadcast before any store; `norm == 0` writes
+  `coeff(step, batch) = 0` and nothing else. Otherwise the phase is `-1` for a
+  negative real `x0` and `+1` for a non-negative or NaN one, or `x0 / |x0|` for
+  complex (`1` for a zero `x0`); `alpha = -phase * norm`, `denominator = x0 - alpha`,
+  every row below `step` is divided by `denominator` (the ordinary component form for
+  complex), and lane 0 writes `work(step, step, batch) = alpha` and
+  `coeff(step, batch) = 1 + |x0| / norm`.
+- `apply_reflector`: one task per `(batch, column)` with
+  `column = first_column + task % column_count`. The plane builds
+  `vector(row) = row == step ? 1 : packed(row, step, batch)` over `row` in
+  `step..m-1`, computes `dot = sum conj(vector) * target(row, column, batch)`
+  (recombined as `re + i*im` for complex, times `coeff(step, batch)`), and subtracts
+  `vector * dot` from the same positions. `target` must be a destination, disjoint
+  from `packed` and `coeff`. The baseline's one-element imaginary-unit buffer is not
+  part of this ABI: the complex dot is rebuilt from the two plane sums directly, so
+  no unit value is needed.
+- `extract_r`: flat over `r`'s logical count;
+  `r(row, column, batch) = row <= column ? work(row, column, batch) : 0`.
+- `prefix_rank`: one task per batch. `leading = |r(0,0,batch)|`,
+  `threshold = atol > rtol*leading ? atol : rtol*leading` (the baseline comparison, so
+  a NaN tolerance propagates the same way); lane `l` walks the diagonal
+  `d = l, l+32, ... < k`, raises the invalid flag for a nonfinite magnitude, and
+  records the smallest `d` with `!(value > threshold)`; lane 0 writes
+  `rank[batch] = d` (or `k`) and sets `status[batch] = 1` on a nonfinite value.
+
+Dtype coverage: `column_norms` serves F32/F64 (norms F32/F64) and C32/C64 (norms
+F32/F64); `select_pivot` serves F32/F64 (its `norms` payload);
+`swap_columns` serves F32/F64/I32/I64/C32/C64; `reflector`, `apply_reflector`,
+`extract_r` and `prefix_rank` serve F32/F64/C32/C64.
+
 ## Overlap and aliasing
 
 - Gather writes only its destination: the destination must be disjoint from the
@@ -578,7 +663,20 @@ Dtype coverage: `fill_one` serves all seven; `matrix_adjoint`,
 - `t4a_cuda_tiled_transpose` requires disjoint source and destination.
 
 Revision 7 adds: `qr_apply_phase` is in place on both `q` and `r`, which must be
-destinations, mutually disjoint and disjoint from `phase`; every other revision-7 output is a
+destinations, mutually disjoint and disjoint from `phase`.
+
+Revision 8, per entry: `initialize_permutation` writes only its flat array;
+`column_norms` writes `norms` and reads `work`; `select_pivot` reads `norms` and
+`permutation` and writes the flat `pivots` and `status`; `swap_columns` **updates
+`work` and `permutation` in place** and reads `pivots`; `reflector` **updates
+`work` in place** and writes `coeff`; `apply_reflector` reads `packed` and `coeff`
+and **updates `target` in place**; `extract_r` writes `r` and reads `work`;
+`prefix_rank` reads `r` and writes the flat `rank` and `status`. Every written
+layout must therefore be a destination (no stride-zero axis with extent greater than
+one), the in-place operands must be disjoint from everything their launch reads, and
+each launch's written operands must be mutually disjoint.
+
+Earlier revisions: every other revision-7 output is a
 destination disjoint from all of its reads (`lu_extract_outputs`' four outputs are
 mutually disjoint, and `householder_assemble`'s two outputs are disjoint from its
 three sources).
@@ -597,6 +695,8 @@ proof, as it already is in the consumer planners.
 | gather / scatter add / convert | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |
 | unary / binary / compare / select / clamp / combined strided | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |
 | revision 7 linalg auxiliaries | `(ceil(domain/256), 1, 1)` | `(256, 1, 1)` | 0 |
+| revision 8 flat entries (`initialize_permutation`, `extract_r`, `swap_columns`) | `(ceil(domain/256), 1, 1)` | `(256, 1, 1)` | 0 |
+| revision 8 plane entries (`column_norms`, `select_pivot`, `reflector`, `apply_reflector`, `prefix_rank`) | `(tasks, 1, 1)` | `(32, 1, 1)` | 0 |
 | one-thread entries (`init_validation`, `extract_invalid_*`) | `(1, 1, 1)` | `(1, 1, 1)` | 0 |
 | `validate_real_cast` | `(ceil(len/stride/256), 1, 1)` | `(256, 1, 1)` | 0 |
 | `t4a_cuda_tiled_transpose` | `(ceil(M/tile), ceil(N/tile), batches)` | `(tile/vector_width, block_rows, 1)` | `tile*(tile+padding)*element_size` |

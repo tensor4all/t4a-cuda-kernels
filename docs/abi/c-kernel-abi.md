@@ -644,6 +644,34 @@ F32/F64); `select_pivot` serves F32/F64 (its `norms` payload);
 `swap_columns` serves F32/F64/I32/I64/C32/C64; `reflector`, `apply_reflector`,
 `extract_r` and `prefix_rank` serve F32/F64/C32/C64.
 
+## Generated entry: `t4a_fused_elementwise`
+
+The fused-expression emitter (`t4a_cuda_kernels::fusion`) generates a source that
+defines one additional entry. It is not part of the revisioned static ABI above: its
+signature depends on the plan, and the caller compiles the emitted source itself.
+
+```c
+extern "C" __global__ void t4a_fused_elementwise(
+    T* out0, ..., const T* in0, ..., long long len);
+```
+
+- `T` is the plan's dtype (F32/F64/C32/C64); the outputs come first in plan order,
+  then the inputs, then `len`. The manifest (`FusionManifest`) records the dtype, the
+  input and output counts, the block size and the index width.
+- The emitted source embeds the whole of this header's text as its prelude and
+  contains no `#include`, so it compiles with NVRTC or NVCC without an include path
+  and the helper semantics are the ones defined above.
+- Every buffer holds at least `len` elements of `T` (`len` logical complex elements
+  for C32/C64, whose components are interleaved), bases are 16-byte aligned, the
+  outputs are pairwise disjoint and disjoint from the inputs, and each launch uses
+  `plan_fused(len)` geometry on the caller's stream. Values are written only for
+  `index < len`.
+- Fused and separate launches use the same numerical contract. A chain compiled with
+  FMA contraction may differ from the same chain of per-operation launches at the
+  tolerance level, including where a contraction turns an intermediate overflow into
+  a finite result; a caller that needs bit parity with separate launches passes
+  `--fmad=false`, and the option string is part of the artifact key.
+
 ## Overlap and aliasing
 
 - Gather writes only its destination: the destination must be disjoint from the

@@ -12,8 +12,9 @@ windowing and validation-status families, single-axis reductions, XLA-style
 gather with additive scatter, the dtype conversions, the remaining elementwise,
 comparison and strided-combination families, the linalg auxiliary kernels, and the
 rank-revealing QR primitives. The custom-kernel inventory of the migration design
-is now fully ported; the fused-expression emitter and the NVRTC prepare/cache path
-remain design-only.
+is fully ported, and the fused-expression emitter (`fusion` module) replaces the
+baseline's run-time CubeCL IR generation with a source emitter plus an artifact key;
+compiling and loading remain the caller's service, as the design requires.
 
 | Entry | Ported from | Dtypes |
 | --- | --- | --- |
@@ -44,8 +45,11 @@ no entry of their own: an explicit layout (expanded broadcast source, negative
 stride, shifted destination view) expresses the same address map through the
 movement entries.
 
-Not implemented yet: the fused-expression emitter and the NVRTC prepare/cache path.
-See the [RRQR worklog](docs/worklogs/2026-10-21-rrqr-slice.md#still-not-ported).
+Not implemented, deliberately: nothing in the kernel inventory. Compilation, module
+loading and artifact persistence are the caller's, per
+[the prepare contract](docs/design/cubecl-kernel-port.md#preparation-compilation-and-private-caches);
+the reference consumer in `tests/gpu_fusion.rs` shows the whole prepare/cache flow
+with NVRTC and observed compile counts.
 
 - [C kernel ABI](docs/abi/c-kernel-abi.md)
 - [Slice plan: ABI, movement, arithmetic](docs/design/slice-abi-movement-arithmetic.md)
@@ -63,6 +67,7 @@ See the [RRQR worklog](docs/worklogs/2026-10-21-rrqr-slice.md#still-not-ported).
 - [Slice plan: linalg auxiliaries](docs/design/slice-linalg-aux.md)
 - [Local GPU evidence: linalg auxiliaries](docs/worklogs/2026-10-21-linalg-aux-slice.md)
 - [Slice plan: rank-revealing QR primitives](docs/design/slice-rrqr.md)
+- [Slice plan: fused-expression emitter](docs/design/slice-fusion-emitter.md)
 - [Local GPU evidence: RRQR primitives](docs/worklogs/2026-10-21-rrqr-slice.md)
 - [Third-party notices](THIRD_PARTY_NOTICES.md)
 - [Migration design](docs/design/cubecl-kernel-port.md)
@@ -80,7 +85,16 @@ kernel ABI, plus a Rust facade (`t4a_cuda_kernels`) for metadata validation and
 launch planning. The caller owns execution resources and synchronization; kernel
 APIs do not allocate device scratch or create runtime objects.
 
-The fused-expression emitter, when implemented, receives a small runtime-independent operation description. Axis sizes, strides, offsets and counts are runtime parameters of the current ABI, passed by value for common small-rank paths. Validated rank, operation/axis mappings and algorithm configuration may specialize code for unrolling and branch elimination. The caller compiles or retrieves cached artifacts during prepare, binds modules to its own runtimes, and reuses them during run; ordinary shape changes do not require recompilation. See the [preparation/cache contract](docs/design/cubecl-kernel-port.md#preparation-compilation-and-private-caches).
+The fused-expression emitter (`t4a_cuda_kernels::fusion`) receives a small
+runtime-independent operation description: a dtype, the input count, a topologically
+ordered instruction list and the live-out values. It emits a self-contained CUDA C++
+kernel whose only runtime arguments are the buffer pointers and `len`; extents,
+strides and offsets never enter the source, and the artifact key is the canonical
+key material (source plus the caller's compiler options, target and compiler
+identity). The caller compiles or retrieves cached artifacts during prepare, binds
+modules to its own runtimes, recomputes the grid from each `len` and reuses the code;
+see the [preparation/cache contract](docs/design/cubecl-kernel-port.md#preparation-compilation-and-private-caches)
+and `tests/gpu_fusion.rs` for the reference consumer with observed NVRTC counts.
 
 Device compilation/testing is explicit; the default build and its tests do not
 initialize CUDA. Registry publication is deferred.

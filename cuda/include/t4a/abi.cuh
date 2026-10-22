@@ -174,22 +174,34 @@ typedef struct {
 
 static_assert(sizeof(t4a_cuda_layout) == 144, "t4a_cuda_layout ABI size");
 static_assert(alignof(t4a_cuda_layout) == 8, "t4a_cuda_layout ABI alignment");
+#if !defined(__CUDACC_RTC__)
 static_assert(__builtin_offsetof(t4a_cuda_layout, offset) == 8, "t4a_cuda_layout.offset offset");
+#endif
+#if !defined(__CUDACC_RTC__)
 static_assert(__builtin_offsetof(t4a_cuda_layout, extents) == 16, "t4a_cuda_layout.extents offset");
+#endif
+#if !defined(__CUDACC_RTC__)
 static_assert(__builtin_offsetof(t4a_cuda_layout, strides) == 80, "t4a_cuda_layout.strides offset");
+#endif
 static_assert(alignof(t4a_cuda_transpose_config) == 4, "t4a_cuda_transpose_config ABI alignment");
 static_assert(sizeof(t4a_cuda_transpose_config) == 16, "t4a_cuda_transpose_config ABI size");
 static_assert(sizeof(t4a_cuda_axis_values) == 72, "t4a_cuda_axis_values ABI size");
 static_assert(sizeof(t4a_cuda_gather_plan) == 280, "t4a_cuda_gather_plan ABI size");
 static_assert(alignof(t4a_cuda_gather_plan) == 8, "t4a_cuda_gather_plan ABI alignment");
+#if !defined(__CUDACC_RTC__)
 static_assert(__builtin_offsetof(t4a_cuda_gather_plan, window_dims) == 24,
               "t4a_cuda_gather_plan.window_dims offset");
+#endif
 static_assert(sizeof(t4a_cuda_scatter_plan) == 216, "t4a_cuda_scatter_plan ABI size");
 static_assert(alignof(t4a_cuda_scatter_plan) == 8, "t4a_cuda_scatter_plan ABI alignment");
+#if !defined(__CUDACC_RTC__)
 static_assert(__builtin_offsetof(t4a_cuda_scatter_plan, window_dims) == 24,
               "t4a_cuda_scatter_plan.window_dims offset");
+#endif
 static_assert(alignof(t4a_cuda_axis_values) == 8, "t4a_cuda_axis_values ABI alignment");
+#if !defined(__CUDACC_RTC__)
 static_assert(__builtin_offsetof(t4a_cuda_axis_values, values) == 8, "t4a_cuda_axis_values.values offset");
+#endif
 static_assert(sizeof(t4a_cuda_c32) == 8, "t4a_cuda_c32 ABI size");
 static_assert(alignof(t4a_cuda_c32) == 4, "t4a_cuda_c32 ABI alignment");
 static_assert(sizeof(t4a_cuda_c64) == 16, "t4a_cuda_c64 ABI size");
@@ -637,6 +649,59 @@ __device__ __forceinline__ T t4a_cuda_div(T lhs, T rhs) {
   return lhs / rhs;
 }
 
+// Canonical element-wise helpers, shared by the per-operation entries and by the
+// fused-expression emitter so a fused chain and the equivalent per-op launches use one
+// definition of each operation.
+__device__ __forceinline__ float t4a_cuda_exp(float x) { return expf(x); }
+__device__ __forceinline__ double t4a_cuda_exp(double x) { return exp(x); }
+__device__ __forceinline__ float t4a_cuda_log(float x) { return logf(x); }
+__device__ __forceinline__ double t4a_cuda_log(double x) { return log(x); }
+__device__ __forceinline__ float t4a_cuda_sin(float x) { return sinf(x); }
+__device__ __forceinline__ double t4a_cuda_sin(double x) { return sin(x); }
+__device__ __forceinline__ float t4a_cuda_cos(float x) { return cosf(x); }
+__device__ __forceinline__ double t4a_cuda_cos(double x) { return cos(x); }
+__device__ __forceinline__ float t4a_cuda_tanh(float x) { return tanhf(x); }
+__device__ __forceinline__ double t4a_cuda_tanh(double x) { return tanh(x); }
+__device__ __forceinline__ float t4a_cuda_sqrt(float x) { return sqrtf(x); }
+__device__ __forceinline__ double t4a_cuda_sqrt(double x) { return sqrt(x); }
+__device__ __forceinline__ float t4a_cuda_rsqrt(float x) { return rsqrtf(x); }
+__device__ __forceinline__ double t4a_cuda_rsqrt(double x) { return rsqrt(x); }
+__device__ __forceinline__ float t4a_cuda_expm1(float x) { return expm1f(x); }
+__device__ __forceinline__ double t4a_cuda_expm1(double x) { return expm1(x); }
+__device__ __forceinline__ float t4a_cuda_log1p(float x) { return log1pf(x); }
+__device__ __forceinline__ double t4a_cuda_log1p(double x) { return log1p(x); }
+__device__ __forceinline__ float t4a_cuda_erf(float x) { return erff(x); }
+__device__ __forceinline__ double t4a_cuda_erf(double x) { return erf(x); }
+__device__ __forceinline__ float t4a_cuda_pow(float x, float y) { return powf(x, y); }
+__device__ __forceinline__ double t4a_cuda_pow(double x, double y) { return pow(x, y); }
+// IEEE remainder: a zero result keeps the dividend's sign.
+__device__ __forceinline__ float t4a_cuda_fmod(float x, float y) { return fmodf(x, y); }
+__device__ __forceinline__ double t4a_cuda_fmod(double x, double y) { return fmod(x, y); }
+// Absolute value. This is `fabs`, which turns `-0` into `+0` and drops the sign of a
+// negative operand; the sign-preserving magnitude used inside the complex division is
+// the separate `t4a_cuda_abs` below.
+__device__ __forceinline__ float t4a_cuda_fabs(float x) { return fabsf(x); }
+__device__ __forceinline__ double t4a_cuda_fabs(double x) { return fabs(x); }
+// Complex magnitude as the real component type.
+__device__ __forceinline__ float t4a_cuda_abs_complex(t4a_cuda_c32 value) {
+  return hypotf(value.re, value.im);
+}
+__device__ __forceinline__ double t4a_cuda_abs_complex(t4a_cuda_c64 value) {
+  return hypot(value.re, value.im);
+}
+// Ordered clamp: a NaN input propagates and a NaN bound disables its comparison; with
+// inverted bounds the statement order decides (see the ABI document, revision 6).
+template <typename F>
+__device__ __forceinline__ F t4a_cuda_clamp(F value, F low, F high) {
+  F result = value;
+  if (value < low) {
+    result = low;
+  } else if (value > high) {
+    result = high;
+  }
+  return result;
+}
+
 // Integer negation wraps; CUDA C++ signed overflow would otherwise be undefined.
 template <typename T>
 __device__ __forceinline__ T t4a_cuda_neg(T value) {
@@ -792,6 +857,26 @@ __device__ __forceinline__ void t4a_cuda_div_complex_parts_at(F a0, F b0, F c0, 
     out[index] = t4a_cuda_complex_div_term<F>(b, a, d, c, r, t) * scale;
     out[index + 1] = -t4a_cuda_complex_div_term<F>(a, -b, d, c, r, t) * scale;
   }
+}
+
+// Value form of the scale-robust complex division, for callers that hold the operands
+// rather than the interleaved parts of a buffer (the fused emitter). These are
+// overloads, not one template: the component float type cannot be deduced from the
+// complex argument alone.
+__device__ __forceinline__ t4a_cuda_c32 t4a_cuda_div_complex(t4a_cuda_c32 lhs,
+                                                            t4a_cuda_c32 rhs) {
+  float parts[2];
+  t4a_cuda_div_complex_parts_at<float>(lhs.re, lhs.im, rhs.re, rhs.im, parts, 0);
+  t4a_cuda_c32 result = {parts[0], parts[1]};
+  return result;
+}
+
+__device__ __forceinline__ t4a_cuda_c64 t4a_cuda_div_complex(t4a_cuda_c64 lhs,
+                                                            t4a_cuda_c64 rhs) {
+  double parts[2];
+  t4a_cuda_div_complex_parts_at<double>(lhs.re, lhs.im, rhs.re, rhs.im, parts, 0);
+  t4a_cuda_c64 result = {parts[0], parts[1]};
+  return result;
 }
 
 #endif  // T4A_CUDA_ABI_CUH_

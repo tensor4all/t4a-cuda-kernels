@@ -10,8 +10,11 @@ reductions ([plan](slice-reductions.md)); gather with additive scatter
 strided-combination and structural-extra families
 ([plan](slice-elementwise.md)); and the linalg auxiliary kernels
 ([plan](slice-linalg-aux.md)); and the rank-revealing QR primitives
-([plan](slice-rrqr.md)). With that the custom-kernel inventory in §1 is fully
-ported. Still design-only: the fusion emitter and the prepare/cache path.
+([plan](slice-rrqr.md)); and the fused-expression emitter
+([plan](slice-fusion-emitter.md)). With that the custom-kernel inventory in §1 is
+fully ported and the §3 emitter contract is implemented as source generation plus an
+artifact key; compiling and loading stay with the caller, and
+`tests/gpu_fusion.rs` is the reference consumer for that prepare/cache flow.
 
 This repository, **tensor4all/t4a-cuda-kernels**, will provide the Rust crate `t4a-cuda-kernels` (import `t4a_cuda_kernels`) and reusable CUDA C++ sources. It is a separate repository from [t4a-gpu-backend](https://github.com/tensor4all/t4a-gpu-backend).
 

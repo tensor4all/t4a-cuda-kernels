@@ -16,7 +16,7 @@
 #endif
 
 #define T4A_CUDA_MAX_RANK 8
-#define T4A_CUDA_ABI_REVISION 6
+#define T4A_CUDA_ABI_REVISION 7
 
 static_assert(sizeof(int) == 4, "the C ABI requires 32-bit int");
 static_assert(sizeof(long long) == 8, "the C ABI requires 64-bit long long");
@@ -267,6 +267,26 @@ static_assert(alignof(t4a_cuda_c64) == 8, "t4a_cuda_c64 ABI alignment");
       break;                                       \
   }
 
+// Float and complex dtypes: the linalg entries whose phase and LU payloads have no
+// integer or Bool form.
+#define T4A_CUDA_ALGEBRA_DTYPE_SWITCH(dtype, BODY) \
+  switch (dtype) {                                 \
+    case T4A_CUDA_F32:                             \
+      BODY(float);                                 \
+      break;                                       \
+    case T4A_CUDA_F64:                             \
+      BODY(double);                                \
+      break;                                       \
+    case T4A_CUDA_C32:                             \
+      BODY(t4a_cuda_c32);                          \
+      break;                                       \
+    case T4A_CUDA_C64:                             \
+      BODY(t4a_cuda_c64);                          \
+      break;                                       \
+    default:                                       \
+      break;                                       \
+  }
+
 #define T4A_CUDA_FLOAT_DTYPE_SWITCH(dtype, BODY) \
   switch (dtype) {                               \
     case T4A_CUDA_F32:                           \
@@ -320,6 +340,42 @@ template <>
 __device__ __forceinline__ t4a_cuda_c64 t4a_cuda_zero<t4a_cuda_c64>() {
   t4a_cuda_c64 value = {0.0, 0.0};
   return value;
+}
+
+template <typename T>
+__device__ __forceinline__ T t4a_cuda_one() {
+  return T(1);
+}
+
+template <>
+__device__ __forceinline__ t4a_cuda_c32 t4a_cuda_one<t4a_cuda_c32>() {
+  t4a_cuda_c32 value = {1.0f, 0.0f};
+  return value;
+}
+
+template <>
+__device__ __forceinline__ t4a_cuda_c64 t4a_cuda_one<t4a_cuda_c64>() {
+  t4a_cuda_c64 value = {1.0, 0.0};
+  return value;
+}
+
+// Conjugation is the identity for the real and integer element types, so the
+// linalg entries can share one templated body.
+template <typename T>
+__device__ __forceinline__ T t4a_cuda_conj(T value) {
+  return value;
+}
+
+template <>
+__device__ __forceinline__ t4a_cuda_c32 t4a_cuda_conj<t4a_cuda_c32>(t4a_cuda_c32 value) {
+  t4a_cuda_c32 result = {value.re, -value.im};
+  return result;
+}
+
+template <>
+__device__ __forceinline__ t4a_cuda_c64 t4a_cuda_conj<t4a_cuda_c64>(t4a_cuda_c64 value) {
+  t4a_cuda_c64 result = {value.re, -value.im};
+  return result;
 }
 
 // Integer arithmetic keeps the baseline's defined wrapping behavior; CUDA C++

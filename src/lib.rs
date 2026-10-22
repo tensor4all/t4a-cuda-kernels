@@ -23,7 +23,7 @@ use core::fmt;
 /// Maximum supported tensor rank. Deeper layouts need a later ABI revision.
 pub const MAX_RANK: usize = 8;
 /// Version of the C ABI described by this crate.
-pub const ABI_REVISION: u32 = 6;
+pub const ABI_REVISION: u32 = 7;
 /// Threads per block for the flat (element-wise) entries.
 pub const FLAT_BLOCK: u32 = 256;
 /// Largest block count for grid dimensions y and z.
@@ -446,10 +446,21 @@ pub enum Entry {
     Select,
     Clamp,
     CombinedStrided,
+    FillOne,
+    MatrixAdjoint,
+    HouseholderExplicitV,
+    IdentityShifted,
+    QrPhase,
+    QrApplyPhase,
+    UpperTrapezoidalViolation,
+    HouseholderAssemble,
+    LuExtractOutputs,
+    LuParity,
+    LuApplyPivots,
 }
 
 impl Entry {
-    pub const ALL: [Entry; 34] = [
+    pub const ALL: [Entry; 45] = [
         Entry::FillZero,
         Entry::FillZeroView,
         Entry::CopyExact,
@@ -484,6 +495,17 @@ impl Entry {
         Entry::Select,
         Entry::Clamp,
         Entry::CombinedStrided,
+        Entry::FillOne,
+        Entry::MatrixAdjoint,
+        Entry::HouseholderExplicitV,
+        Entry::IdentityShifted,
+        Entry::QrPhase,
+        Entry::QrApplyPhase,
+        Entry::UpperTrapezoidalViolation,
+        Entry::HouseholderAssemble,
+        Entry::LuExtractOutputs,
+        Entry::LuParity,
+        Entry::LuApplyPivots,
     ];
 
     /// Exported CUDA symbol; equal to the name documented in the ABI.
@@ -523,6 +545,17 @@ impl Entry {
             Entry::Select => "t4a_cuda_select",
             Entry::Clamp => "t4a_cuda_clamp",
             Entry::CombinedStrided => "t4a_cuda_combined_strided",
+            Entry::FillOne => "t4a_cuda_fill_one",
+            Entry::MatrixAdjoint => "t4a_cuda_matrix_adjoint",
+            Entry::HouseholderExplicitV => "t4a_cuda_householder_explicit_v",
+            Entry::IdentityShifted => "t4a_cuda_identity_shifted",
+            Entry::QrPhase => "t4a_cuda_qr_phase",
+            Entry::QrApplyPhase => "t4a_cuda_qr_apply_phase",
+            Entry::UpperTrapezoidalViolation => "t4a_cuda_upper_trapezoidal_violation",
+            Entry::HouseholderAssemble => "t4a_cuda_householder_assemble",
+            Entry::LuExtractOutputs => "t4a_cuda_lu_extract_outputs",
+            Entry::LuParity => "t4a_cuda_lu_parity",
+            Entry::LuApplyPivots => "t4a_cuda_lu_apply_pivots",
         }
     }
 
@@ -554,7 +587,13 @@ impl Entry {
                 DType::C64,
             ],
             // Op-dependent; the planners reject the pairs each entry does not serve.
-            Entry::Unary | Entry::Binary | Entry::CombinedStrided => &[
+            Entry::Unary
+            | Entry::Binary
+            | Entry::CombinedStrided
+            | Entry::MatrixAdjoint
+            | Entry::HouseholderExplicitV
+            | Entry::IdentityShifted
+            | Entry::HouseholderAssemble => &[
                 DType::F32,
                 DType::F64,
                 DType::I32,
@@ -564,6 +603,17 @@ impl Entry {
             ],
             Entry::Compare | Entry::Select => &[DType::F32, DType::F64, DType::I32, DType::I64],
             Entry::Clamp => &[DType::F32, DType::F64],
+            Entry::QrPhase | Entry::QrApplyPhase | Entry::LuExtractOutputs | Entry::LuParity => {
+                &[DType::F32, DType::F64, DType::C32, DType::C64]
+            }
+            Entry::LuApplyPivots => &[
+                DType::F32,
+                DType::F64,
+                DType::I32,
+                DType::I64,
+                DType::C32,
+                DType::C64,
+            ],
             _ => &DType::ALL,
         }
     }
@@ -587,6 +637,7 @@ impl Entry {
                 | Entry::Compare
                 | Entry::Select
                 | Entry::Clamp
+                | Entry::FillOne
         )
     }
 }
@@ -1083,6 +1134,364 @@ pub fn plan_combined_strided(
     a.check_span(a_len, dtype.size())?;
     b.check_span(b_len, dtype.size())?;
     flat_launch(out.element_count()?)
+}
+
+// --- revision 7: linalg auxiliaries -----------------------------------------
+
+fn require_matrix(layout: &Layout) -> Result<(), Error> {
+    if layout.rank() >= 2 {
+        Ok(())
+    } else {
+        Err(Error::RankOutOfRange)
+    }
+}
+
+fn batch_extents(layout: &Layout) -> &[i64] {
+    &layout.extents()[2..]
+}
+
+fn extent_product(extents: &[i64]) -> Result<i64, Error> {
+    let mut product = 1i64;
+    for &extent in extents {
+        product = product.checked_mul(extent).ok_or(Error::Overflow)?;
+    }
+    Ok(product)
+}
+
+/// Plan [`Entry::FillOne`]: one at every logical position of `out`.
+pub fn plan_fill_one(dtype: DType, out: &Layout, out_len: i64) -> Result<Launch, Error> {
+    check_dtype(Entry::FillOne, dtype)?;
+    require_destination(out)?;
+    let len = out.element_count()?;
+    out.check_span(out_len, dtype.size())?;
+    flat_launch(len)
+}
+
+/// Plan [`Entry::MatrixAdjoint`]: conjugate transpose of the first two axes.
+pub fn plan_matrix_adjoint(
+    dtype: DType,
+    out: &Layout,
+    out_len: i64,
+    v: &Layout,
+    v_len: i64,
+) -> Result<Launch, Error> {
+    check_dtype(Entry::MatrixAdjoint, dtype)?;
+    require_destination(out)?;
+    require_matrix(out)?;
+    require_matrix(v)?;
+    if out.rank() != v.rank() || batch_extents(out) != batch_extents(v) {
+        return Err(Error::ShapeMismatch);
+    }
+    if out.extents()[0] != v.extents()[1] || out.extents()[1] != v.extents()[0] {
+        return Err(Error::ShapeMismatch);
+    }
+    let len = out.element_count()?;
+    out.check_span(out_len, dtype.size())?;
+    v.check_span(v_len, dtype.size())?;
+    flat_launch(len)
+}
+
+/// Plan [`Entry::HouseholderExplicitV`]: rank-2 explicit vector from the packed
+/// strict-lower part. The output may be narrower than the packed matrix.
+pub fn plan_householder_explicit_v(
+    dtype: DType,
+    out: &Layout,
+    out_len: i64,
+    packed: &Layout,
+    packed_len: i64,
+) -> Result<Launch, Error> {
+    check_dtype(Entry::HouseholderExplicitV, dtype)?;
+    require_destination(out)?;
+    if out.rank() != 2 || packed.rank() != 2 {
+        return Err(Error::ShapeMismatch);
+    }
+    if out.extents()[0] != packed.extents()[0] || out.extents()[1] > packed.extents()[1] {
+        return Err(Error::ShapeMismatch);
+    }
+    let len = out.element_count()?;
+    out.check_span(out_len, dtype.size())?;
+    packed.check_span(packed_len, dtype.size())?;
+    flat_launch(len)
+}
+
+/// Plan [`Entry::IdentityShifted`]: `out(i, j, ..) = (i == start + j)`.
+pub fn plan_identity_shifted(
+    dtype: DType,
+    out: &Layout,
+    out_len: i64,
+    start: i64,
+) -> Result<Launch, Error> {
+    check_dtype(Entry::IdentityShifted, dtype)?;
+    require_destination(out)?;
+    require_matrix(out)?;
+    if start < 0 {
+        return Err(Error::NegativeCount);
+    }
+    start.checked_add(out.extents()[1]).ok_or(Error::Overflow)?;
+    let len = out.element_count()?;
+    out.check_span(out_len, dtype.size())?;
+    flat_launch(len)
+}
+
+/// Plan [`Entry::QrPhase`]: one phase entry per R diagonal of each batch.
+pub fn plan_qr_phase(
+    dtype: DType,
+    phase: &Layout,
+    phase_len: i64,
+    r: &Layout,
+    r_len: i64,
+) -> Result<Launch, Error> {
+    check_dtype(Entry::QrPhase, dtype)?;
+    require_matrix(r)?;
+    if phase.rank() + 1 != r.rank() || phase.extents()[1..] != r.extents()[2..] {
+        return Err(Error::ShapeMismatch);
+    }
+    require_destination(phase)?;
+    let diagonal_limit = r.extents()[0].min(r.extents()[1]);
+    if phase.extents()[0] > diagonal_limit {
+        return Err(Error::ShapeMismatch);
+    }
+    let len = phase.element_count()?;
+    phase.check_span(phase_len, dtype.size())?;
+    r.check_span(r_len, dtype.size())?;
+    flat_launch(len)
+}
+
+/// Plan [`Entry::QrApplyPhase`]: scale Q's trailing columns and R's rows in place.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_qr_apply_phase(
+    dtype: DType,
+    q: &Layout,
+    q_len: i64,
+    r: &Layout,
+    r_len: i64,
+    phase: &Layout,
+    phase_len: i64,
+    q_start: i64,
+) -> Result<Launch, Error> {
+    check_dtype(Entry::QrApplyPhase, dtype)?;
+    require_matrix(q)?;
+    require_matrix(r)?;
+    if phase.rank() + 1 != r.rank() || phase.extents()[1..] != r.extents()[2..] {
+        return Err(Error::ShapeMismatch);
+    }
+    if q.rank() != r.rank() || q.extents()[2..] != r.extents()[2..] {
+        return Err(Error::ShapeMismatch);
+    }
+    if r.extents()[0] > phase.extents()[0] {
+        return Err(Error::ShapeMismatch);
+    }
+    // Both operands are updated in place, so a broadcast axis would race.
+    require_destination(q)?;
+    require_destination(r)?;
+    if q_start < 0 {
+        return Err(Error::NegativeCount);
+    }
+    q_start.checked_add(q.extents()[1]).ok_or(Error::Overflow)?;
+    let domain = q.element_count()?.max(r.element_count()?);
+    q.check_span(q_len, dtype.size())?;
+    r.check_span(r_len, dtype.size())?;
+    phase.check_span(phase_len, dtype.size())?;
+    flat_launch(domain)
+}
+
+/// Plan [`Entry::UpperTrapezoidalViolation`]: `i32` violation matrix of the
+/// strictly-lower part of `input`.
+pub fn plan_upper_trapezoidal_violation(
+    dtype: DType,
+    violation: &Layout,
+    violation_len: i64,
+    input: &Layout,
+    input_len: i64,
+) -> Result<Launch, Error> {
+    check_dtype(Entry::UpperTrapezoidalViolation, dtype)?;
+    require_destination(violation)?;
+    require_matrix(violation)?;
+    require_matrix(input)?;
+    if violation.extents() != input.extents() {
+        return Err(Error::ShapeMismatch);
+    }
+    let len = violation.element_count()?;
+    violation.check_span(violation_len, DType::I32.size())?;
+    input.check_span(input_len, dtype.size())?;
+    flat_launch(len)
+}
+
+/// Plan [`Entry::HouseholderAssemble`]: rank-2 factor assembly from `folded_r` and
+/// `packed_q`, with flat coefficient arrays.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_householder_assemble(
+    dtype: DType,
+    packed_out: &Layout,
+    packed_out_len: i64,
+    coeff_out_len: i64,
+    packed_q: &Layout,
+    packed_q_len: i64,
+    folded_r: &Layout,
+    folded_r_len: i64,
+    coeff_q_len: i64,
+    factor_width: i64,
+) -> Result<Launch, Error> {
+    check_dtype(Entry::HouseholderAssemble, dtype)?;
+    require_destination(packed_out)?;
+    if packed_out.rank() != 2 || packed_q.rank() != 2 || folded_r.rank() != 2 {
+        return Err(Error::ShapeMismatch);
+    }
+    if factor_width < 0 || coeff_out_len < 0 {
+        return Err(Error::NegativeCount);
+    }
+    let rows = packed_out.extents()[0];
+    let cols = packed_out.extents()[1];
+    let folded_rows = factor_width.min(rows);
+    if folded_rows > 0 {
+        if folded_r.extents()[0] < folded_rows || folded_r.extents()[1] < cols {
+            return Err(Error::ShapeMismatch);
+        }
+        if packed_q.extents()[0] < rows || packed_q.extents()[1] < factor_width.min(cols) {
+            return Err(Error::ShapeMismatch);
+        }
+    }
+    if coeff_q_len < factor_width.min(coeff_out_len) {
+        return Err(Error::ShapeMismatch);
+    }
+    let domain = packed_out.element_count()?.max(coeff_out_len);
+    packed_out.check_span(packed_out_len, dtype.size())?;
+    packed_q.check_span(packed_q_len, dtype.size())?;
+    folded_r.check_span(folded_r_len, dtype.size())?;
+    flat_launch(domain)
+}
+
+/// Plan [`Entry::LuExtractOutputs`]: P, L, U and the permutation parity of a packed
+/// LU factorisation, with `k` one-based pivots per batch.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_lu_extract_outputs(
+    dtype: DType,
+    p: &Layout,
+    p_len: i64,
+    l: &Layout,
+    l_len: i64,
+    u: &Layout,
+    u_len: i64,
+    work: &Layout,
+    work_len: i64,
+    pivots_len: i64,
+    k: i64,
+    batches: i64,
+    parity_len: i64,
+) -> Result<Launch, Error> {
+    check_dtype(Entry::LuExtractOutputs, dtype)?;
+    require_matrix(work)?;
+    if p.rank() != work.rank() || l.rank() != work.rank() || u.rank() != work.rank() {
+        return Err(Error::ShapeMismatch);
+    }
+    let rows = work.extents()[0];
+    let cols = work.extents()[1];
+    if p.extents()[0] != rows || p.extents()[1] != rows {
+        return Err(Error::ShapeMismatch);
+    }
+    if l.extents()[0] != rows || l.extents()[1] != k {
+        return Err(Error::ShapeMismatch);
+    }
+    if u.extents()[0] != k || u.extents()[1] != cols {
+        return Err(Error::ShapeMismatch);
+    }
+    if batch_extents(p) != batch_extents(work)
+        || batch_extents(l) != batch_extents(work)
+        || batch_extents(u) != batch_extents(work)
+    {
+        return Err(Error::ShapeMismatch);
+    }
+    if k < 0 || batches < 0 {
+        return Err(Error::NegativeCount);
+    }
+    // `k` is the factorisation step count, so a larger value would let a U row
+    // address outside `work`.
+    if k != rows.min(cols) {
+        return Err(Error::ShapeMismatch);
+    }
+    // One `int32_t` pivot per step and batch, checked so the kernel's
+    // `step + batch * k` cannot leave the caller's pivot array.
+    let pivot_count = k.checked_mul(batches).ok_or(Error::Overflow)?;
+    if pivots_len < pivot_count {
+        return Err(Error::ShapeMismatch);
+    }
+    // The kernels address the pivot array by element index, so its byte span must
+    // stay inside a 64-bit device address as well.
+    bytes(DType::I32, pivots_len)?;
+    if extent_product(batch_extents(work))? != batches || parity_len < batches {
+        return Err(Error::ShapeMismatch);
+    }
+    require_destination(p)?;
+    require_destination(l)?;
+    require_destination(u)?;
+    let domain = p
+        .element_count()?
+        .max(l.element_count()?)
+        .max(u.element_count()?)
+        .max(batches);
+    p.check_span(p_len, dtype.size())?;
+    l.check_span(l_len, dtype.size())?;
+    u.check_span(u_len, dtype.size())?;
+    work.check_span(work_len, dtype.size())?;
+    flat_launch(domain)
+}
+
+/// Plan [`Entry::LuParity`]: one parity value per batch from the pivots alone.
+/// `pivots_len` is the caller's pivot-array length in `int32_t` elements.
+pub fn plan_lu_parity(
+    dtype: DType,
+    pivots_len: i64,
+    batches: i64,
+    k: i64,
+) -> Result<Launch, Error> {
+    check_dtype(Entry::LuParity, dtype)?;
+    if batches < 0 || k < 0 || pivots_len < 0 {
+        return Err(Error::NegativeCount);
+    }
+    let pivot_count = k.checked_mul(batches).ok_or(Error::Overflow)?;
+    if pivots_len < pivot_count {
+        return Err(Error::ShapeMismatch);
+    }
+    bytes(DType::I32, pivots_len)?;
+    flat_launch(batches)
+}
+
+/// Plan [`Entry::LuApplyPivots`]: permute the rows of `input` into `out`.
+/// `pivots_len` is the caller's pivot-array length in `int32_t` elements.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_lu_apply_pivots(
+    dtype: DType,
+    out: &Layout,
+    out_len: i64,
+    input: &Layout,
+    input_len: i64,
+    pivots_len: i64,
+    k: i64,
+) -> Result<Launch, Error> {
+    check_dtype(Entry::LuApplyPivots, dtype)?;
+    require_destination(out)?;
+    require_matrix(out)?;
+    require_matrix(input)?;
+    if out.rank() != input.rank() || out.extents() != input.extents() {
+        return Err(Error::ShapeMismatch);
+    }
+    if k < 0 {
+        return Err(Error::NegativeCount);
+    }
+    if k > out.extents()[0] {
+        return Err(Error::ShapeMismatch);
+    }
+    let pivot_count = k
+        .checked_mul(extent_product(batch_extents(out))?)
+        .ok_or(Error::Overflow)?;
+    if pivots_len < pivot_count {
+        return Err(Error::ShapeMismatch);
+    }
+    bytes(DType::I32, pivots_len)?;
+    let len = out.element_count()?;
+    out.check_span(out_len, dtype.size())?;
+    input.check_span(input_len, dtype.size())?;
+    flat_launch(len)
 }
 
 /// XLA-style gather dimension maps. All vectors are validated by

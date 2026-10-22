@@ -313,7 +313,8 @@ fn entry_names_are_unique_and_exported_by_the_sources() {
         include_str!("../cuda/src/reduce.cu"),
         include_str!("../cuda/src/gather_scatter.cu"),
         include_str!("../cuda/src/convert.cu"),
-        include_str!("../cuda/src/elementwise.cu")
+        include_str!("../cuda/src/elementwise.cu"),
+        include_str!("../cuda/src/linalg_aux.cu")
     );
     for (index, entry) in Entry::ALL.iter().enumerate() {
         let name = entry.name();
@@ -1943,4 +1944,428 @@ fn structural_extras_are_expressible_with_revision_one_entries() {
     // scale_in_place is the binary scalar multiply with out == lhs.
     let scaled = plan_binary(BinaryOp::Mul, DType::C64, ScalarSide::Right, 9).unwrap();
     assert_eq!(scaled.grid, [1, 1, 1]);
+}
+
+// --- revision 7: linalg auxiliaries -----------------------------------------
+
+use t4a_cuda_kernels::{
+    plan_fill_one, plan_householder_assemble, plan_householder_explicit_v, plan_identity_shifted,
+    plan_lu_apply_pivots, plan_lu_extract_outputs, plan_lu_parity, plan_matrix_adjoint,
+    plan_qr_apply_phase, plan_qr_phase, plan_upper_trapezoidal_violation,
+};
+
+#[test]
+fn revision_seven_entries_are_in_the_manifest() {
+    for (entry, name) in [
+        (Entry::FillOne, "t4a_cuda_fill_one"),
+        (Entry::MatrixAdjoint, "t4a_cuda_matrix_adjoint"),
+        (
+            Entry::HouseholderExplicitV,
+            "t4a_cuda_householder_explicit_v",
+        ),
+        (Entry::IdentityShifted, "t4a_cuda_identity_shifted"),
+        (Entry::QrPhase, "t4a_cuda_qr_phase"),
+        (Entry::QrApplyPhase, "t4a_cuda_qr_apply_phase"),
+        (
+            Entry::UpperTrapezoidalViolation,
+            "t4a_cuda_upper_trapezoidal_violation",
+        ),
+        (Entry::HouseholderAssemble, "t4a_cuda_householder_assemble"),
+        (Entry::LuExtractOutputs, "t4a_cuda_lu_extract_outputs"),
+        (Entry::LuParity, "t4a_cuda_lu_parity"),
+        (Entry::LuApplyPivots, "t4a_cuda_lu_apply_pivots"),
+    ] {
+        assert_eq!(entry.name(), name);
+        assert!(Entry::ALL.contains(&entry));
+    }
+    assert_eq!(Entry::FillOne.supported_dtypes(), &DType::ALL);
+    assert!(Entry::FillOne.is_elementwise());
+    assert!(!Entry::MatrixAdjoint.is_elementwise());
+    assert_eq!(
+        Entry::QrPhase.supported_dtypes(),
+        &[DType::F32, DType::F64, DType::C32, DType::C64]
+    );
+    assert_eq!(Entry::LuApplyPivots.supported_dtypes().len(), 6);
+    assert_eq!(
+        Entry::UpperTrapezoidalViolation.supported_dtypes(),
+        &DType::ALL
+    );
+}
+
+#[test]
+fn fill_one_is_a_layout_fill() {
+    let view = Layout::new(&[2, 3], &[1, 2], 1).unwrap();
+    let launch = plan_fill_one(DType::F64, &view, 7).unwrap();
+    assert_eq!(launch.grid, [1, 1, 1]);
+    assert_eq!(launch.block, [FLAT_BLOCK, 1, 1]);
+    assert!(plan_fill_one(DType::Bool, &view, 7).is_ok());
+    assert_eq!(
+        plan_fill_one(DType::F64, &view, 6),
+        Err(Error::OffsetOutOfSpan)
+    );
+    assert_eq!(
+        plan_fill_one(DType::F64, &Layout::new(&[2, 3], &[1, 0], 0).unwrap(), 2),
+        Err(Error::BroadcastDestination)
+    );
+}
+
+#[test]
+fn matrix_adjoint_swaps_the_first_two_axes() {
+    let v = Layout::compact(&[2, 3, 4]).unwrap();
+    let out = Layout::compact(&[3, 2, 4]).unwrap();
+    assert!(plan_matrix_adjoint(DType::C64, &out, 24, &v, 24).is_ok());
+    assert!(plan_matrix_adjoint(DType::I64, &out, 24, &v, 24).is_ok());
+    // Same extents is not a transpose.
+    assert_eq!(
+        plan_matrix_adjoint(DType::F32, &v, 24, &v, 24),
+        Err(Error::ShapeMismatch)
+    );
+    // Batch axes must match.
+    let wrong_batch = Layout::compact(&[3, 2, 5]).unwrap();
+    assert_eq!(
+        plan_matrix_adjoint(DType::F32, &wrong_batch, 30, &v, 24),
+        Err(Error::ShapeMismatch)
+    );
+    assert_eq!(
+        plan_matrix_adjoint(DType::Bool, &out, 24, &v, 24),
+        Err(Error::UnsupportedDType)
+    );
+    let vector = Layout::compact(&[2]).unwrap();
+    assert_eq!(
+        plan_matrix_adjoint(DType::F32, &vector, 2, &vector, 2),
+        Err(Error::RankOutOfRange)
+    );
+}
+
+#[test]
+fn explicit_v_may_be_narrower_than_the_packed_factors() {
+    let packed = Layout::compact(&[4, 6]).unwrap();
+    let narrow = Layout::compact(&[4, 3]).unwrap();
+    assert!(plan_householder_explicit_v(DType::F64, &narrow, 12, &packed, 24).is_ok());
+    let wide = Layout::compact(&[4, 7]).unwrap();
+    assert_eq!(
+        plan_householder_explicit_v(DType::F64, &wide, 28, &packed, 24),
+        Err(Error::ShapeMismatch)
+    );
+    let short = Layout::compact(&[3, 3]).unwrap();
+    assert_eq!(
+        plan_householder_explicit_v(DType::F64, &short, 9, &packed, 24),
+        Err(Error::ShapeMismatch)
+    );
+    // Rank 2 only: the baseline reads row and column and never a batch axis.
+    let batched = Layout::compact(&[4, 3, 2]).unwrap();
+    assert_eq!(
+        plan_householder_explicit_v(DType::F64, &batched, 24, &packed, 24),
+        Err(Error::ShapeMismatch)
+    );
+}
+
+#[test]
+fn identity_shifted_allows_zero_complement_columns() {
+    // rows = 3, start = 2, columns = 2: the second column is entirely zero, which is
+    // the baseline's complement-column behaviour.
+    let out = Layout::compact(&[3, 2]).unwrap();
+    assert!(plan_identity_shifted(DType::F64, &out, 6, 2).is_ok());
+    assert_eq!(
+        plan_identity_shifted(DType::F64, &out, 6, -1),
+        Err(Error::NegativeCount)
+    );
+    assert_eq!(
+        plan_identity_shifted(DType::F64, &out, 6, i64::MAX),
+        Err(Error::Overflow)
+    );
+    // The RRQR identity is the batched start = 0 case.
+    let batched = Layout::compact(&[4, 3, 2]).unwrap();
+    assert!(plan_identity_shifted(DType::C32, &batched, 24, 0).is_ok());
+}
+
+#[test]
+fn qr_phase_bounds_the_diagonal_it_reads() {
+    let r = Layout::compact(&[3, 3, 2]).unwrap();
+    let phase = Layout::compact(&[3, 2]).unwrap();
+    let launch = plan_qr_phase(DType::F64, &phase, 6, &r, 18).unwrap();
+    assert_eq!(launch.grid, [1, 1, 1]);
+    // More phase entries than the R diagonal.
+    let too_long = Layout::compact(&[4, 2]).unwrap();
+    assert_eq!(
+        plan_qr_phase(DType::F64, &too_long, 8, &r, 18),
+        Err(Error::ShapeMismatch)
+    );
+    // Phase rank must be the matrix rank minus one.
+    let same_rank = Layout::compact(&[3, 3, 2]).unwrap();
+    assert_eq!(
+        plan_qr_phase(DType::F64, &same_rank, 18, &r, 18),
+        Err(Error::ShapeMismatch)
+    );
+    // Batch extents must match.
+    let wrong_batch = Layout::compact(&[3, 5]).unwrap();
+    assert_eq!(
+        plan_qr_phase(DType::F64, &wrong_batch, 15, &r, 18),
+        Err(Error::ShapeMismatch)
+    );
+    assert_eq!(
+        plan_qr_phase(DType::I32, &phase, 6, &r, 18),
+        Err(Error::UnsupportedDType)
+    );
+}
+
+#[test]
+fn qr_apply_phase_checks_the_r_rows_and_the_start() {
+    let r = Layout::compact(&[3, 3, 2]).unwrap();
+    let q = Layout::compact(&[3, 4, 2]).unwrap();
+    let phase = Layout::compact(&[3, 2]).unwrap();
+    let launch = plan_qr_apply_phase(DType::F64, &q, 24, &r, 18, &phase, 6, 0).unwrap();
+    assert_eq!(launch.grid, [1, 1, 1], "the domain is max(q, r) = 24");
+    assert!(plan_qr_apply_phase(DType::F64, &q, 24, &r, 18, &phase, 6, 1).is_ok());
+    // R rows beyond the phase entries would read past the phase array.
+    let tall = Layout::compact(&[5, 3, 2]).unwrap();
+    assert_eq!(
+        plan_qr_apply_phase(DType::F64, &q, 24, &tall, 30, &phase, 6, 0),
+        Err(Error::ShapeMismatch)
+    );
+    assert_eq!(
+        plan_qr_apply_phase(DType::F64, &q, 24, &r, 18, &phase, 6, -1),
+        Err(Error::NegativeCount)
+    );
+    assert_eq!(
+        plan_qr_apply_phase(DType::F64, &q, 24, &r, 18, &phase, 6, i64::MAX - 1),
+        Err(Error::Overflow)
+    );
+}
+
+#[test]
+fn violation_matrix_is_i32_whatever_the_input_dtype() {
+    let input = Layout::compact(&[3, 4]).unwrap();
+    let violation = Layout::compact(&[3, 4]).unwrap();
+    // The payload is four bytes per element even for a C64 input.
+    let launch = plan_upper_trapezoidal_violation(DType::C64, &violation, 12, &input, 12).unwrap();
+    assert_eq!(launch.grid, [1, 1, 1]);
+    assert!(plan_upper_trapezoidal_violation(DType::Bool, &violation, 12, &input, 12).is_ok());
+    let wrong = Layout::compact(&[4, 3]).unwrap();
+    assert_eq!(
+        plan_upper_trapezoidal_violation(DType::F32, &wrong, 12, &input, 12),
+        Err(Error::ShapeMismatch)
+    );
+}
+
+#[test]
+fn assemble_requires_only_the_regions_its_branches_read() {
+    let out = Layout::compact(&[4, 6]).unwrap();
+    let narrow_r = Layout::compact(&[2, 6]).unwrap();
+    let narrow_q = Layout::compact(&[4, 2]).unwrap();
+    // factor_width = 2 reads folded_r rows 0..2 and packed_q columns 0..2.
+    assert!(
+        plan_householder_assemble(DType::F64, &out, 24, 2, &narrow_q, 8, &narrow_r, 12, 2, 2)
+            .is_ok()
+    );
+    // One row short of the branch's reach.
+    let too_short = Layout::compact(&[1, 6]).unwrap();
+    assert_eq!(
+        plan_householder_assemble(DType::F64, &out, 24, 2, &narrow_q, 8, &too_short, 6, 2, 2),
+        Err(Error::ShapeMismatch)
+    );
+    // factor_width = 0 never touches the sources, so nothing is required of them.
+    let empty = Layout::compact(&[0, 0]).unwrap();
+    assert!(plan_householder_assemble(DType::F64, &out, 24, 2, &empty, 0, &empty, 0, 0, 0).is_ok());
+    assert_eq!(
+        plan_householder_assemble(DType::F64, &out, 24, 2, &narrow_q, 8, &narrow_r, 12, 2, -1),
+        Err(Error::NegativeCount)
+    );
+    // The coefficient prefix must exist in the source.
+    assert_eq!(
+        plan_householder_assemble(DType::F64, &out, 24, 4, &narrow_q, 8, &narrow_r, 12, 1, 2),
+        Err(Error::ShapeMismatch)
+    );
+}
+
+#[test]
+fn lu_extract_checks_the_pinned_shape_relationships() {
+    let work = Layout::compact(&[5, 3, 2]).unwrap();
+    let p = Layout::compact(&[5, 5, 2]).unwrap();
+    let l = Layout::compact(&[5, 3, 2]).unwrap();
+    let u = Layout::compact(&[3, 3, 2]).unwrap();
+    let launch =
+        plan_lu_extract_outputs(DType::F64, &p, 50, &l, 30, &u, 18, &work, 30, 6, 3, 2, 2).unwrap();
+    assert_eq!(
+        launch.grid,
+        [1, 1, 1],
+        "the domain is max(P, L, U, parity) = 50"
+    );
+    // A non-square P cannot be a permutation matrix.
+    let p_bad = Layout::compact(&[5, 4, 2]).unwrap();
+    assert_eq!(
+        plan_lu_extract_outputs(
+            DType::F64,
+            &p_bad,
+            40,
+            &l,
+            30,
+            &u,
+            18,
+            &work,
+            30,
+            6,
+            3,
+            2,
+            2
+        ),
+        Err(Error::ShapeMismatch)
+    );
+    // L must be exactly [m, k] and U exactly [k, n]; vary one at a time with a
+    // valid P so a rejection cannot come from the other operand.
+    let l_wide = Layout::compact(&[5, 4, 2]).unwrap();
+    assert_eq!(
+        plan_lu_extract_outputs(
+            DType::F64,
+            &p,
+            50,
+            &l_wide,
+            40,
+            &u,
+            18,
+            &work,
+            30,
+            6,
+            3,
+            2,
+            2
+        ),
+        Err(Error::ShapeMismatch)
+    );
+    let l_narrow = Layout::compact(&[5, 2, 2]).unwrap();
+    assert_eq!(
+        plan_lu_extract_outputs(
+            DType::F64,
+            &p,
+            50,
+            &l_narrow,
+            20,
+            &u,
+            18,
+            &work,
+            30,
+            6,
+            3,
+            2,
+            2
+        ),
+        Err(Error::ShapeMismatch)
+    );
+    let u_short = Layout::compact(&[2, 3, 2]).unwrap();
+    assert_eq!(
+        plan_lu_extract_outputs(
+            DType::F64,
+            &p,
+            50,
+            &l,
+            30,
+            &u_short,
+            12,
+            &work,
+            30,
+            6,
+            3,
+            2,
+            2
+        ),
+        Err(Error::ShapeMismatch)
+    );
+    let u_bad = Layout::compact(&[4, 3, 2]).unwrap();
+    assert_eq!(
+        plan_lu_extract_outputs(
+            DType::F64,
+            &p,
+            50,
+            &l,
+            30,
+            &u_bad,
+            24,
+            &work,
+            30,
+            6,
+            3,
+            2,
+            2
+        ),
+        Err(Error::ShapeMismatch)
+    );
+    // The pivot array must hold k * batches pivots.
+    assert_eq!(
+        plan_lu_extract_outputs(DType::F64, &p, 50, &l, 30, &u, 18, &work, 30, 5, 3, 2, 2),
+        Err(Error::ShapeMismatch)
+    );
+    // k must be the factorisation step count, or a U row could leave `work`.
+    assert_eq!(
+        plan_lu_extract_outputs(DType::F64, &p, 50, &l, 30, &u, 18, &work, 30, 3, 2, 2, 2),
+        Err(Error::ShapeMismatch)
+    );
+    // batches must be the batch extent product, and parity must hold them.
+    assert_eq!(
+        plan_lu_extract_outputs(DType::F64, &p, 50, &l, 30, &u, 18, &work, 30, 9, 3, 3, 2),
+        Err(Error::ShapeMismatch)
+    );
+    assert_eq!(
+        plan_lu_extract_outputs(DType::F64, &p, 50, &l, 30, &u, 18, &work, 30, 6, 3, 2, 1),
+        Err(Error::ShapeMismatch)
+    );
+    assert_eq!(
+        plan_lu_extract_outputs(DType::I32, &p, 50, &l, 30, &u, 18, &work, 30, 6, 3, 2, 2),
+        Err(Error::UnsupportedDType)
+    );
+    // The standalone parity entry needs only the batch count.
+    assert_eq!(
+        plan_lu_parity(DType::C64, 21, 7, 3).unwrap().grid,
+        [1, 1, 1]
+    );
+    // A pivot array that cannot hold k * batches pivots, or an overflowing count.
+    assert_eq!(
+        plan_lu_parity(DType::C64, 20, 7, 3),
+        Err(Error::ShapeMismatch)
+    );
+    assert_eq!(
+        plan_lu_parity(DType::C64, i64::MAX, 2, i64::MAX),
+        Err(Error::Overflow)
+    );
+    // An element count is not enough: the pivot byte span must fit a device address.
+    assert_eq!(
+        plan_lu_parity(DType::C64, i64::MAX, 1, i64::MAX),
+        Err(Error::Overflow)
+    );
+    assert_eq!(
+        plan_lu_parity(DType::C64, 0, -1, 3),
+        Err(Error::NegativeCount)
+    );
+}
+
+#[test]
+fn lu_apply_pivots_needs_matching_extents_and_a_bounded_k() {
+    let input = Layout::compact(&[4, 3]).unwrap();
+    let out = Layout::compact(&[4, 3]).unwrap();
+    assert!(plan_lu_apply_pivots(DType::F32, &out, 12, &input, 12, 3, 3).is_ok());
+    // One pivot per step per batch: a shorter array is refused even though the
+    // dimensions agree.
+    assert_eq!(
+        plan_lu_apply_pivots(DType::F32, &out, 12, &input, 12, 2, 3),
+        Err(Error::ShapeMismatch)
+    );
+    let batched = Layout::compact(&[2, 1, 2]).unwrap();
+    assert_eq!(
+        plan_lu_apply_pivots(DType::F32, &batched, 4, &batched, 4, 1, 1),
+        Err(Error::ShapeMismatch)
+    );
+    assert!(plan_lu_apply_pivots(DType::F32, &batched, 4, &batched, 4, 2, 1).is_ok());
+    assert_eq!(
+        plan_lu_apply_pivots(DType::F32, &out, 12, &input, 12, 3, 5),
+        Err(Error::ShapeMismatch)
+    );
+    let other = Layout::compact(&[3, 4]).unwrap();
+    assert_eq!(
+        plan_lu_apply_pivots(DType::F32, &out, 12, &other, 12, 3, 3),
+        Err(Error::ShapeMismatch)
+    );
+    assert_eq!(
+        plan_lu_apply_pivots(DType::F32, &out, 12, &input, 12, 3, -1),
+        Err(Error::NegativeCount)
+    );
+    assert!(plan_lu_apply_pivots(DType::I64, &out, 12, &input, 12, 0, 0).is_ok());
 }

@@ -6,11 +6,11 @@ Runtime-independent CUDA kernels for tensor4all and external CUDA consumers.
 
 ## Status
 
-Six slices implemented and GPU-validated: C ABI revision 6, checked host
+Seven slices implemented and GPU-validated: C ABI revision 7, checked host
 planning, the movement and elementary-arithmetic families, the diagonal,
 windowing and validation-status families, single-axis reductions, XLA-style
-gather with additive scatter, the dtype conversions, and the remaining
-elementwise, comparison and strided-combination families.
+gather with additive scatter, the dtype conversions, the remaining elementwise,
+comparison and strided-combination families, and the linalg auxiliary kernels.
 
 | Entry | Ported from | Dtypes |
 | --- | --- | --- |
@@ -30,15 +30,18 @@ elementwise, comparison and strided-combination families.
 | `t4a_cuda_binary` | extrema, `pow*`, `rem*`, scalar and mixed real/complex forms, `div_complex_parts`, `scale_in_place_*` | F32/F64/I32/I64/C32/C64, op-dependent |
 | `t4a_cuda_compare`, `_select`, `_clamp` | `compare_*`, `select_bool_*`, `clamp_float` | F32/F64/I32/I64 (clamp F32/F64) |
 | `t4a_cuda_combined_strided` | `broadcast_multiply_*`, `axpby_strided_source_*` | F32/F64/I32/I64/C32/C64 (axpby F32/F64/C32/C64) |
+| `t4a_cuda_fill_one`, `_matrix_adjoint`, `_householder_explicit_v`, `_identity_shifted` | `fill_one_kernel`, `matrix_adjoint_*`, `householder_explicit_v`, `householder_q_columns_identity`, `initialize_q` | all / six |
+| `t4a_cuda_qr_phase`, `_qr_apply_phase`, `_upper_trapezoidal_violation`, `_householder_assemble` | the QR phase/apply and assembly helpers in `tenferro-linalg/src/gpu/kernels.rs` | F32/F64/C32/C64 (violation and assembly wider) |
+| `t4a_cuda_lu_extract_outputs`, `_lu_parity`, `_lu_apply_pivots` | the LU output extraction helpers | F32/F64/C32/C64 (apply wider) |
 
 The baseline's `broadcast_in_dim`, `reverse` and `concatenate_copy` kernels need
 no entry of their own: an explicit layout (expanded broadcast source, negative
 stride, shifted destination view) expresses the same address map through the
 movement entries.
 
-Not implemented yet: the linalg/RRQR helpers, the fused-expression emitter, and the
-NVRTC prepare/cache path. See the
-[elementwise worklog](docs/worklogs/2026-10-21-elementwise-slice.md#still-not-ported).
+Not implemented yet: the rank-revealing QR primitives (`rank_revealing_qr.rs`), the
+fused-expression emitter, and the NVRTC prepare/cache path. See the
+[linalg worklog](docs/worklogs/2026-10-21-linalg-aux-slice.md#still-not-ported).
 
 - [C kernel ABI](docs/abi/c-kernel-abi.md)
 - [Slice plan: ABI, movement, arithmetic](docs/design/slice-abi-movement-arithmetic.md)
@@ -53,6 +56,8 @@ NVRTC prepare/cache path. See the
 - [Local GPU evidence: conversions](docs/worklogs/2026-10-20-conversions-slice.md)
 - [Slice plan: elementwise, comparison, strided combination](docs/design/slice-elementwise.md)
 - [Local GPU evidence: elementwise](docs/worklogs/2026-10-21-elementwise-slice.md)
+- [Slice plan: linalg auxiliaries](docs/design/slice-linalg-aux.md)
+- [Local GPU evidence: linalg auxiliaries](docs/worklogs/2026-10-21-linalg-aux-slice.md)
 - [Third-party notices](THIRD_PARTY_NOTICES.md)
 - [Migration design](docs/design/cubecl-kernel-port.md)
 - [CubeCL performance preservation contract](docs/design/cubecl-performance-parity.md)

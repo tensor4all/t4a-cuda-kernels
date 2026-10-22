@@ -1,4 +1,4 @@
-# C kernel ABI (revision 6)
+# C kernel ABI (revision 7)
 
 Every entry is an `extern "C" __global__` CUDA function in `cuda/src/`. A caller
 loads the compiled module into its own context, looks the symbol up by the name
@@ -18,11 +18,11 @@ nothing, so the same text compiles under NVCC and NVRTC.
 
 ## Revision
 
-`T4A_CUDA_ABI_REVISION == 6`. Revision 2 added `t4a_cuda_axis_values` and the
+`T4A_CUDA_ABI_REVISION == 7`. Revision 2 added `t4a_cuda_axis_values` and the
 diagonal, windowing and validation-status entries; revision 3 added the reduction
 entries; revision 4 added gather and additive scatter; revision 5 added the dtype
-conversion entry; revision 6 adds the elementwise, comparison and
-strided-combination entries. Nothing in revisions 1-5 changed. Any change to a struct layout, an entry signature, an element type
+conversion entry; revision 6 added the elementwise, comparison and
+strided-combination entries; revision 7 adds the linalg auxiliary entries. Nothing in revisions 1-5 changed. Any change to a struct layout, an entry signature, an element type
 mapping or a launch contract requires a further revision bump and an entry in the
 compilation/artifact key of any consumer that caches compiled code.
 
@@ -473,6 +473,92 @@ the component-length tags, which the facade cannot see and therefore documents
 rather than checks. `t4a_cuda_combined_strided` receives the caller's allocation
 lengths and rejects a layout that reaches outside them.
 
+### Revision 7: linalg auxiliary entries
+
+| Symbol | Arguments |
+| --- | --- |
+| `t4a_cuda_fill_one` | `(void* out, int dtype, t4a_cuda_layout out_layout)` |
+| `t4a_cuda_matrix_adjoint` | `(void* out, const void* v, int dtype, t4a_cuda_layout out_layout, t4a_cuda_layout v_layout)` |
+| `t4a_cuda_householder_explicit_v` | `(void* out, const void* packed, int dtype, t4a_cuda_layout out_layout, t4a_cuda_layout packed_layout)` |
+| `t4a_cuda_identity_shifted` | `(void* out, int dtype, t4a_cuda_layout out_layout, long long start)` |
+| `t4a_cuda_qr_phase` | `(void* phase, const void* r, int dtype, t4a_cuda_layout phase_layout, t4a_cuda_layout r_layout)` |
+| `t4a_cuda_qr_apply_phase` | `(void* q, void* r, const void* phase, int dtype, t4a_cuda_layout q_layout, t4a_cuda_layout r_layout, t4a_cuda_layout phase_layout, long long q_start)` |
+| `t4a_cuda_upper_trapezoidal_violation` | `(void* violation, const void* input, int dtype, t4a_cuda_layout violation_layout, t4a_cuda_layout input_layout)` |
+| `t4a_cuda_householder_assemble` | `(void* packed_out, void* coeff_out, const void* packed_q, const void* coeff_q, const void* folded_r, int dtype, t4a_cuda_layout packed_out_layout, t4a_cuda_layout packed_q_layout, t4a_cuda_layout folded_r_layout, long long coeff_out_len, long long factor_width)` |
+| `t4a_cuda_lu_extract_outputs` | `(void* p_out, void* l_out, void* u_out, void* parity_out, const void* work, const void* pivots, int dtype, t4a_cuda_layout p_layout, t4a_cuda_layout l_layout, t4a_cuda_layout u_layout, t4a_cuda_layout work_layout, long long k, long long batches)` |
+| `t4a_cuda_lu_parity` | `(void* parity_out, const void* pivots, int dtype, long long k, long long batches)` |
+| `t4a_cuda_lu_apply_pivots` | `(void* out, const void* input, const void* pivots, int dtype, t4a_cuda_layout out_layout, t4a_cuda_layout in_layout, long long k, int inverse)` |
+
+All eleven are flat (`block = (256,1,1)`, `grid = ceil(domain/256)`); the domain is
+the named output's logical length, or the maximum of several outputs where one
+launch covers them.
+
+**Logical bounds come from the layouts, never from an allocation length.** Each
+entry derives its domain and every per-operand bound from the extent products, so
+an operand whose allocation is longer than its logical extent is never addressed
+past its logical end. The caller's allocation lengths are a *host-side* validation
+input: the facade's `plan_*` functions take them and reject a layout that reaches
+outside, exactly as the other revisions do; a C caller that skips the facade owes
+the same checks itself.
+
+Matrix operands are layouts with axis 0 as the row, axis 1 as the column and axes
+2.. as batch axes. `phase` is the exception: its axis 0 is the diagonal index and
+its axes 1.. are the matrix's axes 2.., so it has rank `matrix_rank - 1`. Unlike
+the baseline, which drops the operand offset in its explicit stride arithmetic,
+every entry here honours the layout offset.
+
+- `fill_one`: one at every logical position, every dtype (Bool stores the byte 1).
+- `matrix_adjoint`: `out(i, j, ..) = conj?(v(j, i, ..))`; both operands rank >= 2
+  with equal batch extents and swapped row/column extents.
+- `householder_explicit_v`: rank 2; `0` above the diagonal, `1` on it, `packed`
+  below it. `out` rows equal `packed` rows and `out` columns may be narrower.
+- `identity_shifted`: `out(i, j, ..) = (i == start + j)`; `start = 0` is the RRQR
+  identity. Columns past `rows - start` are zero, so `start + columns` may exceed
+  the row extent.
+- `qr_phase`: `phase[i, ..] = positive_phase(R[i, i, ..])`. Real dtypes: `-1` for a
+  negative diagonal and `+1` otherwise, so a NaN diagonal yields `+1` (the baseline's
+  `diagonal < 0` test is false). Complex dtypes: `1` for a zero magnitude, else
+  `diagonal / |diagonal|`. `phase.extent[0] <= min(rows, cols)`.
+- `qr_apply_phase`: in place; Q column `j` is multiplied by `phase[q_start + j]`
+  when that index is below `phase.extent[0]` (a complement column is untouched),
+  and R row `i` by `conj?(phase[i])`. The domain is the larger of the two logical
+  lengths, and `r.rows <= phase.extent[0]` is required so no read leaves the phase
+  array.
+- `upper_trapezoidal_violation`: `i32` payload; `1` where `row > col` and the input
+  is non-zero (a complex value is non-zero when either component is).
+- `householder_assemble`: rank 2; one launch over
+  `max(packed_out logical length, coeff_out_len)`. `packed_out(i, j)` is
+  `folded_r(i, j)` when `i < factor_width && i <= j`, else `packed_q(i, j)` when
+  `j < factor_width && i > j`, else zero. `coeff_out` and `coeff_q` are flat arrays
+  of their own length: `coeff_out[p] = coeff_q[p]` for `p < factor_width`, else
+  zero. The planner requires the sources to cover exactly the regions those
+  branches read, not full extent equality.
+- `lu_extract_outputs`: `work = [m, n, batch]`, `P = [m, m, batch]`,
+  `L = [m, k, batch]`, `U = [k, n, batch]`, `parity = [batch]`, `k = min(m, n)`
+  one-based `int32_t` pivots per batch with `k * batches` pivots in the caller's
+  array, and `batches = product(batch extents)`. `p_out(i, j, batch)` is one where
+  `final_row == i`, `final_row` starting at `j` and exchanged with
+  `pivots[step + batch*k] - 1` for each step in `0..k`; `l_out` is unit lower
+  triangular with `work` below the diagonal; `u_out` is upper triangular including
+  the diagonal; `parity_out[batch]` is `-1` per pivoting step. The parity loop is
+  serial over `k` per batch, with batches on separate threads, and the launch
+  domain is `max(P, L, U, batches)`.
+- `lu_parity`: the same parity from `pivots` alone, one thread per batch, domain
+  `batches`.
+- `lu_apply_pivots`: `out(i, j, batch) = input(source_row, j, batch)` with
+  `source_row` starting at `i` and exchanged per pivot in ascending step order when
+  `inverse != 0` and descending otherwise, exactly as the baseline. `input` must
+  have the same extents as `out`, `k <= rows`, and the caller's pivot array must
+  hold `k` pivots per batch (`k * product(batch extents)`). Pivot values must lie in
+  `[1, rows]`; the kernels do not clamp them.
+
+Dtype coverage: `fill_one` serves all seven; `matrix_adjoint`,
+`householder_explicit_v`, `identity_shifted`, `householder_assemble` and
+`lu_apply_pivots` serve F32/F64/I32/I64/C32/C64; `qr_phase`, `qr_apply_phase`,
+`lu_extract_outputs` and `lu_parity` serve F32/F64/C32/C64;
+`upper_trapezoidal_violation` accepts all seven input dtypes and always writes
+`i32`.
+
 ## Overlap and aliasing
 
 - Gather writes only its destination: the destination must be disjoint from the
@@ -491,6 +577,12 @@ lengths and rejects a layout that reaches outside them.
   revision 1.
 - `t4a_cuda_tiled_transpose` requires disjoint source and destination.
 
+Revision 7 adds: `qr_apply_phase` is in place on both `q` and `r`, which must be
+destinations, mutually disjoint and disjoint from `phase`; every other revision-7 output is a
+destination disjoint from all of its reads (`lu_extract_outputs`' four outputs are
+mutually disjoint, and `householder_assemble`'s two outputs are disjoint from its
+three sources).
+
 The facade rejects any destination axis that has stride zero with extent greater
 than one, for every destination including `t4a_cuda_fill_zero_view`. That is a
 necessary condition only: full injectivity of a destination remains the caller's
@@ -504,6 +596,7 @@ proof, as it already is in the consumer planners.
 | reductions | see the revision-3 section | `(plane_width, 1, 1)` | 0 |
 | gather / scatter add / convert | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |
 | unary / binary / compare / select / clamp / combined strided | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |
+| revision 7 linalg auxiliaries | `(ceil(domain/256), 1, 1)` | `(256, 1, 1)` | 0 |
 | one-thread entries (`init_validation`, `extract_invalid_*`) | `(1, 1, 1)` | `(1, 1, 1)` | 0 |
 | `validate_real_cast` | `(ceil(len/stride/256), 1, 1)` | `(256, 1, 1)` | 0 |
 | `t4a_cuda_tiled_transpose` | `(ceil(M/tile), ceil(N/tile), batches)` | `(tile/vector_width, block_rows, 1)` | `tile*(tile+padding)*element_size` |

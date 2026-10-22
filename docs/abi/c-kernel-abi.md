@@ -1,4 +1,4 @@
-# C kernel ABI (revision 5)
+# C kernel ABI (revision 6)
 
 Every entry is an `extern "C" __global__` CUDA function in `cuda/src/`. A caller
 loads the compiled module into its own context, looks the symbol up by the name
@@ -18,10 +18,11 @@ nothing, so the same text compiles under NVCC and NVRTC.
 
 ## Revision
 
-`T4A_CUDA_ABI_REVISION == 5`. Revision 2 added `t4a_cuda_axis_values` and the
+`T4A_CUDA_ABI_REVISION == 6`. Revision 2 added `t4a_cuda_axis_values` and the
 diagonal, windowing and validation-status entries; revision 3 added the reduction
-entries; revision 4 added gather and additive scatter; revision 5 adds the dtype
-conversion entry. Nothing in revisions 1-4 changed. Any change to a struct layout, an entry signature, an element type
+entries; revision 4 added gather and additive scatter; revision 5 added the dtype
+conversion entry; revision 6 adds the elementwise, comparison and
+strided-combination entries. Nothing in revisions 1-5 changed. Any change to a struct layout, an entry signature, an element type
 mapping or a launch contract requires a further revision bump and an entry in the
 compilation/artifact key of any consumer that caches compiled code.
 
@@ -372,6 +373,106 @@ conversion (use `t4a_cuda_copy_exact` for a same-dtype copy).
 - **Aliasing**: source and destination byte spans must be disjoint, because a
   conversion can change the element width.
 
+### Revision 6: elementwise, comparison and strided combination
+
+| Symbol | Arguments |
+| --- | --- |
+| `t4a_cuda_unary` | `(void* out, const void* in, int dst_dtype, int src_dtype, int op, long long len)` |
+| `t4a_cuda_binary` | `(void* out, const void* lhs, const void* rhs, int dtype, int op, int scalar_side, long long len, unsigned int* err)` |
+| `t4a_cuda_compare` | `(void* out, const void* lhs, const void* rhs, int dtype, int cmp, long long len)` |
+| `t4a_cuda_select` | `(void* out, const void* pred, const void* on_true, const void* on_false, int dtype, long long len)` |
+| `t4a_cuda_clamp` | `(void* out, const void* in, const void* lower, const void* upper, int dtype, long long len)` |
+| `t4a_cuda_combined_strided` | `(void* out, const void* a, const void* b, const void* coefficients, t4a_cuda_layout out_layout, t4a_cuda_layout a_layout, t4a_cuda_layout b_layout, int dtype, int op, long long len)` |
+
+All except `t4a_cuda_combined_strided` are flat (`block = (256,1,1)`,
+`grid = ceil(len/256)`) over `len` logical elements. Op tags are stable and
+append-only; an unsupported `(op, dtype[, side])` triple is the caller's error and
+is rejected by the facade planner. At the raw entry such a triple is caller UB and
+the kernels make no promise about what they write, but the contract is the
+facade's rejection, never that write.
+
+`t4a_cuda_unary` — `len` elements of `src_dtype` into `dst_dtype`:
+
+| Tag | Op | Dtype pair | Semantics |
+| --- | --- | --- | --- |
+| 0 | `NEG` | same, F32/F64/I32/I64/C32/C64 | `-x`; integer negation wraps |
+| 1-10 | `EXP`, `LOG`, `SIN`, `COS`, `TANH`, `SQRT`, `RSQRT`, `EXPM1`, `LOG1P`, `ERF` | same, F32/F64 | CUDA math library; `RSQRT` is `rsqrtf`/`rsqrt` (~2 ulp), not `1/sqrt` |
+| 11 | `ABS` | same F32/F64/I32/I64; F32←C32, F64←C64 | `fabs`; integers wrap on `INT_MIN`; complex is `hypotf`/`hypot` |
+| 12 | `SIGN` | same, F32/F64/I32/I64/C32/C64 | float: NaN→NaN, **either zero → `+0`**, else `±1`; integer `0`/`±1`; complex `0` or `z/|z|` |
+| 13 | `CONJ` | same, C32/C64 | imaginary part negated (`+0 → -0`) |
+
+`t4a_cuda_binary` — `scalar_side` is `0` both elementwise, `1` `lhs` is one
+element read at index 0, `2` `rhs` is one element read at index 0:
+
+| Tag | Op | `dtype` | Sides | Semantics |
+| --- | --- | --- | --- | --- |
+| 0 | `MAX` | F32/F64/I32/I64 | 0,1,2 | NaN-propagating in lhs-then-rhs order; integer plain `>=` |
+| 1 | `MIN` | F32/F64/I32/I64 | 0,1,2 | as `MAX` with `<=` |
+| 2 | `POW` | F32/F64 | 0,1,2 | `powf`/`pow` |
+| 3 | `REM` | F32/F64 | 0,1,2 | `fmodf`/`fmod`; a zero result keeps the dividend's sign |
+| 4 | `MUL` | F32/F64/I32/I64/C32/C64 | 1,2 | `lhs*rhs`, integers wrap; the both-elementwise form is `t4a_cuda_mul` |
+| 5 | `DIV_COMPLEX` | C32/C64 | 0 | scale-robust division over `2 * len` interleaved components |
+| 6 | `DIV_CHECKED` | I32/I64 | 0,1,2 | `y==0` → `err=1`, out `0`; `y==-1` → wrapping `-x`; else `x/y` |
+| 7 | `REM_CHECKED` | I32/I64 | 0,1,2 | `y==0` → `err=1`, out `0`; `y==-1` → out `0`; else `x - (x/y)*y` |
+| 8 | `POW_CHECKED` | I32/I64 | 0,1,2 | `rhs<0` → `err=1`, out `0`; else square-and-multiply (`0^0 == 1`) |
+| 9-12 | `MIXED_ADD`, `MIXED_SUB`, `MIXED_MUL`, `MIXED_DIV` | F32/F64 component | 1,2 | one real operand (1 element) with one complex operand (`2 * len` components); `1` = real is `lhs`. Only `MIXED_DIV` uses the robust form, with the real operand promoted to `(x, +0)` |
+| 13 | `DIV` | F32/F64 | 1,2 | ordinary division; the both-elementwise form is `t4a_cuda_div` |
+
+- `err` is one 4-byte, 4-byte-aligned word the caller zeroes before the first
+  checked launch of a batch. A rejected element stores `1u` with `atomicExch`, so
+  the word means "at least one element was invalid" and is never cleared; it is
+  required for tags 6-8, must not overlap the operands, and is untouched
+  otherwise (NULL is allowed there). This is deliberately **not** the revision-2
+  flag, which records the lowest invalid position; the baseline's checked integer
+  ops record only the boolean.
+- `err` is not a synchronization point: the caller decides when to observe it.
+
+`t4a_cuda_compare` — `cmp` is `0 EQ`, `1 LT`, `2 LE`, `3 GT`, `4 GE`; `dtype` is
+F32/F64/I32/I64; the output is one byte per element holding `1` or `0`. An unknown
+`cmp` writes `0`, as the baseline's default arm does (the facade cannot express
+one).
+
+`t4a_cuda_select` — `pred` is one byte per element (nonzero selects `on_true`);
+`dtype` is F32/F64/I32/I64. Complex is not a ternary dtype in the baseline.
+
+`t4a_cuda_clamp` — F32/F64 only. `out = x < lo ? lo : (x > hi ? hi : x)` with
+ordered comparisons: a NaN `x` propagates and a NaN bound disables its comparison.
+Inverted bounds (`lo > hi`) are not rejected: the statement order decides, so a
+value below `lo` yields `lo` and any other value yields `hi`. The baseline left
+this to CubeCL's `clamp` expansion, so this expression is the pinned contract.
+
+`t4a_cuda_combined_strided` — one logical domain of `len = product(out.extents)`
+elements, decoded through the destination extents and re-addressed through each
+operand layout:
+
+| Tag | Op | `dtype` | Semantics |
+| --- | --- | --- | --- |
+| 0 | `MUL` | F32/F64/I32/I64/C32/C64 | `out = a * b` (the baseline broadcast multiply); integers wrap |
+| 1 | `AXPBY` | F32/F64/C32/C64 | `out = coefficients[0] * a + coefficients[1] * b` |
+
+- `out` must be a destination (no stride-zero axis with extent greater than one).
+  `a` and `b` may carry stride-zero broadcast axes, negative strides and their own
+  offsets; all three layouts share the destination extents.
+- `coefficients` is a two-element device buffer of `dtype`; `MUL` ignores it and
+  may be given NULL, `AXPBY` requires it.
+- **Aliasing**: `out` may alias an input only when that input's element type and
+  layout (extents, strides, offset) are identical to `out`'s, so the thread that
+  writes an element is the thread that read it. `AXPBY` may therefore run in place
+  on `b` and `MUL` may scale in place through `a`. A shifted, broadcast,
+  negative-stride or width-changing overlap is caller UB, so `unary`'s `ABS` route
+  (C32→F32, C64→F64) and `compare`'s Bool destination must be disjoint from their
+  inputs even when the element counts match: a narrower write can reach a byte
+  another thread has not read. The scalar operand of `t4a_cuda_binary` and
+  `coefficients` must be disjoint from `out`; the other operands and `pred` must be
+  distinct allocations.
+
+`t4a_cuda_binary`, `t4a_cuda_compare` and `t4a_cuda_select` may read one operand at
+`len` elements while writing one element per position of a same-width type; their
+buffer capacities are `len` elements of the named tag, or `2 * len` components for
+the component-length tags, which the facade cannot see and therefore documents
+rather than checks. `t4a_cuda_combined_strided` receives the caller's allocation
+lengths and rejects a layout that reaches outside them.
+
 ## Overlap and aliasing
 
 - Gather writes only its destination: the destination must be disjoint from the
@@ -402,6 +503,7 @@ proof, as it already is in the consumer planners.
 | flat entries | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |
 | reductions | see the revision-3 section | `(plane_width, 1, 1)` | 0 |
 | gather / scatter add / convert | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |
+| unary / binary / compare / select / clamp / combined strided | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |
 | one-thread entries (`init_validation`, `extract_invalid_*`) | `(1, 1, 1)` | `(1, 1, 1)` | 0 |
 | `validate_real_cast` | `(ceil(len/stride/256), 1, 1)` | `(256, 1, 1)` | 0 |
 | `t4a_cuda_tiled_transpose` | `(ceil(M/tile), ceil(N/tile), batches)` | `(tile/vector_width, block_rows, 1)` | `tile*(tile+padding)*element_size` |

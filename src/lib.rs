@@ -23,7 +23,7 @@ use core::fmt;
 /// Maximum supported tensor rank. Deeper layouts need a later ABI revision.
 pub const MAX_RANK: usize = 8;
 /// Version of the C ABI described by this crate.
-pub const ABI_REVISION: u32 = 5;
+pub const ABI_REVISION: u32 = 6;
 /// Threads per block for the flat (element-wise) entries.
 pub const FLAT_BLOCK: u32 = 256;
 /// Largest block count for grid dimensions y and z.
@@ -150,6 +150,8 @@ pub enum Error {
     InvalidSplit,
     /// The index vector size differs from the start/scatter map length.
     IndexVectorMismatch,
+    /// The operation tag is not defined for this dtype, operand side or length.
+    UnsupportedOp,
 }
 
 impl fmt::Display for Error {
@@ -179,6 +181,7 @@ impl fmt::Display for Error {
             Error::InvalidPlaneWidth => "plane width must be 8, 16 or 32",
             Error::InvalidSplit => "inconsistent split tuple",
             Error::IndexVectorMismatch => "index vector size differs from the map length",
+            Error::UnsupportedOp => "operation is not supported for this dtype or operand side",
         };
         f.write_str(text)
     }
@@ -437,10 +440,16 @@ pub enum Entry {
     Gather,
     ScatterAdd,
     Convert,
+    Unary,
+    Binary,
+    Compare,
+    Select,
+    Clamp,
+    CombinedStrided,
 }
 
 impl Entry {
-    pub const ALL: [Entry; 28] = [
+    pub const ALL: [Entry; 34] = [
         Entry::FillZero,
         Entry::FillZeroView,
         Entry::CopyExact,
@@ -469,6 +478,12 @@ impl Entry {
         Entry::Gather,
         Entry::ScatterAdd,
         Entry::Convert,
+        Entry::Unary,
+        Entry::Binary,
+        Entry::Compare,
+        Entry::Select,
+        Entry::Clamp,
+        Entry::CombinedStrided,
     ];
 
     /// Exported CUDA symbol; equal to the name documented in the ABI.
@@ -502,6 +517,12 @@ impl Entry {
             Entry::Gather => "t4a_cuda_gather",
             Entry::ScatterAdd => "t4a_cuda_scatter_add",
             Entry::Convert => "t4a_cuda_convert",
+            Entry::Unary => "t4a_cuda_unary",
+            Entry::Binary => "t4a_cuda_binary",
+            Entry::Compare => "t4a_cuda_compare",
+            Entry::Select => "t4a_cuda_select",
+            Entry::Clamp => "t4a_cuda_clamp",
+            Entry::CombinedStrided => "t4a_cuda_combined_strided",
         }
     }
 
@@ -532,6 +553,17 @@ impl Entry {
                 DType::C32,
                 DType::C64,
             ],
+            // Op-dependent; the planners reject the pairs each entry does not serve.
+            Entry::Unary | Entry::Binary | Entry::CombinedStrided => &[
+                DType::F32,
+                DType::F64,
+                DType::I32,
+                DType::I64,
+                DType::C32,
+                DType::C64,
+            ],
+            Entry::Compare | Entry::Select => &[DType::F32, DType::F64, DType::I32, DType::I64],
+            Entry::Clamp => &[DType::F32, DType::F64],
             _ => &DType::ALL,
         }
     }
@@ -544,7 +576,17 @@ impl Entry {
     pub const fn is_elementwise(self) -> bool {
         matches!(
             self,
-            Entry::FillZero | Entry::CopyExact | Entry::Add | Entry::Sub | Entry::Mul | Entry::Div
+            Entry::FillZero
+                | Entry::CopyExact
+                | Entry::Add
+                | Entry::Sub
+                | Entry::Mul
+                | Entry::Div
+                | Entry::Unary
+                | Entry::Binary
+                | Entry::Compare
+                | Entry::Select
+                | Entry::Clamp
         )
     }
 }
@@ -747,6 +789,300 @@ pub fn plan_convert(dst_dtype: DType, src_dtype: DType, len: i64) -> Result<Laun
         return Err(Error::ShapeMismatch);
     }
     flat_launch(len)
+}
+
+// --- revision 6: elementwise, comparison and strided combination -----------
+
+const fn same_dtype(lhs: DType, rhs: DType) -> bool {
+    lhs.tag() == rhs.tag()
+}
+
+/// Unary operation tag of [`Entry::Unary`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnaryOp {
+    Neg,
+    Exp,
+    Log,
+    Sin,
+    Cos,
+    Tanh,
+    Sqrt,
+    Rsqrt,
+    Expm1,
+    Log1p,
+    Erf,
+    Abs,
+    Sign,
+    Conj,
+}
+
+impl UnaryOp {
+    pub const fn tag(self) -> i32 {
+        match self {
+            UnaryOp::Neg => 0,
+            UnaryOp::Exp => 1,
+            UnaryOp::Log => 2,
+            UnaryOp::Sin => 3,
+            UnaryOp::Cos => 4,
+            UnaryOp::Tanh => 5,
+            UnaryOp::Sqrt => 6,
+            UnaryOp::Rsqrt => 7,
+            UnaryOp::Expm1 => 8,
+            UnaryOp::Log1p => 9,
+            UnaryOp::Erf => 10,
+            UnaryOp::Abs => 11,
+            UnaryOp::Sign => 12,
+            UnaryOp::Conj => 13,
+        }
+    }
+
+    /// Whether this operation serves the `dst <- src` dtype pair. Complex `Abs`
+    /// is the only unequal pair; a same-dtype complex `Abs` is not an operation.
+    pub const fn accepts(self, dst: DType, src: DType) -> bool {
+        match self {
+            UnaryOp::Neg | UnaryOp::Sign => {
+                same_dtype(dst, src)
+                    && matches!(
+                        dst,
+                        DType::F32 | DType::F64 | DType::I32 | DType::I64 | DType::C32 | DType::C64
+                    )
+            }
+            UnaryOp::Exp
+            | UnaryOp::Log
+            | UnaryOp::Sin
+            | UnaryOp::Cos
+            | UnaryOp::Tanh
+            | UnaryOp::Sqrt
+            | UnaryOp::Rsqrt
+            | UnaryOp::Expm1
+            | UnaryOp::Log1p
+            | UnaryOp::Erf => same_dtype(dst, src) && matches!(dst, DType::F32 | DType::F64),
+            UnaryOp::Abs => {
+                (same_dtype(dst, src)
+                    && matches!(dst, DType::F32 | DType::F64 | DType::I32 | DType::I64))
+                    || matches!(
+                        (dst, src),
+                        (DType::F32, DType::C32) | (DType::F64, DType::C64)
+                    )
+            }
+            UnaryOp::Conj => same_dtype(dst, src) && matches!(dst, DType::C32 | DType::C64),
+        }
+    }
+}
+
+/// Which operand of a binary entry holds the single element.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScalarSide {
+    Both,
+    Left,
+    Right,
+}
+
+impl ScalarSide {
+    pub const fn tag(self) -> i32 {
+        match self {
+            ScalarSide::Both => 0,
+            ScalarSide::Left => 1,
+            ScalarSide::Right => 2,
+        }
+    }
+}
+
+/// Binary operation tag of [`Entry::Binary`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BinaryOp {
+    Max,
+    Min,
+    Pow,
+    Rem,
+    Mul,
+    DivComplex,
+    DivChecked,
+    RemChecked,
+    PowChecked,
+    MixedAdd,
+    MixedSub,
+    MixedMul,
+    MixedDiv,
+    Div,
+}
+
+impl BinaryOp {
+    pub const fn tag(self) -> i32 {
+        match self {
+            BinaryOp::Max => 0,
+            BinaryOp::Min => 1,
+            BinaryOp::Pow => 2,
+            BinaryOp::Rem => 3,
+            BinaryOp::Mul => 4,
+            BinaryOp::DivComplex => 5,
+            BinaryOp::DivChecked => 6,
+            BinaryOp::RemChecked => 7,
+            BinaryOp::PowChecked => 8,
+            BinaryOp::MixedAdd => 9,
+            BinaryOp::MixedSub => 10,
+            BinaryOp::MixedMul => 11,
+            BinaryOp::MixedDiv => 12,
+            BinaryOp::Div => 13,
+        }
+    }
+
+    /// Whether the operation serves `dtype` with this operand side. The
+    /// elementwise `Both` forms of multiplication and float division stay with
+    /// [`Entry::Mul`] and [`Entry::Div`].
+    pub const fn accepts(self, dtype: DType, side: ScalarSide) -> bool {
+        let scalar = !matches!(side, ScalarSide::Both);
+        let real = matches!(dtype, DType::F32 | DType::F64);
+        let ordered = matches!(dtype, DType::F32 | DType::F64 | DType::I32 | DType::I64);
+        let integer = matches!(dtype, DType::I32 | DType::I64);
+        let complex = matches!(dtype, DType::C32 | DType::C64);
+        match self {
+            BinaryOp::Max | BinaryOp::Min => ordered,
+            BinaryOp::Pow | BinaryOp::Rem => real,
+            BinaryOp::Mul => scalar && (real || integer || complex),
+            BinaryOp::DivComplex => complex && !scalar,
+            BinaryOp::DivChecked | BinaryOp::RemChecked | BinaryOp::PowChecked => integer,
+            BinaryOp::MixedAdd | BinaryOp::MixedSub | BinaryOp::MixedMul | BinaryOp::MixedDiv => {
+                real && scalar
+            }
+            BinaryOp::Div => real && scalar,
+        }
+    }
+
+    /// `len` counts elements but the buffers hold two components per element.
+    pub const fn uses_component_length(self) -> bool {
+        matches!(
+            self,
+            BinaryOp::DivComplex
+                | BinaryOp::MixedAdd
+                | BinaryOp::MixedSub
+                | BinaryOp::MixedMul
+                | BinaryOp::MixedDiv
+        )
+    }
+}
+
+/// Comparison tag of [`Entry::Compare`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompareOp {
+    Eq,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+impl CompareOp {
+    pub const fn tag(self) -> i32 {
+        match self {
+            CompareOp::Eq => 0,
+            CompareOp::Lt => 1,
+            CompareOp::Le => 2,
+            CompareOp::Gt => 3,
+            CompareOp::Ge => 4,
+        }
+    }
+}
+
+/// Operation tag of [`Entry::CombinedStrided`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StridedOp {
+    /// `out = a * b`, the baseline broadcast multiply.
+    Mul,
+    /// `out = c[0] * a + c[1] * b`, the baseline strided axpby.
+    Axpby,
+}
+
+impl StridedOp {
+    pub const fn tag(self) -> i32 {
+        match self {
+            StridedOp::Mul => 0,
+            StridedOp::Axpby => 1,
+        }
+    }
+
+    pub const fn accepts(self, dtype: DType) -> bool {
+        match self {
+            StridedOp::Mul => !matches!(dtype, DType::Bool),
+            StridedOp::Axpby => {
+                matches!(dtype, DType::F32 | DType::F64 | DType::C32 | DType::C64)
+            }
+        }
+    }
+}
+
+/// Plan [`Entry::Unary`]: `len` elements transform from `src_dtype` to `dst_dtype`.
+pub fn plan_unary(op: UnaryOp, dst: DType, src: DType, len: i64) -> Result<Launch, Error> {
+    if !op.accepts(dst, src) {
+        return Err(Error::UnsupportedOp);
+    }
+    flat_launch(len)
+}
+
+/// Plan [`Entry::Binary`]. `len` counts elements; the `DivComplex` and `Mixed*`
+/// tags take `2 * len` components per buffer.
+pub fn plan_binary(
+    op: BinaryOp,
+    dtype: DType,
+    side: ScalarSide,
+    len: i64,
+) -> Result<Launch, Error> {
+    if !op.accepts(dtype, side) {
+        return Err(Error::UnsupportedOp);
+    }
+    if len < 0 {
+        return Err(Error::NegativeCount);
+    }
+    if op.uses_component_length() {
+        len.checked_mul(2).ok_or(Error::Overflow)?;
+    }
+    flat_launch(len)
+}
+
+/// Plan [`Entry::Compare`]: `len` element pairs reduce to one byte each.
+pub fn plan_compare(dtype: DType, len: i64) -> Result<Launch, Error> {
+    check_dtype(Entry::Compare, dtype)?;
+    flat_launch(len)
+}
+
+/// Plan [`Entry::Select`]: `len` predicate bytes select between two operands.
+pub fn plan_select(dtype: DType, len: i64) -> Result<Launch, Error> {
+    check_dtype(Entry::Select, dtype)?;
+    flat_launch(len)
+}
+
+/// Plan [`Entry::Clamp`]: `len` elements with per-element bounds.
+pub fn plan_clamp(dtype: DType, len: i64) -> Result<Launch, Error> {
+    check_dtype(Entry::Clamp, dtype)?;
+    flat_launch(len)
+}
+
+/// Plan [`Entry::CombinedStrided`]: one logical domain (`out`'s extents) with a
+/// layout per operand. `a`/`b` may carry broadcast (stride zero) and negative
+/// strides; `out` must be a destination. `out_len`, `a_len` and `b_len` are the
+/// caller's allocation lengths in elements.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_combined_strided(
+    op: StridedOp,
+    dtype: DType,
+    out: &Layout,
+    out_len: i64,
+    a: &Layout,
+    a_len: i64,
+    b: &Layout,
+    b_len: i64,
+) -> Result<Launch, Error> {
+    if !op.accepts(dtype) {
+        return Err(Error::UnsupportedOp);
+    }
+    require_destination(out)?;
+    if a.extents() != out.extents() || b.extents() != out.extents() {
+        return Err(Error::ShapeMismatch);
+    }
+    out.check_span(out_len, dtype.size())?;
+    a.check_span(a_len, dtype.size())?;
+    b.check_span(b_len, dtype.size())?;
+    flat_launch(out.element_count()?)
 }
 
 /// XLA-style gather dimension maps. All vectors are validated by

@@ -51,3 +51,8 @@ required-features = ["gpu-tests"]
 name = "gpu_convert"
 path = "tests/gpu_convert.rs"
 required-features = ["gpu-tests"]
+
+[[test]]
+name = "gpu_elementwise"
+path = "tests/gpu_elementwise.rs"
+required-features = ["gpu-tests"]

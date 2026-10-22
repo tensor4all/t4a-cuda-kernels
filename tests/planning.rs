@@ -312,7 +312,8 @@ fn entry_names_are_unique_and_exported_by_the_sources() {
         include_str!("../cuda/src/validation.cu"),
         include_str!("../cuda/src/reduce.cu"),
         include_str!("../cuda/src/gather_scatter.cu"),
-        include_str!("../cuda/src/convert.cu")
+        include_str!("../cuda/src/convert.cu"),
+        include_str!("../cuda/src/elementwise.cu")
     );
     for (index, entry) in Entry::ALL.iter().enumerate() {
         let name = entry.name();
@@ -1493,4 +1494,453 @@ fn convert_accepts_every_unequal_pair_and_rejects_identity() {
         Err(Error::LaunchLimit)
     );
     assert_eq!(Entry::Convert.supported_dtypes(), &DType::ALL);
+}
+
+// --- revision 6: elementwise, comparison and strided combination -----------
+
+use t4a_cuda_kernels::{
+    plan_binary, plan_clamp, plan_combined_strided, plan_compare, plan_select, plan_unary,
+    BinaryOp, CompareOp, ScalarSide, StridedOp, UnaryOp,
+};
+
+const UNARY_OPS: [UnaryOp; 14] = [
+    UnaryOp::Neg,
+    UnaryOp::Exp,
+    UnaryOp::Log,
+    UnaryOp::Sin,
+    UnaryOp::Cos,
+    UnaryOp::Tanh,
+    UnaryOp::Sqrt,
+    UnaryOp::Rsqrt,
+    UnaryOp::Expm1,
+    UnaryOp::Log1p,
+    UnaryOp::Erf,
+    UnaryOp::Abs,
+    UnaryOp::Sign,
+    UnaryOp::Conj,
+];
+
+const BINARY_OPS: [BinaryOp; 14] = [
+    BinaryOp::Max,
+    BinaryOp::Min,
+    BinaryOp::Pow,
+    BinaryOp::Rem,
+    BinaryOp::Mul,
+    BinaryOp::DivComplex,
+    BinaryOp::DivChecked,
+    BinaryOp::RemChecked,
+    BinaryOp::PowChecked,
+    BinaryOp::MixedAdd,
+    BinaryOp::MixedSub,
+    BinaryOp::MixedMul,
+    BinaryOp::MixedDiv,
+    BinaryOp::Div,
+];
+
+const SIDES: [ScalarSide; 3] = [ScalarSide::Both, ScalarSide::Left, ScalarSide::Right];
+
+#[test]
+fn revision_six_tags_are_stable_and_unique() {
+    for (tag, op) in UNARY_OPS.iter().enumerate() {
+        assert_eq!(op.tag(), tag as i32, "{op:?}");
+    }
+    for (tag, op) in BINARY_OPS.iter().enumerate() {
+        assert_eq!(op.tag(), tag as i32, "{op:?}");
+    }
+    assert_eq!(StridedOp::Mul.tag(), 0);
+    assert_eq!(StridedOp::Axpby.tag(), 1);
+    assert_eq!(ScalarSide::Both.tag(), 0);
+    assert_eq!(ScalarSide::Left.tag(), 1);
+    assert_eq!(ScalarSide::Right.tag(), 2);
+    let compares = [
+        (CompareOp::Eq, 0),
+        (CompareOp::Lt, 1),
+        (CompareOp::Le, 2),
+        (CompareOp::Gt, 3),
+        (CompareOp::Ge, 4),
+    ];
+    for (op, tag) in compares {
+        assert_eq!(op.tag(), tag);
+    }
+}
+
+#[test]
+fn unary_accepts_exactly_the_documented_pairs() {
+    let pairs = |op: UnaryOp| {
+        let mut accepted = DType::ALL
+            .iter()
+            .flat_map(|dst| DType::ALL.iter().map(move |src| (*dst, *src)))
+            .filter(|(dst, src)| plan_unary(op, *dst, *src, 3).is_ok())
+            .collect::<Vec<_>>();
+        accepted.sort_by_key(|(dst, src)| (dst.tag(), src.tag()));
+        accepted
+    };
+    let same = |dtypes: &[DType]| {
+        let mut pairs = dtypes
+            .iter()
+            .map(|dtype| (*dtype, *dtype))
+            .collect::<Vec<_>>();
+        pairs.sort_by_key(|(dst, src)| (dst.tag(), src.tag()));
+        pairs
+    };
+
+    let real_or_complex = [
+        DType::F32,
+        DType::F64,
+        DType::I32,
+        DType::I64,
+        DType::C32,
+        DType::C64,
+    ];
+    for op in [UnaryOp::Neg, UnaryOp::Sign] {
+        assert_eq!(pairs(op), same(&real_or_complex), "{op:?}");
+    }
+    for op in [
+        UnaryOp::Exp,
+        UnaryOp::Log,
+        UnaryOp::Sin,
+        UnaryOp::Cos,
+        UnaryOp::Tanh,
+        UnaryOp::Sqrt,
+        UnaryOp::Rsqrt,
+        UnaryOp::Expm1,
+        UnaryOp::Log1p,
+        UnaryOp::Erf,
+    ] {
+        assert_eq!(pairs(op), same(&[DType::F32, DType::F64]), "{op:?}");
+    }
+    let mut magnitude = same(&[DType::F32, DType::F64, DType::I32, DType::I64])
+        .into_iter()
+        .chain([(DType::F32, DType::C32), (DType::F64, DType::C64)])
+        .collect::<Vec<_>>();
+    magnitude.sort_by_key(|(dst, src)| (dst.tag(), src.tag()));
+    assert_eq!(
+        pairs(UnaryOp::Abs),
+        magnitude,
+        "complex magnitude is the only unequal pair"
+    );
+    assert_eq!(pairs(UnaryOp::Conj), same(&[DType::C32, DType::C64]));
+    // A same-dtype complex ABS is not an operation.
+    assert_eq!(
+        plan_unary(UnaryOp::Abs, DType::C32, DType::C32, 4),
+        Err(Error::UnsupportedOp)
+    );
+    assert_eq!(
+        plan_unary(UnaryOp::Neg, DType::Bool, DType::Bool, 4),
+        Err(Error::UnsupportedOp)
+    );
+    let launch = plan_unary(UnaryOp::Exp, DType::F32, DType::F32, 513).unwrap();
+    assert_eq!(launch.grid, [3, 1, 1]);
+    assert_eq!(launch.block, [FLAT_BLOCK, 1, 1]);
+    assert!(plan_unary(UnaryOp::Exp, DType::F32, DType::F32, 0)
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        plan_unary(UnaryOp::Exp, DType::F32, DType::F32, -1),
+        Err(Error::NegativeCount)
+    );
+}
+
+#[test]
+fn binary_accepts_exactly_the_documented_op_dtype_side_triples() {
+    let mut accepted = Vec::new();
+    for op in BINARY_OPS {
+        for dtype in DType::ALL {
+            for side in SIDES {
+                if plan_binary(op, dtype, side, 7).is_ok() {
+                    accepted.push((op.tag(), dtype.tag(), side.tag()));
+                }
+            }
+        }
+    }
+    let expected: Vec<(i32, i32, i32)> = vec![
+        // MAX / MIN over the ordered dtypes, every side.
+        (0, 0, 0),
+        (0, 0, 1),
+        (0, 0, 2),
+        (0, 1, 0),
+        (0, 1, 1),
+        (0, 1, 2),
+        (0, 2, 0),
+        (0, 2, 1),
+        (0, 2, 2),
+        (0, 3, 0),
+        (0, 3, 1),
+        (0, 3, 2),
+        (1, 0, 0),
+        (1, 0, 1),
+        (1, 0, 2),
+        (1, 1, 0),
+        (1, 1, 1),
+        (1, 1, 2),
+        (1, 2, 0),
+        (1, 2, 1),
+        (1, 2, 2),
+        (1, 3, 0),
+        (1, 3, 1),
+        (1, 3, 2),
+        // POW / REM over the floats, every side.
+        (2, 0, 0),
+        (2, 0, 1),
+        (2, 0, 2),
+        (2, 1, 0),
+        (2, 1, 1),
+        (2, 1, 2),
+        (3, 0, 0),
+        (3, 0, 1),
+        (3, 0, 2),
+        (3, 1, 0),
+        (3, 1, 1),
+        (3, 1, 2),
+        // MUL with one scalar side.
+        (4, 0, 1),
+        (4, 0, 2),
+        (4, 1, 1),
+        (4, 1, 2),
+        (4, 2, 1),
+        (4, 2, 2),
+        (4, 3, 1),
+        (4, 3, 2),
+        (4, 5, 1),
+        (4, 5, 2),
+        (4, 6, 1),
+        (4, 6, 2),
+        // DIV_COMPLEX, both elementwise.
+        (5, 5, 0),
+        (5, 6, 0),
+        // Checked integer ops, every side.
+        (6, 2, 0),
+        (6, 2, 1),
+        (6, 2, 2),
+        (6, 3, 0),
+        (6, 3, 1),
+        (6, 3, 2),
+        (7, 2, 0),
+        (7, 2, 1),
+        (7, 2, 2),
+        (7, 3, 0),
+        (7, 3, 1),
+        (7, 3, 2),
+        (8, 2, 0),
+        (8, 2, 1),
+        (8, 2, 2),
+        (8, 3, 0),
+        (8, 3, 1),
+        (8, 3, 2),
+        // Mixed real/complex with the real operand named by the side.
+        (9, 0, 1),
+        (9, 0, 2),
+        (9, 1, 1),
+        (9, 1, 2),
+        (10, 0, 1),
+        (10, 0, 2),
+        (10, 1, 1),
+        (10, 1, 2),
+        (11, 0, 1),
+        (11, 0, 2),
+        (11, 1, 1),
+        (11, 1, 2),
+        (12, 0, 1),
+        (12, 0, 2),
+        (12, 1, 1),
+        (12, 1, 2),
+        // Float division with one scalar side.
+        (13, 0, 1),
+        (13, 0, 2),
+        (13, 1, 1),
+        (13, 1, 2),
+    ];
+    assert_eq!(accepted, expected);
+
+    // The both-elementwise forms of multiplication and float division stay with
+    // the revision-1 entries; a complex scalar side is never meaningful.
+    assert_eq!(
+        plan_binary(BinaryOp::Mul, DType::F32, ScalarSide::Both, 4),
+        Err(Error::UnsupportedOp)
+    );
+    assert_eq!(
+        plan_binary(BinaryOp::Div, DType::F64, ScalarSide::Both, 4),
+        Err(Error::UnsupportedOp)
+    );
+    assert_eq!(
+        plan_binary(BinaryOp::DivComplex, DType::C32, ScalarSide::Left, 4),
+        Err(Error::UnsupportedOp)
+    );
+    // A component-length tag must not overflow the doubled buffer length.
+    let too_long = i64::MAX / 2 + 1;
+    assert_eq!(
+        plan_binary(BinaryOp::DivComplex, DType::C64, ScalarSide::Both, too_long),
+        Err(Error::Overflow)
+    );
+    assert_eq!(
+        plan_binary(BinaryOp::Mul, DType::C64, ScalarSide::Left, 1000)
+            .unwrap()
+            .grid,
+        [4, 1, 1],
+        "a whole-value complex operation does not double the length"
+    );
+    assert_eq!(
+        plan_binary(BinaryOp::Max, DType::F32, ScalarSide::Both, -2),
+        Err(Error::NegativeCount)
+    );
+    assert!(plan_binary(BinaryOp::Max, DType::F32, ScalarSide::Both, 0)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn compare_select_and_clamp_reject_complex_and_bool() {
+    for dtype in [DType::C32, DType::C64, DType::Bool] {
+        assert_eq!(plan_compare(dtype, 4), Err(Error::UnsupportedDType));
+        assert_eq!(plan_select(dtype, 4), Err(Error::UnsupportedDType));
+        assert_eq!(plan_clamp(dtype, 4), Err(Error::UnsupportedDType));
+    }
+    for dtype in [DType::F32, DType::F64, DType::I32, DType::I64] {
+        assert_eq!(plan_compare(dtype, 300).unwrap().grid, [2, 1, 1]);
+        assert_eq!(plan_select(dtype, 300).unwrap().grid, [2, 1, 1]);
+    }
+    assert_eq!(
+        plan_clamp(DType::F64, 256).unwrap().grid,
+        [1, 1, 1],
+        "one block exactly"
+    );
+    assert_eq!(plan_clamp(DType::F64, 257).unwrap().grid, [2, 1, 1]);
+    assert!(plan_compare(DType::F32, 0).unwrap().is_empty());
+    assert_eq!(plan_select(DType::F32, -1), Err(Error::NegativeCount));
+    assert_eq!(plan_clamp(DType::F32, -1), Err(Error::NegativeCount));
+}
+
+#[test]
+fn combined_strided_validates_the_shared_domain_and_spans() {
+    let out = Layout::compact(&[3, 4]).unwrap();
+    // a broadcasts axis 1, b is axis 0 reversed (negative stride, shifted offset).
+    let a = Layout::new(&[3, 4], &[1, 0], 0).unwrap();
+    let b = Layout::new(&[3, 4], &[4, -1], 3).unwrap();
+    let launch =
+        plan_combined_strided(StridedOp::Axpby, DType::F32, &out, 12, &a, 3, &b, 12).unwrap();
+    assert_eq!(launch.grid, [1, 1, 1]);
+    assert_eq!(launch.block, [FLAT_BLOCK, 1, 1]);
+
+    // The domain comes from the destination, so a different operand shape is a
+    // shape mismatch rather than a silently truncated loop.
+    let wrong = Layout::new(&[3, 3], &[1, 0], 0).unwrap();
+    assert_eq!(
+        plan_combined_strided(StridedOp::Mul, DType::F32, &out, 12, &wrong, 3, &a, 3),
+        Err(Error::ShapeMismatch)
+    );
+    // A broadcast destination would race two threads onto one element.
+    assert_eq!(
+        plan_combined_strided(StridedOp::Mul, DType::F32, &a, 3, &out, 12, &out, 12),
+        Err(Error::BroadcastDestination)
+    );
+    // Spans are checked against the caller's allocation lengths.
+    assert_eq!(
+        plan_combined_strided(StridedOp::Mul, DType::F32, &out, 12, &a, 3, &out, 11),
+        Err(Error::OffsetOutOfSpan)
+    );
+    assert_eq!(
+        plan_combined_strided(StridedOp::Mul, DType::F32, &out, 12, &a, 2, &out, 12),
+        Err(Error::OffsetOutOfSpan)
+    );
+    // AXPBY is real/complex only; the wrapping integer multiply is MUL.
+    assert_eq!(
+        plan_combined_strided(StridedOp::Axpby, DType::I32, &out, 12, &out, 12, &out, 12),
+        Err(Error::UnsupportedOp)
+    );
+    assert!(
+        plan_combined_strided(StridedOp::Mul, DType::I64, &out, 12, &out, 12, &out, 12).is_ok()
+    );
+    assert_eq!(
+        plan_combined_strided(StridedOp::Mul, DType::Bool, &out, 12, &out, 12, &out, 12),
+        Err(Error::UnsupportedOp)
+    );
+    // An empty domain needs no span.
+    let empty = Layout::new(&[0, 4], &[4, 1], 0).unwrap();
+    assert!(
+        plan_combined_strided(StridedOp::Mul, DType::F32, &empty, 0, &empty, 0, &empty, 0)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn revision_six_entries_are_in_the_manifest() {
+    for (entry, name) in [
+        (Entry::Unary, "t4a_cuda_unary"),
+        (Entry::Binary, "t4a_cuda_binary"),
+        (Entry::Compare, "t4a_cuda_compare"),
+        (Entry::Select, "t4a_cuda_select"),
+        (Entry::Clamp, "t4a_cuda_clamp"),
+        (Entry::CombinedStrided, "t4a_cuda_combined_strided"),
+    ] {
+        assert_eq!(entry.name(), name);
+        assert!(Entry::ALL.contains(&entry));
+    }
+    assert!(Entry::Unary.is_elementwise());
+    assert!(Entry::Binary.is_elementwise());
+    assert!(Entry::Compare.is_elementwise());
+    assert!(Entry::Select.is_elementwise());
+    assert!(Entry::Clamp.is_elementwise());
+    assert!(!Entry::CombinedStrided.is_elementwise());
+    assert_eq!(Entry::Clamp.supported_dtypes(), &[DType::F32, DType::F64]);
+    assert_eq!(
+        Entry::Compare.supported_dtypes(),
+        &[DType::F32, DType::F64, DType::I32, DType::I64]
+    );
+    assert_eq!(Entry::CombinedStrided.supported_dtypes().len(), 6);
+}
+
+#[test]
+fn structural_extras_are_expressible_with_revision_one_entries() {
+    // broadcast_in_dim: source [2,3] broadcast into output [2,4,3] on axes (0,2).
+    // The expanded source read layout carries the output extents, the source
+    // strides on the mapped axes and stride zero on inserted axes.
+    let broadcast = Layout::new(&[2, 4, 3], &[3, 0, 1], 0).unwrap();
+    assert_eq!(broadcast.element_count().unwrap(), 24);
+    let launch = plan_materialize_strided(DType::F32, &broadcast, 6).unwrap();
+    assert_eq!(launch.grid, [1, 1, 1]);
+    assert_eq!(launch.block, [FLAT_BLOCK, 1, 1]);
+
+    // reverse: reverse axis 2 of [2,3,4]; the axis flips to a negative stride and
+    // its offset moves to the far end of that axis.
+    let reversed = Layout::new(&[2, 3, 4], &[1, 2, -6], 18).unwrap();
+    assert_eq!(reversed.element_count().unwrap(), 24);
+    assert!(plan_materialize_strided(DType::F32, &reversed, 24).is_ok());
+    assert!(plan_strided_to_strided(
+        DType::F32,
+        &reversed,
+        24,
+        &Layout::compact(&[2, 3, 4]).unwrap(),
+        24
+    )
+    .is_ok());
+
+    // concatenate_copy: write a compact [2,3] operand at axis_offset 4 of a
+    // compact [6,3] output. The destination is the shifted *view*, so its extents
+    // equal the input's and the revision-1 strided copy serves it.
+    let output = Layout::compact(&[6, 3]).unwrap();
+    let shifted = Layout::new(&[2, 3], output.strides(), 4 * output.strides()[0]).unwrap();
+    assert!(plan_strided_to_strided(
+        DType::F32,
+        &Layout::compact(&[2, 3]).unwrap(),
+        6,
+        &shifted,
+        18
+    )
+    .is_ok());
+    // A shifted view that leaves the buffer is still refused.
+    assert_eq!(
+        plan_strided_to_strided(
+            DType::F32,
+            &Layout::compact(&[2, 3]).unwrap(),
+            6,
+            &shifted,
+            17
+        ),
+        Err(Error::OffsetOutOfSpan)
+    );
+
+    // scale_in_place is the binary scalar multiply with out == lhs.
+    let scaled = plan_binary(BinaryOp::Mul, DType::C64, ScalarSide::Right, 9).unwrap();
+    assert_eq!(scaled.grid, [1, 1, 1]);
 }

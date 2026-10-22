@@ -277,9 +277,43 @@ limitations under the License.
 ```
 
 
-## Deferred: Julia Base (complex division)
+## Julia Base (complex division)
 
-The complex-division kernels are not ported in revision 3. tenferro-rs records a
-Julia Base derivation for them without a pinned revision; that notice must be
-audited and carried over when complex division lands. It is deliberately not
-reproduced here, because reproducing an unreviewed notice is not attribution.
+The scale-robust complex division (`t4a_cuda_div_complex_parts_at` in
+`cuda/include/t4a/abi.cuh`, used by `t4a_cuda_binary` tags `DIV_COMPLEX` and
+`MIXED_DIV`) is translated from tenferro-rs, which derives it from Julia Base:
+
+- Upstream project: <https://github.com/JuliaLang/julia>
+- Source file: `base/complex.jl` functions `cdiv`, `robust_cdiv1`, `robust_cdiv2`,
+  `scaling_cdiv`, `scaleargs_cdiv`
+- Commit: not recorded upstream by tenferro-rs; the derivation was audited from
+  those functions and the port chain Julia Base -> tenferro-rs -> this crate
+- Original copyright: Copyright (c) 2009-2026 Jeff Bezanson, Stefan Karpinski,
+  Viral B. Shah, and other Julia contributors
+- Original license: MIT
+
+```text
+Copyright (c) 2009-2026: Jeff Bezanson, Stefan Karpinski, Viral B. Shah,
+and other contributors:
+
+https://github.com/JuliaLang/julia/contributors
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```

@@ -6,10 +6,11 @@ Runtime-independent CUDA kernels for tensor4all and external CUDA consumers.
 
 ## Status
 
-Five slices implemented and GPU-validated: C ABI revision 5, checked host
+Six slices implemented and GPU-validated: C ABI revision 6, checked host
 planning, the movement and elementary-arithmetic families, the diagonal,
 windowing and validation-status families, single-axis reductions, XLA-style
-gather with additive scatter, and the dtype conversions.
+gather with additive scatter, the dtype conversions, and the remaining
+elementwise, comparison and strided-combination families.
 
 | Entry | Ported from | Dtypes |
 | --- | --- | --- |
@@ -25,12 +26,19 @@ gather with additive scatter, and the dtype conversions.
 | `t4a_cuda_reduce`, `_reduce_partials` | `reduce_{sum,prod,sum_squares,max,min}*`, `_plane`, `_chunked` | sum/prod: F32/F64/I32/I64/C32/C64; sum-of-squares F32/F64; max/min F32/F64/I32/I64 |
 | `t4a_cuda_gather`, `_scatter_add` | `gather_kernel`, `scatter_{float,complex}_kernel` | all data dtypes with F32/F64/I32/I64 indices; scatter F32/F64/C32/C64 |
 | `t4a_cuda_convert` | the `convert_*` family in `structural.rs` | every unequal pair of the seven dtypes |
+| `t4a_cuda_unary` | `neg_*`, `exp_float` .. `erf_float`, `abs_*`, `sign_*`, `conj_complex` | F32/F64/I32/I64/C32/C64, op-dependent |
+| `t4a_cuda_binary` | extrema, `pow*`, `rem*`, scalar and mixed real/complex forms, `div_complex_parts`, `scale_in_place_*` | F32/F64/I32/I64/C32/C64, op-dependent |
+| `t4a_cuda_compare`, `_select`, `_clamp` | `compare_*`, `select_bool_*`, `clamp_float` | F32/F64/I32/I64 (clamp F32/F64) |
+| `t4a_cuda_combined_strided` | `broadcast_multiply_*`, `axpby_strided_source_*` | F32/F64/I32/I64/C32/C64 (axpby F32/F64/C32/C64) |
 
-Not implemented yet: see the authoritative remaining-work list in the
-[conversions worklog](docs/worklogs/2026-10-20-conversions-slice.md#still-not-ported-from-the-inventory) —
-the structural movement extras, the elementwise families revision 1 did not take,
-the linalg/RRQR helpers, the fused-expression emitter, and the NVRTC
-prepare/cache path.
+The baseline's `broadcast_in_dim`, `reverse` and `concatenate_copy` kernels need
+no entry of their own: an explicit layout (expanded broadcast source, negative
+stride, shifted destination view) expresses the same address map through the
+movement entries.
+
+Not implemented yet: the linalg/RRQR helpers, the fused-expression emitter, and the
+NVRTC prepare/cache path. See the
+[elementwise worklog](docs/worklogs/2026-10-21-elementwise-slice.md#still-not-ported).
 
 - [C kernel ABI](docs/abi/c-kernel-abi.md)
 - [Slice plan: ABI, movement, arithmetic](docs/design/slice-abi-movement-arithmetic.md)
@@ -43,6 +51,8 @@ prepare/cache path.
 - [Local GPU evidence: reductions](docs/worklogs/2026-10-20-reductions-slice.md)
 - [Local GPU evidence: gather and scatter](docs/worklogs/2026-10-20-gather-scatter-slice.md)
 - [Local GPU evidence: conversions](docs/worklogs/2026-10-20-conversions-slice.md)
+- [Slice plan: elementwise, comparison, strided combination](docs/design/slice-elementwise.md)
+- [Local GPU evidence: elementwise](docs/worklogs/2026-10-21-elementwise-slice.md)
 - [Third-party notices](THIRD_PARTY_NOTICES.md)
 - [Migration design](docs/design/cubecl-kernel-port.md)
 - [CubeCL performance preservation contract](docs/design/cubecl-performance-parity.md)

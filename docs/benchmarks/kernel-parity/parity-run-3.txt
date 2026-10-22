@@ -1,0 +1,10 @@
+case                             base_b16_ns cand_b16_ns    ratio  base_rt_ns  cand_rt_ns   spread launch  note
+add_f32_1e4                            12175        8783     0.72       26681       10511      17%      1  preallocated destination on both arms
+add_f32_1e6                            13696       12439     0.91       27161       14520       9%      1  preallocated destination on both arms
+add_c64_1e5                            11922       10021     0.84       22931       11450      20%      1  preallocated destination on both arms
+mul_f64_1e6                            13892       13059     0.94       24761       14520      18%      1  preallocated destination on both arms
+copy_f64_1e6                           15282       12551     0.82       26481       13530      10%      1  preallocated destination on both arms
+convert_f64_f32_1e6                    13330       13510     1.01       27991       14100      25%      1  baseline allocates its output; candidate writes a preallocated buffer
+reduce_sum_f64_1e6_axis0               34813       33637     0.97       50342       34932      16%      2  baseline allocates its output; candidate writes a preallocated buffer
+reduce_sum_f64_1000x1000_axis1         36979       34350     0.93       51781       34731      11%      2  baseline allocates its output; candidate writes a preallocated buffer
+reduce_max_f32_513_axis0               27751       21819     0.79       43541       21791      15%      2  baseline allocates its output; candidate writes a preallocated buffer

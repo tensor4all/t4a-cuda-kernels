@@ -109,16 +109,6 @@ __device__ __forceinline__ long long larger(long long lhs, long long rhs) {
   return lhs > rhs ? lhs : rhs;
 }
 
-// Logical element count of a layout: the extent product. The kernels use this, not
-// the caller's allocation length, as their logical bound, so an operand whose
-// capacity exceeds its extent is never addressed past its logical end.
-__device__ __forceinline__ long long logical_count(t4a_cuda_layout layout) {
-  long long count = 1;
-  for (int axis = 0; axis < layout.rank; ++axis) {
-    count *= layout.extents[axis];
-  }
-  return count;
-}
 
 template <typename T>
 __device__ __forceinline__ void fill_one_body(void* out, t4a_cuda_layout layout, long long len) {
@@ -231,8 +221,8 @@ __device__ __forceinline__ void qr_apply_phase_body(void* q, void* r, const void
                                                     t4a_cuda_layout r_layout,
                                                     t4a_cuda_layout phase_layout,
                                                     long long q_start) {
-  const long long q_count = logical_count(q_layout);
-  const long long r_count = logical_count(r_layout);
+  const long long q_count = t4a_cuda_logical_count(q_layout);
+  const long long r_count = t4a_cuda_logical_count(r_layout);
   long long flat;
   if (!t4a_cuda_tail_index(&flat, larger(q_count, r_count))) {
     return;
@@ -471,14 +461,14 @@ __device__ __forceinline__ void lu_apply_pivots_body(void* out, const void* inpu
 // (see the ABI document), so an operand whose capacity exceeds its extent is never
 // addressed past its logical end.
 
-#define T4A_FILL_ONE_CASE(T) fill_one_body<T>(out, out_layout, logical_count(out_layout))
+#define T4A_FILL_ONE_CASE(T) fill_one_body<T>(out, out_layout, t4a_cuda_logical_count(out_layout))
 extern "C" __global__ void t4a_cuda_fill_one(void* out, int dtype, t4a_cuda_layout out_layout) {
   T4A_CUDA_DTYPE_SWITCH(dtype, T4A_FILL_ONE_CASE);
 }
 #undef T4A_FILL_ONE_CASE
 
 #define T4A_MATRIX_ADJOINT_CASE(T) \
-  matrix_adjoint_body<T>(out, v, out_layout, v_layout, logical_count(out_layout))
+  matrix_adjoint_body<T>(out, v, out_layout, v_layout, t4a_cuda_logical_count(out_layout))
 extern "C" __global__ void t4a_cuda_matrix_adjoint(void* out, const void* v, int dtype,
                                                    t4a_cuda_layout out_layout,
                                                    t4a_cuda_layout v_layout) {
@@ -487,7 +477,7 @@ extern "C" __global__ void t4a_cuda_matrix_adjoint(void* out, const void* v, int
 #undef T4A_MATRIX_ADJOINT_CASE
 
 #define T4A_EXPLICIT_V_CASE(T) \
-  explicit_v_body<T>(out, packed, out_layout, packed_layout, logical_count(out_layout))
+  explicit_v_body<T>(out, packed, out_layout, packed_layout, t4a_cuda_logical_count(out_layout))
 extern "C" __global__ void t4a_cuda_householder_explicit_v(void* out, const void* packed,
                                                            int dtype,
                                                            t4a_cuda_layout out_layout,
@@ -497,7 +487,7 @@ extern "C" __global__ void t4a_cuda_householder_explicit_v(void* out, const void
 #undef T4A_EXPLICIT_V_CASE
 
 #define T4A_IDENTITY_SHIFTED_CASE(T) \
-  identity_shifted_body<T>(out, out_layout, logical_count(out_layout), start)
+  identity_shifted_body<T>(out, out_layout, t4a_cuda_logical_count(out_layout), start)
 extern "C" __global__ void t4a_cuda_identity_shifted(void* out, int dtype,
                                                      t4a_cuda_layout out_layout,
                                                      long long start) {
@@ -506,7 +496,7 @@ extern "C" __global__ void t4a_cuda_identity_shifted(void* out, int dtype,
 #undef T4A_IDENTITY_SHIFTED_CASE
 
 #define T4A_QR_PHASE_CASE(T) \
-  qr_phase_body<T>(phase, r, phase_layout, r_layout, logical_count(phase_layout))
+  qr_phase_body<T>(phase, r, phase_layout, r_layout, t4a_cuda_logical_count(phase_layout))
 extern "C" __global__ void t4a_cuda_qr_phase(void* phase, const void* r, int dtype,
                                              t4a_cuda_layout phase_layout,
                                              t4a_cuda_layout r_layout) {
@@ -527,7 +517,7 @@ extern "C" __global__ void t4a_cuda_qr_apply_phase(void* q, void* r, const void*
 
 #define T4A_VIOLATION_CASE(T) \
   violation_body<T>(violation, input, violation_layout, input_layout, \
-                    logical_count(violation_layout))
+                    t4a_cuda_logical_count(violation_layout))
 extern "C" __global__ void t4a_cuda_upper_trapezoidal_violation(
     void* violation, const void* input, int dtype, t4a_cuda_layout violation_layout,
     t4a_cuda_layout input_layout) {
@@ -537,7 +527,7 @@ extern "C" __global__ void t4a_cuda_upper_trapezoidal_violation(
 
 #define T4A_ASSEMBLE_CASE(T) \
   assemble_body<T>(packed_out, coeff_out, packed_q, coeff_q, folded_r, packed_out_layout, \
-                   logical_count(packed_out_layout), packed_q_layout, folded_r_layout, \
+                   t4a_cuda_logical_count(packed_out_layout), packed_q_layout, folded_r_layout, \
                    coeff_out_len, factor_width)
 extern "C" __global__ void t4a_cuda_householder_assemble(
     void* packed_out, void* coeff_out, const void* packed_q, const void* coeff_q,
@@ -550,8 +540,8 @@ extern "C" __global__ void t4a_cuda_householder_assemble(
 
 #define T4A_LU_EXTRACT_CASE(T) \
   lu_extract_body<T>(p_out, l_out, u_out, parity_out, work, pivots, p_layout, \
-                     logical_count(p_layout), l_layout, logical_count(l_layout), u_layout, \
-                     logical_count(u_layout), work_layout, k, batches)
+                     t4a_cuda_logical_count(p_layout), l_layout, t4a_cuda_logical_count(l_layout), u_layout, \
+                     t4a_cuda_logical_count(u_layout), work_layout, k, batches)
 extern "C" __global__ void t4a_cuda_lu_extract_outputs(
     void* p_out, void* l_out, void* u_out, void* parity_out, const void* work, const void* pivots,
     int dtype, t4a_cuda_layout p_layout, t4a_cuda_layout l_layout, t4a_cuda_layout u_layout,
@@ -569,7 +559,7 @@ extern "C" __global__ void t4a_cuda_lu_parity(void* parity_out, const void* pivo
 
 #define T4A_LU_APPLY_PIVOTS_CASE(T) \
   lu_apply_pivots_body<T>(out, input, pivots, out_layout, in_layout, k, inverse != 0, \
-                          logical_count(out_layout))
+                          t4a_cuda_logical_count(out_layout))
 extern "C" __global__ void t4a_cuda_lu_apply_pivots(void* out, const void* input,
                                                     const void* pivots, int dtype,
                                                     t4a_cuda_layout out_layout,

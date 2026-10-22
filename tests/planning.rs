@@ -314,7 +314,8 @@ fn entry_names_are_unique_and_exported_by_the_sources() {
         include_str!("../cuda/src/gather_scatter.cu"),
         include_str!("../cuda/src/convert.cu"),
         include_str!("../cuda/src/elementwise.cu"),
-        include_str!("../cuda/src/linalg_aux.cu")
+        include_str!("../cuda/src/linalg_aux.cu"),
+        include_str!("../cuda/src/rrqr.cu")
     );
     for (index, entry) in Entry::ALL.iter().enumerate() {
         let name = entry.name();
@@ -636,8 +637,8 @@ fn c_axis_values_mirror_layout() {
 // --- revision 3: reductions -------------------------------------------------
 
 use t4a_cuda_kernels::{
-    plan_reduce, plan_reduce_partials, plan_reduction, split_policy, ReduceOp, ReduceStrategy,
-    ReductionPlan, Split, MAX_SPLITS,
+    plan_reduce, plan_reduce_partials, plan_reduction, reduction_partials_layout, split_policy,
+    ReduceOp, ReduceStrategy, ReductionPlan, Split, MAX_SPLITS,
 };
 
 fn reduced_layouts(extents: &[i64], axis: usize) -> (Layout, Layout) {
@@ -1892,6 +1893,22 @@ fn revision_six_entries_are_in_the_manifest() {
 }
 
 #[test]
+fn a_split_reduction_exposes_its_partials_layout() {
+    let input = Layout::compact(&[1_000_000]).unwrap();
+    let out = Layout::compact(&[1]).unwrap();
+    let plan =
+        plan_reduction(DType::F64, ReduceOp::Sum, &out, 1, &input, 1_000_000, 0, 32).unwrap();
+    match plan {
+        ReductionPlan::Split { split, .. } => {
+            let partials = reduction_partials_layout(&input, 0, split.splits).unwrap();
+            assert_eq!(partials.extents(), &[split.splits]);
+            assert_eq!(partials.element_count().unwrap(), split.splits);
+        }
+        ReductionPlan::Direct { .. } => panic!("a million-element sum must split"),
+    }
+}
+
+#[test]
 fn structural_extras_are_expressible_with_revision_one_entries() {
     // broadcast_in_dim: source [2,3] broadcast into output [2,4,3] on axes (0,2).
     // The expanded source read layout carries the output extents, the source
@@ -2368,4 +2385,317 @@ fn lu_apply_pivots_needs_matching_extents_and_a_bounded_k() {
         Err(Error::NegativeCount)
     );
     assert!(plan_lu_apply_pivots(DType::I64, &out, 12, &input, 12, 0, 0).is_ok());
+}
+
+// --- revision 8: rank-revealing QR primitives ------------------------------
+
+use t4a_cuda_kernels::{
+    plan_apply_reflector, plan_column_norms, plan_extract_r, plan_initialize_permutation,
+    plan_prefix_rank, plan_reflector, plan_select_pivot, plan_swap_columns, PLANE_BLOCK,
+};
+
+fn plane_grid(tasks: i64) -> [u32; 3] {
+    [tasks as u32, 1, 1]
+}
+
+#[test]
+fn revision_eight_entries_are_in_the_manifest() {
+    for (entry, name) in [
+        (
+            Entry::InitializePermutation,
+            "t4a_cuda_initialize_permutation",
+        ),
+        (Entry::ColumnNorms, "t4a_cuda_column_norms"),
+        (Entry::SelectPivot, "t4a_cuda_select_pivot"),
+        (Entry::SwapColumns, "t4a_cuda_swap_columns"),
+        (Entry::Reflector, "t4a_cuda_reflector"),
+        (Entry::ApplyReflector, "t4a_cuda_apply_reflector"),
+        (Entry::ExtractR, "t4a_cuda_extract_r"),
+        (Entry::PrefixRank, "t4a_cuda_prefix_rank"),
+    ] {
+        assert_eq!(entry.name(), name);
+        assert!(Entry::ALL.contains(&entry));
+    }
+    assert_eq!(
+        Entry::SelectPivot.supported_dtypes(),
+        &[DType::F32, DType::F64]
+    );
+    assert_eq!(Entry::SwapColumns.supported_dtypes().len(), 6);
+    assert_eq!(
+        Entry::ColumnNorms.supported_dtypes(),
+        &[DType::F32, DType::F64, DType::C32, DType::C64]
+    );
+    assert_eq!(Entry::InitializePermutation.supported_dtypes(), &DType::ALL);
+}
+
+#[test]
+fn initialize_permutation_is_the_modulo_image() {
+    let launch = plan_initialize_permutation(4, 10).unwrap();
+    assert_eq!(launch.grid, [1, 1, 1]);
+    assert_eq!(launch.block, [FLAT_BLOCK, 1, 1]);
+    assert_eq!(
+        plan_initialize_permutation(0, 10),
+        Err(Error::NegativeCount)
+    );
+    assert_eq!(
+        plan_initialize_permutation(4, -1),
+        Err(Error::NegativeCount)
+    );
+    assert!(plan_initialize_permutation(4, 0).unwrap().is_empty());
+}
+
+#[test]
+fn column_norms_maps_one_task_per_trailing_column() {
+    let work = Layout::compact(&[5, 4, 2]).unwrap();
+    let norms = Layout::compact(&[4, 2]).unwrap();
+    // step 1 leaves three columns per batch, so six tasks.
+    let launch = plan_column_norms(DType::C32, &work, 40, &norms, 8, 1).unwrap();
+    assert_eq!(launch.grid, plane_grid(6));
+    assert_eq!(launch.block, [PLANE_BLOCK, 1, 1]);
+    // The norms array carries the component type, so a shorter capacity is caught.
+    assert_eq!(
+        plan_column_norms(DType::C64, &work, 40, &norms, 7, 1),
+        Err(Error::OffsetOutOfSpan)
+    );
+    // The shorter operand rule: the norms must drop exactly the row axis.
+    let square = Layout::compact(&[4, 2]).unwrap();
+    assert!(plan_column_norms(DType::F64, &work, 40, &square, 8, 0).is_ok());
+    let same_rank = Layout::compact(&[5, 4, 2]).unwrap();
+    assert_eq!(
+        plan_column_norms(DType::F64, &work, 40, &same_rank, 40, 0),
+        Err(Error::ShapeMismatch)
+    );
+    assert_eq!(
+        plan_column_norms(DType::F64, &work, 40, &norms, 8, 5),
+        Err(Error::ShapeMismatch)
+    );
+    assert_eq!(
+        plan_column_norms(DType::F64, &work, 40, &norms, 8, -1),
+        Err(Error::ShapeMismatch)
+    );
+    assert_eq!(
+        plan_column_norms(DType::I32, &work, 40, &norms, 8, 0),
+        Err(Error::UnsupportedDType)
+    );
+    // A step past the rows would leave every lane without an accumulator.
+    let flat = Layout::compact(&[2, 3]).unwrap();
+    let norms = Layout::compact(&[3]).unwrap();
+    assert_eq!(
+        plan_column_norms(DType::F32, &flat, 6, &norms, 3, 2),
+        Err(Error::ShapeMismatch)
+    );
+    assert!(plan_column_norms(DType::F32, &flat, 6, &norms, 3, 3)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn select_pivot_requires_matching_arrays_and_capacities() {
+    let norms = Layout::compact(&[6, 2]).unwrap();
+    let permutation = Layout::compact(&[6, 2]).unwrap();
+    let launch = plan_select_pivot(DType::F32, &norms, 12, &permutation, 12, 2, 2, 1).unwrap();
+    assert_eq!(launch.grid, plane_grid(2));
+    assert_eq!(launch.block, [PLANE_BLOCK, 1, 1]);
+    // The flat pivot and status arrays need one word per batch.
+    assert_eq!(
+        plan_select_pivot(DType::F32, &norms, 12, &permutation, 12, 1, 2, 1),
+        Err(Error::ShapeMismatch)
+    );
+    assert_eq!(
+        plan_select_pivot(DType::F32, &norms, 12, &permutation, 12, 2, 1, 1),
+        Err(Error::ShapeMismatch)
+    );
+    // The permutation is int64 whatever the norm type is.
+    assert_eq!(
+        plan_select_pivot(DType::F64, &norms, 12, &permutation, 11, 2, 2, 1),
+        Err(Error::OffsetOutOfSpan)
+    );
+    let other = Layout::compact(&[6, 3]).unwrap();
+    assert_eq!(
+        plan_select_pivot(DType::F32, &norms, 12, &other, 18, 2, 2, 1),
+        Err(Error::ShapeMismatch)
+    );
+    assert_eq!(
+        plan_select_pivot(DType::F32, &norms, 12, &permutation, 12, 2, 2, 7),
+        Err(Error::ShapeMismatch)
+    );
+    assert_eq!(
+        plan_select_pivot(DType::C64, &norms, 12, &permutation, 12, 2, 2, 1),
+        Err(Error::UnsupportedDType)
+    );
+}
+
+#[test]
+fn swap_columns_bounds_the_step_and_the_permutation() {
+    let work = Layout::compact(&[4, 3, 2]).unwrap();
+    let permutation = Layout::compact(&[3, 2]).unwrap();
+    let launch = plan_swap_columns(DType::F64, &work, 24, &permutation, 6, 2, 1).unwrap();
+    assert_eq!(launch.grid, [1, 1, 1]);
+    assert_eq!(launch.block, [FLAT_BLOCK, 1, 1]);
+    // rows * batches above one block: 20 rows times 20 batches.
+    let big = Layout::compact(&[20, 20, 20]).unwrap();
+    let big_permutation = Layout::compact(&[20, 20]).unwrap();
+    assert_eq!(
+        plan_swap_columns(DType::F64, &big, 8000, &big_permutation, 400, 20, 3)
+            .unwrap()
+            .grid,
+        [2, 1, 1],
+        "400 threads at 256 per block"
+    );
+    assert_eq!(
+        plan_swap_columns(DType::F64, &work, 24, &permutation, 6, 2, 3),
+        Err(Error::ShapeMismatch)
+    );
+    assert_eq!(
+        plan_swap_columns(DType::F64, &work, 24, &permutation, 6, 2, -1),
+        Err(Error::ShapeMismatch)
+    );
+    let short = Layout::compact(&[2, 2]).unwrap();
+    assert_eq!(
+        plan_swap_columns(DType::F64, &work, 24, &short, 4, 2, 0),
+        Err(Error::ShapeMismatch)
+    );
+    // One pivot word per batch, or a batched swap reads past its array.
+    assert_eq!(
+        plan_swap_columns(DType::F64, &work, 24, &permutation, 6, 1, 1),
+        Err(Error::ShapeMismatch)
+    );
+}
+
+#[test]
+fn reflector_bounds_the_step_and_the_coefficients() {
+    let work = Layout::compact(&[5, 4, 2]).unwrap();
+    let coeff = Layout::compact(&[4, 2]).unwrap();
+    let launch = plan_reflector(DType::C64, &work, 40, &coeff, 8, 3).unwrap();
+    assert_eq!(launch.grid, plane_grid(2));
+    assert_eq!(launch.block, [PLANE_BLOCK, 1, 1]);
+    // step must stay below the coefficient extent as well as the matrix.
+    let short_coeff = Layout::compact(&[2, 2]).unwrap();
+    assert_eq!(
+        plan_reflector(DType::C64, &work, 40, &short_coeff, 4, 2),
+        Err(Error::ShapeMismatch)
+    );
+    assert_eq!(
+        plan_reflector(DType::C64, &work, 40, &coeff, 8, 4),
+        Err(Error::ShapeMismatch)
+    );
+    assert_eq!(
+        plan_reflector(DType::C64, &work, 40, &coeff, 8, -1),
+        Err(Error::ShapeMismatch)
+    );
+    let batched_coeff = Layout::compact(&[4]).unwrap();
+    assert_eq!(
+        plan_reflector(DType::C64, &work, 40, &batched_coeff, 4, 0),
+        Err(Error::ShapeMismatch)
+    );
+}
+
+#[test]
+fn apply_reflector_checks_the_target_window() {
+    let packed = Layout::compact(&[5, 4, 2]).unwrap();
+    let coeff = Layout::compact(&[4, 2]).unwrap();
+    let target = Layout::compact(&[5, 6, 2]).unwrap();
+    let launch =
+        plan_apply_reflector(DType::F64, &packed, 40, &target, 60, &coeff, 8, 1, 2, 3).unwrap();
+    assert_eq!(
+        launch.grid,
+        plane_grid(6),
+        "two batches times three columns"
+    );
+    // The window must stay inside the target's columns.
+    assert_eq!(
+        plan_apply_reflector(DType::F64, &packed, 40, &target, 60, &coeff, 8, 1, 4, 3),
+        Err(Error::ShapeMismatch)
+    );
+    assert_eq!(
+        plan_apply_reflector(DType::F64, &packed, 40, &target, 60, &coeff, 8, 1, -1, 3),
+        Err(Error::NegativeCount)
+    );
+    assert_eq!(
+        plan_apply_reflector(DType::F64, &packed, 40, &target, 60, &coeff, 8, 1, 0, -3),
+        Err(Error::NegativeCount)
+    );
+    // Rows and batch axes must agree.
+    let short = Layout::compact(&[4, 6, 2]).unwrap();
+    assert_eq!(
+        plan_apply_reflector(DType::F64, &packed, 40, &short, 48, &coeff, 8, 1, 0, 1),
+        Err(Error::ShapeMismatch)
+    );
+    // The coefficient slot must exist for this step.
+    assert_eq!(
+        plan_apply_reflector(DType::F64, &packed, 40, &target, 60, &coeff, 8, 4, 0, 1),
+        Err(Error::ShapeMismatch)
+    );
+    // The reflector vector lives in packed column `step`, so a step inside the rows
+    // but outside the columns is refused.
+    let narrow = Layout::compact(&[5, 1, 2]).unwrap();
+    let coeff_narrow = Layout::compact(&[4, 2]).unwrap();
+    let target_narrow = Layout::compact(&[5, 2, 2]).unwrap();
+    assert_eq!(
+        plan_apply_reflector(
+            DType::F64,
+            &narrow,
+            10,
+            &target_narrow,
+            20,
+            &coeff_narrow,
+            8,
+            1,
+            0,
+            1
+        ),
+        Err(Error::ShapeMismatch)
+    );
+}
+
+#[test]
+fn extract_r_copies_the_upper_triangle_only() {
+    let work = Layout::compact(&[5, 4, 2]).unwrap();
+    let r = Layout::compact(&[3, 4, 2]).unwrap();
+    assert_eq!(
+        plan_extract_r(DType::C32, &work, 40, &r, 24).unwrap().grid,
+        [1, 1, 1]
+    );
+    let too_many_rows = Layout::compact(&[6, 4, 2]).unwrap();
+    assert_eq!(
+        plan_extract_r(DType::C32, &work, 40, &too_many_rows, 48),
+        Err(Error::ShapeMismatch)
+    );
+    let wrong_columns = Layout::compact(&[3, 5, 2]).unwrap();
+    assert_eq!(
+        plan_extract_r(DType::C32, &work, 40, &wrong_columns, 30),
+        Err(Error::ShapeMismatch)
+    );
+}
+
+#[test]
+fn prefix_rank_bounds_the_diagonal_domain() {
+    let r = Layout::compact(&[3, 4, 2]).unwrap();
+    let launch = plan_prefix_rank(DType::F64, &r, 24, 2, 2, 1e-12, 0.0).unwrap();
+    assert_eq!(launch.grid, plane_grid(2));
+    assert_eq!(launch.block, [PLANE_BLOCK, 1, 1]);
+    // One rank and one status word per batch.
+    assert_eq!(
+        plan_prefix_rank(DType::F64, &r, 24, 1, 2, 1e-12, 0.0),
+        Err(Error::ShapeMismatch)
+    );
+    assert_eq!(
+        plan_prefix_rank(DType::F64, &r, 24, 2, 1, 1e-12, 0.0),
+        Err(Error::ShapeMismatch)
+    );
+    // More rows than columns would read past the matrix on the diagonal.
+    let tall = Layout::compact(&[5, 3, 2]).unwrap();
+    assert_eq!(
+        plan_prefix_rank(DType::F64, &tall, 30, 2, 2, 1e-12, 0.0),
+        Err(Error::ShapeMismatch)
+    );
+    let empty = Layout::compact(&[0, 3]).unwrap();
+    assert_eq!(
+        plan_prefix_rank(DType::F64, &empty, 0, 1, 1, 1e-12, 0.0),
+        Err(Error::ShapeMismatch)
+    );
+    assert_eq!(
+        plan_prefix_rank(DType::I64, &r, 24, 2, 2, 1e-12, 0.0),
+        Err(Error::UnsupportedDType)
+    );
 }

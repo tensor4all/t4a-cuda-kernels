@@ -23,9 +23,11 @@ use core::fmt;
 /// Maximum supported tensor rank. Deeper layouts need a later ABI revision.
 pub const MAX_RANK: usize = 8;
 /// Version of the C ABI described by this crate.
-pub const ABI_REVISION: u32 = 7;
+pub const ABI_REVISION: u32 = 8;
 /// Threads per block for the flat (element-wise) entries.
 pub const FLAT_BLOCK: u32 = 256;
+/// Lanes per block for the plane-reduction entries: one 32-lane plane per block.
+pub const PLANE_BLOCK: u32 = 32;
 /// Largest block count for grid dimensions y and z.
 pub const MAX_GRID_YZ: u32 = 65_535;
 /// Largest block count for grid dimension x.
@@ -457,10 +459,18 @@ pub enum Entry {
     LuExtractOutputs,
     LuParity,
     LuApplyPivots,
+    InitializePermutation,
+    ColumnNorms,
+    SelectPivot,
+    SwapColumns,
+    Reflector,
+    ApplyReflector,
+    ExtractR,
+    PrefixRank,
 }
 
 impl Entry {
-    pub const ALL: [Entry; 45] = [
+    pub const ALL: [Entry; 53] = [
         Entry::FillZero,
         Entry::FillZeroView,
         Entry::CopyExact,
@@ -506,6 +516,14 @@ impl Entry {
         Entry::LuExtractOutputs,
         Entry::LuParity,
         Entry::LuApplyPivots,
+        Entry::InitializePermutation,
+        Entry::ColumnNorms,
+        Entry::SelectPivot,
+        Entry::SwapColumns,
+        Entry::Reflector,
+        Entry::ApplyReflector,
+        Entry::ExtractR,
+        Entry::PrefixRank,
     ];
 
     /// Exported CUDA symbol; equal to the name documented in the ABI.
@@ -556,6 +574,14 @@ impl Entry {
             Entry::LuExtractOutputs => "t4a_cuda_lu_extract_outputs",
             Entry::LuParity => "t4a_cuda_lu_parity",
             Entry::LuApplyPivots => "t4a_cuda_lu_apply_pivots",
+            Entry::InitializePermutation => "t4a_cuda_initialize_permutation",
+            Entry::ColumnNorms => "t4a_cuda_column_norms",
+            Entry::SelectPivot => "t4a_cuda_select_pivot",
+            Entry::SwapColumns => "t4a_cuda_swap_columns",
+            Entry::Reflector => "t4a_cuda_reflector",
+            Entry::ApplyReflector => "t4a_cuda_apply_reflector",
+            Entry::ExtractR => "t4a_cuda_extract_r",
+            Entry::PrefixRank => "t4a_cuda_prefix_rank",
         }
     }
 
@@ -606,7 +632,7 @@ impl Entry {
             Entry::QrPhase | Entry::QrApplyPhase | Entry::LuExtractOutputs | Entry::LuParity => {
                 &[DType::F32, DType::F64, DType::C32, DType::C64]
             }
-            Entry::LuApplyPivots => &[
+            Entry::LuApplyPivots | Entry::SwapColumns => &[
                 DType::F32,
                 DType::F64,
                 DType::I32,
@@ -614,6 +640,15 @@ impl Entry {
                 DType::C32,
                 DType::C64,
             ],
+            // The RRQR payloads are floating or complex; `norms` and `rank` carry the
+            // real component type, and `initialize_permutation` has no dtype tag at
+            // all (its payload is int64_t), which the planner documents.
+            Entry::ColumnNorms
+            | Entry::Reflector
+            | Entry::ApplyReflector
+            | Entry::ExtractR
+            | Entry::PrefixRank => &[DType::F32, DType::F64, DType::C32, DType::C64],
+            Entry::SelectPivot => &[DType::F32, DType::F64],
             _ => &DType::ALL,
         }
     }
@@ -1494,6 +1529,284 @@ pub fn plan_lu_apply_pivots(
     flat_launch(len)
 }
 
+// --- revision 8: rank-revealing QR primitives -------------------------------
+
+/// Real component type of a payload: the dtype of a `norms` or `rank` array.
+fn component_dtype(dtype: DType) -> DType {
+    match dtype {
+        DType::C32 => DType::F32,
+        DType::C64 => DType::F64,
+        other => other,
+    }
+}
+
+/// One plane per block, one task per grid entry.
+fn plane_launch(tasks: i64) -> Result<Launch, Error> {
+    if tasks < 0 {
+        return Err(Error::NegativeCount);
+    }
+    if tasks == 0 {
+        return Ok(Launch::EMPTY);
+    }
+    let tasks = u64::try_from(tasks).map_err(|_| Error::NegativeCount)?;
+    if tasks > u64::from(MAX_GRID_X) {
+        return Err(Error::LaunchLimit);
+    }
+    Ok(Launch {
+        grid: [tasks as u32, 1, 1],
+        block: [PLANE_BLOCK, 1, 1],
+        shared_bytes: 0,
+    })
+}
+
+/// The one-axis-shorter operand rule: same batch axes as the matrix, with axis 0
+/// carrying the column or step index.
+fn require_shorter(shorter: &Layout, matrix: &Layout) -> Result<(), Error> {
+    require_matrix(matrix)?;
+    if shorter.rank() + 1 != matrix.rank() {
+        return Err(Error::ShapeMismatch);
+    }
+    if shorter.extents()[1..] != matrix.extents()[2..] {
+        return Err(Error::ShapeMismatch);
+    }
+    Ok(())
+}
+
+/// Plan [`Entry::InitializePermutation`]: `permutation[pos] = pos % n`.
+pub fn plan_initialize_permutation(n: i64, len: i64) -> Result<Launch, Error> {
+    if n <= 0 {
+        return Err(Error::NegativeCount);
+    }
+    flat_launch(len)
+}
+
+/// Plan [`Entry::ColumnNorms`]: one plane per (batch, trailing column). `step` is
+/// the elimination step, so columns `step..n` are measured from rows `step..m`.
+pub fn plan_column_norms(
+    dtype: DType,
+    work: &Layout,
+    work_len: i64,
+    norms: &Layout,
+    norms_len: i64,
+    step: i64,
+) -> Result<Launch, Error> {
+    check_dtype(Entry::ColumnNorms, dtype)?;
+    require_shorter(norms, work)?;
+    let rows = work.extents()[0];
+    let cols = work.extents()[1];
+    if norms.extents()[0] != cols {
+        return Err(Error::ShapeMismatch);
+    }
+    if step < 0 || step > cols {
+        return Err(Error::ShapeMismatch);
+    }
+    // `step == cols` leaves no trailing column, so nothing is measured (and no lane
+    // needs a row). Otherwise row `step` must exist so every lane reaches the
+    // shuffles with a defined accumulator.
+    if step < cols && step >= rows {
+        return Err(Error::ShapeMismatch);
+    }
+    require_destination(norms)?;
+    work.check_span(work_len, dtype.size())?;
+    norms.check_span(norms_len, component_dtype(dtype).size())?;
+    let batches = extent_product(batch_extents(work))?;
+    plane_launch(batches.checked_mul(cols - step).ok_or(Error::Overflow)?)
+}
+
+/// Plan [`Entry::SelectPivot`]: one plane per batch, choosing the pivot column from
+/// the norms and the permutation.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_select_pivot(
+    dtype: DType,
+    norms: &Layout,
+    norms_len: i64,
+    permutation: &Layout,
+    permutation_len: i64,
+    pivots_len: i64,
+    status_len: i64,
+    step: i64,
+) -> Result<Launch, Error> {
+    check_dtype(Entry::SelectPivot, dtype)?;
+    if norms.rank() == 0 || permutation.rank() != norms.rank() {
+        return Err(Error::ShapeMismatch);
+    }
+    if permutation.extents() != norms.extents() {
+        return Err(Error::ShapeMismatch);
+    }
+    let cols = norms.extents()[0];
+    if step < 0 || step > cols {
+        return Err(Error::ShapeMismatch);
+    }
+    let batches = extent_product(&norms.extents()[1..])?;
+    if pivots_len < batches || status_len < batches {
+        return Err(Error::ShapeMismatch);
+    }
+    norms.check_span(norms_len, dtype.size())?;
+    permutation.check_span(permutation_len, DType::I64.size())?;
+    plane_launch(batches)
+}
+
+/// Plan [`Entry::SwapColumns`]: exchange column `step` with the chosen pivot column
+/// and the matching permutation entries. `pivots_len` is the caller's pivot-array
+/// length in `int64_t` elements.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_swap_columns(
+    dtype: DType,
+    work: &Layout,
+    work_len: i64,
+    permutation: &Layout,
+    permutation_len: i64,
+    pivots_len: i64,
+    step: i64,
+) -> Result<Launch, Error> {
+    check_dtype(Entry::SwapColumns, dtype)?;
+    require_shorter(permutation, work)?;
+    let cols = work.extents()[1];
+    if permutation.extents()[0] != cols {
+        return Err(Error::ShapeMismatch);
+    }
+    if step < 0 || step >= cols {
+        return Err(Error::ShapeMismatch);
+    }
+    require_destination(work)?;
+    require_destination(permutation)?;
+    work.check_span(work_len, dtype.size())?;
+    permutation.check_span(permutation_len, DType::I64.size())?;
+    let rows = work.extents()[0];
+    let batches = extent_product(batch_extents(work))?;
+    if pivots_len < batches {
+        return Err(Error::ShapeMismatch);
+    }
+    flat_launch(rows.checked_mul(batches).ok_or(Error::Overflow)?)
+}
+
+/// Plan [`Entry::Reflector`]: build the Householder reflector for column `step`.
+pub fn plan_reflector(
+    dtype: DType,
+    work: &Layout,
+    work_len: i64,
+    coeff: &Layout,
+    coeff_len: i64,
+    step: i64,
+) -> Result<Launch, Error> {
+    check_dtype(Entry::Reflector, dtype)?;
+    require_shorter(coeff, work)?;
+    let rows = work.extents()[0];
+    let cols = work.extents()[1];
+    let limit = rows.min(cols).min(coeff.extents()[0]);
+    if step < 0 || step >= limit {
+        return Err(Error::ShapeMismatch);
+    }
+    require_destination(work)?;
+    require_destination(coeff)?;
+    work.check_span(work_len, dtype.size())?;
+    coeff.check_span(coeff_len, dtype.size())?;
+    plane_launch(extent_product(batch_extents(work))?)
+}
+
+/// Plan [`Entry::ApplyReflector`]: apply the stored reflector to columns
+/// `first_column..first_column + column_count` of `target`.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_apply_reflector(
+    dtype: DType,
+    packed: &Layout,
+    packed_len: i64,
+    target: &Layout,
+    target_len: i64,
+    coeff: &Layout,
+    coeff_len: i64,
+    step: i64,
+    first_column: i64,
+    column_count: i64,
+) -> Result<Launch, Error> {
+    check_dtype(Entry::ApplyReflector, dtype)?;
+    require_destination(target)?;
+    require_matrix(packed)?;
+    if packed.rank() != target.rank()
+        || packed.extents()[0] != target.extents()[0]
+        || batch_extents(packed) != batch_extents(target)
+    {
+        return Err(Error::ShapeMismatch);
+    }
+    require_shorter(coeff, packed)?;
+    if coeff.extents()[0] <= step {
+        return Err(Error::ShapeMismatch);
+    }
+    // The kernel reads the reflector vector from packed column `step`, so the step
+    // must be inside both extents of that operand.
+    if step < 0 || step >= packed.extents()[0] || step >= packed.extents()[1] {
+        return Err(Error::ShapeMismatch);
+    }
+    if first_column < 0 || column_count < 0 {
+        return Err(Error::NegativeCount);
+    }
+    if first_column
+        .checked_add(column_count)
+        .ok_or(Error::Overflow)?
+        > target.extents()[1]
+    {
+        return Err(Error::ShapeMismatch);
+    }
+    packed.check_span(packed_len, dtype.size())?;
+    target.check_span(target_len, dtype.size())?;
+    coeff.check_span(coeff_len, dtype.size())?;
+    let batches = extent_product(batch_extents(packed))?;
+    plane_launch(batches.checked_mul(column_count).ok_or(Error::Overflow)?)
+}
+
+/// Plan [`Entry::ExtractR`]: copy the upper triangle of `work` into `r`.
+pub fn plan_extract_r(
+    dtype: DType,
+    work: &Layout,
+    work_len: i64,
+    r: &Layout,
+    r_len: i64,
+) -> Result<Launch, Error> {
+    check_dtype(Entry::ExtractR, dtype)?;
+    require_destination(r)?;
+    require_matrix(work)?;
+    require_matrix(r)?;
+    if r.rank() != work.rank()
+        || r.extents()[1] != work.extents()[1]
+        || batch_extents(r) != batch_extents(work)
+    {
+        return Err(Error::ShapeMismatch);
+    }
+    if r.extents()[0] > work.extents()[0] {
+        return Err(Error::ShapeMismatch);
+    }
+    let len = r.element_count()?;
+    r.check_span(r_len, dtype.size())?;
+    work.check_span(work_len, dtype.size())?;
+    flat_launch(len)
+}
+
+/// Plan [`Entry::PrefixRank`]: the leading diagonal prefix above the tolerance.
+pub fn plan_prefix_rank(
+    dtype: DType,
+    r: &Layout,
+    r_len: i64,
+    rank_len: i64,
+    status_len: i64,
+    rtol: f64,
+    atol: f64,
+) -> Result<Launch, Error> {
+    check_dtype(Entry::PrefixRank, dtype)?;
+    require_matrix(r)?;
+    let rows = r.extents()[0];
+    let cols = r.extents()[1];
+    if rows < 1 || cols < 1 || rows > cols {
+        return Err(Error::ShapeMismatch);
+    }
+    let batches = extent_product(batch_extents(r))?;
+    if rank_len < batches || status_len < batches {
+        return Err(Error::ShapeMismatch);
+    }
+    r.check_span(r_len, dtype.size())?;
+    let _ = (rtol, atol);
+    plane_launch(batches)
+}
+
 /// XLA-style gather dimension maps. All vectors are validated by
 /// [`plan_gather`]; the entry takes them as a by-value POD.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2132,6 +2445,17 @@ pub fn plan_reduction(
 
 /// Partials layout a split needs: the input's non-axis extents with the reduce
 /// axis set to `splits`, in a fresh compact layout.
+///
+/// [`ReductionPlan::Split`] carries the two passes but not this layout, so a caller
+/// sizing the pass-1 workspace calls this with the same `splits` the plan reports.
+pub fn reduction_partials_layout(
+    in_layout: &Layout,
+    axis: u32,
+    splits: i64,
+) -> Result<Layout, Error> {
+    partials_layout_for(in_layout, axis, splits)
+}
+
 fn partials_layout_for(in_layout: &Layout, axis: u32, splits: i64) -> Result<Layout, Error> {
     let mut extents = in_layout.extents().to_vec();
     extents[axis as usize] = splits;

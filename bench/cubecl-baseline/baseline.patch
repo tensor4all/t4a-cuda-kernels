@@ -1,0 +1,2571 @@
+diff --git a/crates/tenferro-gpu/src/cubecl/bench_harness.rs b/crates/tenferro-gpu/src/cubecl/bench_harness.rs
+new file mode 100644
+index 000000000..efc91c428
+--- /dev/null
++++ b/crates/tenferro-gpu/src/cubecl/bench_harness.rs
+@@ -0,0 +1,1674 @@
++//! Paired A100 benchmark harness for the CubeCL baseline (slice F, unit U6).
++//!
++//! This module is added by `bench/cubecl-baseline/baseline.patch` of
++//! `t4a-cuda-kernels` and is not part of the shipped crate. It calls the
++//! private CubeCL launchers directly with the frozen case list of
++//! `docs/design/slice-complete-port.md` §7 as amended by §11 items 7-9, so the
++//! candidate (`examples/bench_kernels.rs` in `t4a-cuda-kernels`) runs a matched
++//! kernel sequence.
++//!
++//! Every case is reachable through `T4A_BENCH_CASES` (a comma-separated list of
++//! case names, or `all`). `run-paired.sh` runs one case per process so
++//! `nsys --capture-range=cudaProfilerApi` delimits exactly one case.
++//!
++//! Protocol per case: 10 warm-ups outside the capture range, `cuProfilerStart`,
++//! 100 timed iterations, one barrier at the observation boundary,
++//! `cuProfilerStop`. Host work is single-threaded. Buffers and metadata are
++//! prepared before the capture range, so the measured region performs no
++//! transfer, no device allocation, no zero fill and no host wait per iteration.
++//! The fusion cases allocate their outputs inside the baseline's own launcher;
++//! that is reported in the `BENCH_META` line, not hidden.
++
++#![allow(clippy::too_many_arguments)]
++
++use std::ffi::c_void;
++
++use cubecl::prelude::{BufferArg, CubeCount, CubeDim, TensorBinding};
++use cubecl_runtime::server::Handle;
++use num_complex::Complex64;
++
++use super::dispatch::{comptime_sequence, cube_count_for_len, cube_dim_1d, runtime_sequence};
++use super::fusion;
++use crate::kernels;
++use super::runtime::CudaRuntime;
++use super::CudaBackend;
++
++use crate::backend::{ElementwiseFusionInst, ElementwiseFusionOp, ElementwiseFusionPlan};
++use crate::{DType, Tensor, TypedTensor};
++
++const WARMUPS: usize = 10;
++const ITERS: usize = 100;
++
++// ---------------------------------------------------------------------------
++// CUDA profiler range
++// ---------------------------------------------------------------------------
++
++struct Profiler {
++    start: unsafe extern "C" fn(u32) -> i32,
++    stop: unsafe extern "C" fn(u32) -> i32,
++}
++
++extern "C" {
++    fn dlopen(filename: *const i8, flag: i32) -> *mut c_void;
++    fn dlsym(handle: *mut c_void, symbol: *const i8) -> *mut c_void;
++}
++
++fn profiler() -> &'static Profiler {
++    static PROFILER: std::sync::OnceLock<Profiler> = std::sync::OnceLock::new();
++    PROFILER.get_or_init(|| unsafe {
++        let handle = dlopen(c"libcuda.so.1".as_ptr(), 1);
++        assert!(!handle.is_null(), "libcuda.so.1 not loadable");
++        let resolve = |symbol: &std::ffi::CStr| -> *mut c_void {
++            let pointer = dlsym(handle, symbol.as_ptr());
++            assert!(!pointer.is_null(), "driver profiler symbol missing");
++            pointer
++        };
++        Profiler {
++            start: std::mem::transmute::<*mut c_void, unsafe extern "C" fn(u32) -> i32>(resolve(
++                c"cuProfilerStart",
++            )),
++            stop: std::mem::transmute::<*mut c_void, unsafe extern "C" fn(u32) -> i32>(resolve(
++                c"cuProfilerStop",
++            )),
++        }
++    })
++}
++
++fn profile_start() {
++    // SAFETY: the driver entry point takes the CUDA context (0 = current); the
++    // runtime has already made its primary context current on this thread.
++    let status = unsafe { (profiler().start)(0) };
++    assert_eq!(status, 0, "cuProfilerStart failed with {status}");
++}
++
++fn profile_stop() {
++    let status = unsafe { (profiler().stop)(0) };
++    assert_eq!(status, 0, "cuProfilerStop failed with {status}");
++}
++
++// ---------------------------------------------------------------------------
++// Case bookkeeping
++// ---------------------------------------------------------------------------
++
++struct Meta {
++    kernels: &'static str,
++    launches: usize,
++    scratch_bytes: usize,
++    allocations: usize,
++    zero_fills: usize,
++}
++
++impl Meta {
++    fn simple(kernels: &'static str) -> Meta {
++        Meta {
++            kernels,
++            launches: 1,
++            scratch_bytes: 0,
++            allocations: 0,
++            zero_fills: 0,
++        }
++    }
++}
++
++fn emit_meta(case: &str, meta: &Meta, check: &str, extra: &str) {
++    println!(
++        "BENCH_META case={case} kernels={} launches_per_iter={} scratch_bytes={} \
++         host_waits_per_iter=0 transfer_bytes_per_iter=0 device_allocations_per_iter={} \
++         zero_fills_per_iter={} boundary_barriers=1 check={check} {extra}",
++        meta.kernels, meta.launches, meta.scratch_bytes, meta.allocations, meta.zero_fills
++    );
++}
++
++fn wanted(case: &str) -> bool {
++    match std::env::var("T4A_BENCH_CASES") {
++        Err(_) => true,
++        Ok(value) => value
++            .split(',')
++            .map(str::trim)
++            .any(|entry| entry == case || entry == "all"),
++    }
++}
++
++/// The frozen protocol: warm-ups outside the capture range, then 100 timed
++/// iterations inside it.
++fn measure(rt: &CudaRuntime, run: &mut impl FnMut()) {
++    for _ in 0..WARMUPS {
++        run();
++    }
++    rt.synchronize().expect("warm-up synchronize");
++    profile_start();
++    for _ in 0..ITERS {
++        run();
++    }
++    // The single barrier at the observation boundary: without it the capture
++    // range could close before the queued iterations execute.
++    rt.synchronize().expect("measured synchronize");
++    profile_stop();
++}
++
++// ---------------------------------------------------------------------------
++// Plumbing
++// ---------------------------------------------------------------------------
++
++fn backend() -> CudaBackend {
++    let devices = crate::cuda::cuda_devices().expect("CUDA device discovery");
++    let device = devices.first().expect("at least one CUDA device");
++    CudaBackend::new(device.id()).expect("CUDA backend")
++}
++
++fn client(backend: &CudaBackend) -> &cubecl::client::Client {
++    backend.runtime().client()
++}
++
++fn bytes_of<T: Copy>(values: &[T]) -> &[u8] {
++    // SAFETY: every type used here is a plain scalar or a repr(C) pair of
++    // scalars, so its byte image is well defined.
++    unsafe {
++        std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), std::mem::size_of_val(values))
++    }
++}
++
++fn typed<T: Copy>(bytes: &[u8]) -> Vec<T> {
++    let size = std::mem::size_of::<T>();
++    assert_eq!(bytes.len() % size, 0);
++    let mut values: Vec<T> = Vec::with_capacity(bytes.len() / size);
++    // SAFETY: the capacity matches the byte length, and any bit pattern is a
++    // valid value for the plain scalar types used here.
++    unsafe {
++        std::ptr::copy_nonoverlapping(bytes.as_ptr(), values.as_mut_ptr().cast::<u8>(), bytes.len());
++        values.set_len(bytes.len() / size);
++    }
++    values
++}
++
++fn read<T: Copy>(client: &cubecl::client::Client, handle: &Handle, count: usize) -> Vec<T> {
++    let bytes = client.read_one(handle.clone()).expect("device read");
++    typed::<T>(&bytes[..count * std::mem::size_of::<T>()])
++}
++
++fn upload<T: Copy>(client: &cubecl::client::Client, values: &[T]) -> Handle {
++    client.create_from_slice(bytes_of(values))
++}
++
++fn flat(len: usize) -> (CubeCount, CubeDim) {
++    (cube_count_for_len(len).expect("flat cube count"), cube_dim_1d())
++}
++
++fn arg(handle: &Handle, len: usize) -> BufferArg {
++    // SAFETY: the caller passes the logical element count of its own buffer.
++    unsafe { BufferArg::from_raw_parts(handle.clone(), len) }
++}
++
++fn binding(handle: &Handle, shape: &[usize], strides: &[usize]) -> TensorBinding {
++    // SAFETY: the caller passes the logical shape and element strides of its
++    // own buffer; CubeCL only uses them to index the handle.
++    unsafe {
++        TensorBinding::from_raw_parts(
++            handle.clone(),
++            strides.to_vec().into(),
++            shape.to_vec().into(),
++        )
++    }
++}
++
++fn compact_strides(shape: &[usize]) -> Vec<usize> {
++    let mut strides = Vec::with_capacity(shape.len());
++    let mut stride = 1usize;
++    for &extent in shape {
++        strides.push(stride);
++        stride *= extent;
++    }
++    strides
++}
++
++struct Rng(u64);
++
++impl Rng {
++    fn new(seed: u64) -> Rng {
++        Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1)
++    }
++
++    fn next_u64(&mut self) -> u64 {
++        let mut x = self.0;
++        x ^= x << 13;
++        x ^= x >> 7;
++        x ^= x << 17;
++        self.0 = x;
++        x
++    }
++
++    fn f32(&mut self) -> f32 {
++        (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32 - 0.5
++    }
++
++    fn f64(&mut self) -> f64 {
++        (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64 - 0.5
++    }
++
++    fn c64(&mut self) -> Complex64 {
++        Complex64::new(self.f64() * 4.0, self.f64() * 4.0)
++    }
++
++    fn i32(&mut self) -> i32 {
++        (self.next_u64() % 2_000_001) as i32 - 1_000_000
++    }
++}
++
++fn samples(len: usize, stride: usize) -> Vec<usize> {
++    let mut points = vec![0, 1, 2, len / 3, len / 2, len - 2, len - 1];
++    let mut index = 3;
++    while index + 4 < len {
++        points.push(index);
++        index = index.saturating_add(stride);
++    }
++    points.retain(|&point| point < len);
++    points.sort_unstable();
++    points.dedup();
++    points
++}
++
++fn close_f32(actual: f32, expected: f32) -> bool {
++    if actual == expected {
++        return true;
++    }
++    if !actual.is_finite() || !expected.is_finite() {
++        return false;
++    }
++    (actual - expected).abs() <= 1e-4 * expected.abs().max(1.0)
++}
++
++fn close_f64(actual: f64, expected: f64) -> bool {
++    if actual == expected {
++        return true;
++    }
++    if !actual.is_finite() || !expected.is_finite() {
++        return false;
++    }
++    (actual - expected).abs() <= 1e-9 * expected.abs().max(1.0)
++}
++
++/// A floating sum is compared against the accumulated magnitude, so a tree
++/// reduction and a serial reference agree without a bitwise promise.
++fn close_sum(actual: f64, expected: f64, abs_sum: f64) -> bool {
++    if actual == expected {
++        return true;
++    }
++    if !actual.is_finite() || !expected.is_finite() {
++        return false;
++    }
++    (actual - expected).abs() <= 1e-5 * abs_sum + 1e-6
++}
++
++fn checked(outcome: bool, case: &str) {
++    assert!(outcome, "reference check failed for {case}");
++}
++
++// ---------------------------------------------------------------------------
++// Elementwise
++// ---------------------------------------------------------------------------
++
++fn run_add_f32(case: &str, len: usize) {
++    if !wanted(case) {
++        return;
++    }
++    let backend = backend();
++    let client = client(&backend);
++    let mut rng = Rng::new(len as u64);
++    let lhs: Vec<f32> = (0..len).map(|_| rng.f32()).collect();
++    let rhs: Vec<f32> = (0..len).map(|_| rng.f32()).collect();
++    let lhs_h = upload(client, &lhs);
++    let rhs_h = upload(client, &rhs);
++    let out_h = client.empty(len * 4);
++    let (count, dim) = flat(len);
++    let mut run = || unsafe {
++        kernels::elementwise::add_float::launch_unchecked::<f32>(
++            client,
++            count.clone(),
++            dim,
++            arg(&out_h, len),
++            arg(&lhs_h, len),
++            arg(&rhs_h, len),
++        );
++    };
++    run();
++    backend.runtime().synchronize().unwrap();
++    let got = read::<f32>(client, &out_h, len);
++    checked(
++        samples(len, 65_537)
++            .into_iter()
++            .all(|index| close_f32(got[index], lhs[index] + rhs[index])),
++        case,
++    );
++    measure(backend.runtime(), &mut run);
++    emit_meta(case, &Meta::simple("add_float"), "ok", "");
++}
++
++fn run_exp_f32(case: &str, len: usize) {
++    if !wanted(case) {
++        return;
++    }
++    let backend = backend();
++    let client = client(&backend);
++    let mut rng = Rng::new(0x5F5F_5555);
++    let input: Vec<f32> = (0..len).map(|_| rng.f32()).collect();
++    let input_h = upload(client, &input);
++    let out_h = client.empty(len * 4);
++    let (count, dim) = flat(len);
++    let mut run = || unsafe {
++        kernels::elementwise::exp_float::launch_unchecked::<f32>(
++            client,
++            count.clone(),
++            dim,
++            arg(&out_h, len),
++            arg(&input_h, len),
++        );
++    };
++    run();
++    backend.runtime().synchronize().unwrap();
++    let got = read::<f32>(client, &out_h, len);
++    checked(
++        samples(len, 65_537)
++            .into_iter()
++            .all(|index| close_f32(got[index], input[index].exp())),
++        case,
++    );
++    measure(backend.runtime(), &mut run);
++    emit_meta(case, &Meta::simple("exp_float"), "ok", "");
++}
++
++fn run_mul_c64(case: &str, len: usize) {
++    if !wanted(case) {
++        return;
++    }
++    let backend = backend();
++    let client = client(&backend);
++    let mut rng = Rng::new(0x1111_2222);
++    let lhs: Vec<Complex64> = (0..len).map(|_| rng.c64()).collect();
++    let rhs: Vec<Complex64> = (0..len).map(|_| rng.c64()).collect();
++    let lhs_h = upload(client, &lhs);
++    let rhs_h = upload(client, &rhs);
++    let out_h = client.empty(len * std::mem::size_of::<Complex64>());
++    let (count, dim) = flat(len);
++    let mut run = || unsafe {
++        kernels::elementwise::mul_complex::launch_unchecked::<Complex64>(
++            client,
++            count.clone(),
++            dim,
++            arg(&out_h, len),
++            arg(&lhs_h, len),
++            arg(&rhs_h, len),
++        );
++    };
++    run();
++    backend.runtime().synchronize().unwrap();
++    let got = read::<Complex64>(client, &out_h, len);
++    checked(
++        samples(len, 65_537).into_iter().all(|index| {
++            let expected = lhs[index] * rhs[index];
++            close_f64(got[index].re, expected.re) && close_f64(got[index].im, expected.im)
++        }),
++        case,
++    );
++    measure(backend.runtime(), &mut run);
++    emit_meta(case, &Meta::simple("mul_complex"), "ok", "");
++}
++
++fn run_div_c64(case: &str, len: usize) {
++    if !wanted(case) {
++        return;
++    }
++    let backend = backend();
++    let client = client(&backend);
++    let mut rng = Rng::new(0x3333_4444);
++    let lhs: Vec<Complex64> = (0..len).map(|_| rng.c64()).collect();
++    let rhs: Vec<Complex64> = (0..len)
++        .map(|_| rng.c64() + Complex64::new(2.0, 1.0))
++        .collect();
++    let lhs_h = upload(client, &lhs);
++    let rhs_h = upload(client, &rhs);
++    let out_h = client.empty(len * std::mem::size_of::<Complex64>());
++    let part_len = len * 2;
++    let (count, dim) = flat(len);
++    let mut run = || unsafe {
++        kernels::elementwise::div_complex_parts::launch_unchecked::<f64>(
++            client,
++            count.clone(),
++            dim,
++            arg(&out_h, part_len),
++            arg(&lhs_h, part_len),
++            arg(&rhs_h, part_len),
++        );
++    };
++    run();
++    backend.runtime().synchronize().unwrap();
++    let got = read::<Complex64>(client, &out_h, len);
++    checked(
++        samples(len, 65_537).into_iter().all(|index| {
++            let expected = lhs[index] / rhs[index];
++            close_f64(got[index].re, expected.re) && close_f64(got[index].im, expected.im)
++        }),
++        case,
++    );
++    measure(backend.runtime(), &mut run);
++    emit_meta(case, &Meta::simple("div_complex_parts"), "ok", "");
++}
++
++// ---------------------------------------------------------------------------
++// Fusion
++// ---------------------------------------------------------------------------
++
++fn fusion_chain_reference(x: f64) -> f64 {
++    let sum = x + x;
++    (sum * sum).exp().tanh()
++}
++
++fn fusion_plan_chain() -> ElementwiseFusionPlan {
++    ElementwiseFusionPlan::new(
++        DType::F32,
++        1,
++        vec![4],
++        vec![
++            ElementwiseFusionInst::new(ElementwiseFusionOp::Add, vec![0, 0]),
++            ElementwiseFusionInst::new(ElementwiseFusionOp::Multiply, vec![1, 1]),
++            ElementwiseFusionInst::new(ElementwiseFusionOp::Exp, vec![2]),
++            ElementwiseFusionInst::new(ElementwiseFusionOp::Tanh, vec![3]),
++        ],
++    )
++}
++
++fn run_fused_chain_f32(case: &str, len: usize) {
++    if !wanted(case) {
++        return;
++    }
++    let backend = backend();
++    let plan = fusion_plan_chain();
++    let mut rng = Rng::new(0x5555_6666);
++    let host: Vec<f32> = (0..len).map(|_| rng.f32()).collect();
++    let host_tensor =
++        Tensor::from_typed::<f32>(TypedTensor::from_vec_col_major(vec![len], host.clone()).unwrap());
++    let input = crate::cuda::upload_tensor(backend.runtime(), &host_tensor).unwrap();
++
++    let mut run = || {
++        let outputs =
++            fusion::execute_elementwise_fusion(&backend, &[&input], &plan)
++                .expect("fused launch")
++                .expect("eligible fusion plan");
++        assert_eq!(outputs.len(), 1);
++    };
++    run();
++    backend.runtime().synchronize().unwrap();
++    let outputs = fusion::execute_elementwise_fusion(&backend, &[&input], &plan)
++        .unwrap()
++        .expect("eligible fusion plan");
++    backend.runtime().synchronize().unwrap();
++    let downloaded = crate::cuda::download_tensor(backend.runtime(), &outputs[0]).unwrap();
++    let values = downloaded.as_typed::<f32>().unwrap().as_slice().unwrap();
++    checked(
++        samples(len, 65_537)
++            .into_iter()
++            .all(|index| close_f32(values[index], fusion_chain_reference(host[index] as f64) as f32)),
++        case,
++    );
++    measure(backend.runtime(), &mut run);
++    emit_meta(
++        case,
++        &Meta {
++            kernels: "tenferro_fused_elementwise",
++            launches: 1,
++            scratch_bytes: 0,
++            // The baseline launcher allocates each output inside the call.
++            allocations: 1,
++            zero_fills: 0,
++        },
++        "ok",
++        "",
++    );
++}
++
++fn run_fused_add_mul_c64(case: &str, len: usize) {
++    if !wanted(case) {
++        return;
++    }
++    let backend = backend();
++    // (x + x) * x * (x + x): three intermediates, one output, one launch.
++    let plan = ElementwiseFusionPlan::new(
++        DType::C64,
++        1,
++        vec![3],
++        vec![
++            ElementwiseFusionInst::new(ElementwiseFusionOp::Add, vec![0, 0]),
++            ElementwiseFusionInst::new(ElementwiseFusionOp::Multiply, vec![1, 0]),
++            ElementwiseFusionInst::new(ElementwiseFusionOp::Multiply, vec![2, 1]),
++        ],
++    );
++    let mut rng = Rng::new(0x7777_8888);
++    let host: Vec<Complex64> = (0..len).map(|_| rng.c64()).collect();
++    let host_tensor = Tensor::from_typed::<tenferro_tensor::Complex64>(
++        TypedTensor::from_vec_col_major(vec![len], host.clone()).unwrap(),
++    );
++    let input = crate::cuda::upload_tensor(backend.runtime(), &host_tensor).unwrap();
++    let mut run = || {
++        let outputs =
++            fusion::execute_elementwise_fusion(&backend, &[&input], &plan)
++                .expect("fused launch")
++                .expect("eligible fusion plan");
++        assert_eq!(outputs.len(), 1);
++    };
++    run();
++    backend.runtime().synchronize().unwrap();
++    let outputs = fusion::execute_elementwise_fusion(&backend, &[&input], &plan)
++        .unwrap()
++        .expect("eligible fusion plan");
++    backend.runtime().synchronize().unwrap();
++    let downloaded = crate::cuda::download_tensor(backend.runtime(), &outputs[0]).unwrap();
++    let values = downloaded
++        .as_typed::<tenferro_tensor::Complex64>()
++        .unwrap()
++        .as_slice()
++        .unwrap();
++    checked(
++        samples(len, 65_537).into_iter().all(|index| {
++            let x = host[index];
++            let expected = (x + x) * x * (x + x);
++            close_f64(values[index].re, expected.re) && close_f64(values[index].im, expected.im)
++        }),
++        case,
++    );
++    measure(backend.runtime(), &mut run);
++    emit_meta(
++        case,
++        &Meta {
++            kernels: "tenferro_fused_elementwise",
++            launches: 1,
++            scratch_bytes: 0,
++            allocations: 1,
++            zero_fills: 0,
++        },
++        "ok",
++        "",
++    );
++}
++
++fn run_fused_two_live_outs_f32(case: &str, len: usize) {
++    if !wanted(case) {
++        return;
++    }
++    let backend = backend();
++    let plan = ElementwiseFusionPlan::new(
++        DType::F32,
++        1,
++        vec![2, 3],
++        vec![
++            ElementwiseFusionInst::new(ElementwiseFusionOp::Add, vec![0, 0]),
++            ElementwiseFusionInst::new(ElementwiseFusionOp::Exp, vec![1]),
++            ElementwiseFusionInst::new(ElementwiseFusionOp::Tanh, vec![1]),
++        ],
++    );
++    let mut rng = Rng::new(0x9999_AAAA);
++    let host: Vec<f32> = (0..len).map(|_| rng.f32()).collect();
++    let host_tensor =
++        Tensor::from_typed::<f32>(TypedTensor::from_vec_col_major(vec![len], host.clone()).unwrap());
++    let input = crate::cuda::upload_tensor(backend.runtime(), &host_tensor).unwrap();
++    let mut run = || {
++        let outputs =
++            fusion::execute_elementwise_fusion(&backend, &[&input], &plan)
++                .expect("fused launch")
++                .expect("eligible fusion plan");
++        assert_eq!(outputs.len(), 2);
++    };
++    run();
++    backend.runtime().synchronize().unwrap();
++    let outputs = fusion::execute_elementwise_fusion(&backend, &[&input], &plan)
++        .unwrap()
++        .expect("eligible fusion plan");
++    backend.runtime().synchronize().unwrap();
++    let first_tensor = crate::cuda::download_tensor(backend.runtime(), &outputs[0]).unwrap();
++    let second_tensor = crate::cuda::download_tensor(backend.runtime(), &outputs[1]).unwrap();
++    let first = first_tensor.as_typed::<f32>().unwrap().as_slice().unwrap();
++    let second = second_tensor.as_typed::<f32>().unwrap().as_slice().unwrap();
++    checked(
++        samples(len, 65_537).into_iter().all(|index| {
++            let doubled = host[index] + host[index];
++            close_f32(first[index], doubled.exp())
++                && close_f32(second[index], (doubled as f64).tanh() as f32)
++        }),
++        case,
++    );
++    measure(backend.runtime(), &mut run);
++    emit_meta(
++        case,
++        &Meta {
++            kernels: "tenferro_fused_elementwise",
++            launches: 1,
++            scratch_bytes: 0,
++            allocations: 2,
++            zero_fills: 0,
++        },
++        "ok",
++        "",
++    );
++}
++
++/// Cold prepare of the fused chain: a fresh runtime compiles the generated
++/// kernel on the first call and 10 warm calls reuse it. The baseline has no
++/// compile-count hook (`docs/design/cubecl-011-compile-count-hook.md`), so only
++/// the wall time is observable on this side.
++fn run_fused_cold_compile(case: &str) {
++    if !wanted(case) {
++        return;
++    }
++    let len = 10_000usize;
++    let backend = backend();
++    let plan = fusion_plan_chain();
++    let host: Vec<f32> = (0..len).map(|index| index as f32 * 1e-6).collect();
++    let host_tensor =
++        Tensor::from_typed::<f32>(TypedTensor::from_vec_col_major(vec![len], host).unwrap());
++    let input = crate::cuda::upload_tensor(backend.runtime(), &host_tensor).unwrap();
++
++    let cold_start = std::time::Instant::now();
++    let outputs = fusion::execute_elementwise_fusion(&backend, &[&input], &plan)
++        .unwrap()
++        .expect("eligible fusion plan");
++    backend.runtime().synchronize().unwrap();
++    let cold = cold_start.elapsed();
++    drop(outputs);
++
++    let warm_start = std::time::Instant::now();
++    for _ in 0..10 {
++        let outputs = fusion::execute_elementwise_fusion(&backend, &[&input], &plan)
++        .unwrap()
++        .expect("eligible fusion plan");
++        backend.runtime().synchronize().unwrap();
++        drop(outputs);
++    }
++    let warm = warm_start.elapsed() / 10;
++
++    println!(
++        "BENCH_META case={case} kernels=tenferro_fused_elementwise launches_per_iter=1 \
++         scratch_bytes=0 host_waits_per_iter=10 transfer_bytes_per_iter=0 \
++         device_allocations_per_iter=1 zero_fills_per_iter=0 boundary_barriers=0 check=n/a"
++    );
++    // The baseline has no compile-count hook (the tenferro-rs design records the
++    // missing observation hook), so only the wall times are observable here.
++    println!(
++        "BENCH_PREPARE case={case} emits=not_observable compile_attempts=not_observable \
++         module_loads=not_observable cache_hits=not_observable cache_misses=not_observable \
++         cold_ms={:.3} cold_compile_ms=not_observable cold_load_ms=not_observable warm_ms={:.3}",
++        cold.as_secs_f64() * 1e3,
++        warm.as_secs_f64() * 1e3
++    );
++    let mut run = || {
++        let outputs = fusion::execute_elementwise_fusion(&backend, &[&input], &plan)
++        .unwrap()
++        .expect("eligible fusion plan");
++        std::hint::black_box(&outputs);
++    };
++    measure(backend.runtime(), &mut run);
++}
++
++// ---------------------------------------------------------------------------
++// Layout / transpose
++// ---------------------------------------------------------------------------
++
++#[derive(Clone, Copy)]
++struct Tile {
++    tile: usize,
++    block_rows: usize,
++    padding: usize,
++    vector_width: usize,
++}
++
++impl Tile {
++    const DEFAULT: Tile = Tile {
++        tile: 16,
++        block_rows: 8,
++        padding: 1,
++        vector_width: 1,
++    };
++
++    fn grid(&self, dst_fast: usize, src_fast: usize, batches: usize) -> (CubeCount, CubeDim) {
++        (
++            CubeCount::Static(
++                dst_fast.div_ceil(self.tile) as u32,
++                src_fast.div_ceil(self.tile) as u32,
++                batches as u32,
++            ),
++            CubeDim::new_2d(
++                (self.tile / self.vector_width) as u32,
++                self.block_rows as u32,
++            ),
++        )
++    }
++}
++
++/// Compact F32 copy: the baseline's exact copy is the materialize kernel with
++/// identity strides.
++fn run_copy_f32(case: &str, side: usize) {
++    if !wanted(case) {
++        return;
++    }
++    let backend = backend();
++    let client = client(&backend);
++    let len = side * side;
++    let mut rng = Rng::new(0xBBBB_CCCC);
++    let values: Vec<f32> = (0..len).map(|_| rng.f32()).collect();
++    let src = upload(client, &values);
++    let dst = client.empty(len * 4);
++    let shape = [side, side];
++    let strides = [1i64, side as i64];
++    let (count, dim) = flat(len);
++    let mut run = || unsafe {
++        kernels::structural::materialize_strided_kernel::launch_unchecked::<f32>(
++            client,
++            count.clone(),
++            dim,
++            arg(&dst, len),
++            arg(&src, len),
++            runtime_sequence(&shape),
++            runtime_sequence(&strides),
++            0i64,
++            len,
++            2usize,
++        );
++    };
++    run();
++    backend.runtime().synchronize().unwrap();
++    let got = read::<f32>(client, &dst, len);
++    checked(got == values, case);
++    measure(backend.runtime(), &mut run);
++    emit_meta(case, &Meta::simple("materialize_strided_kernel"), "ok", "");
++}
++
++fn run_tiled_transpose(
++    case: &str,
++    tile: Tile,
++    dst_fast: usize,
++    src_fast: usize,
++    batches: usize,
++    src_offset: usize,
++) {
++    if !wanted(case) {
++        return;
++    }
++    let backend = backend();
++    let client = client(&backend);
++    let matrix = dst_fast * src_fast;
++    let span = matrix * batches;
++    let mut rng = Rng::new(0xDDDD_EEEE + src_offset as u64);
++    // A non-zero source offset is an offset into the source allocation, not a
++    // shifted copy of it.
++    let values: Vec<f32> = (0..span + src_offset).map(|_| rng.f32()).collect();
++    let src = upload(client, &values);
++    let dst = client.empty(span * 4);
++    let (count, dim) = tile.grid(dst_fast, src_fast, batches);
++    let mut run = || unsafe {
++        kernels::structural::tiled_transpose_kernel::launch_unchecked::<f32>(
++            client,
++            count.clone(),
++            dim,
++            arg(&dst, span),
++            arg(&src, span + src_offset),
++            src_offset,
++            matrix,
++            dst_fast,
++            src_fast,
++            tile.tile,
++            tile.block_rows,
++            tile.padding,
++            tile.vector_width,
++        );
++    };
++    run();
++    backend.runtime().synchronize().unwrap();
++    let got = read::<f32>(client, &dst, span);
++    let mut ok = true;
++    for batch in 0..batches {
++        for i in 0..dst_fast {
++            for j in 0..src_fast {
++                let expected = values[src_offset + batch * matrix + i * src_fast + j];
++                let actual = got[batch * matrix + i + j * dst_fast];
++                if !close_f32(actual, expected) {
++                    ok = false;
++                }
++            }
++        }
++    }
++    checked(ok, case);
++    measure(backend.runtime(), &mut run);
++    emit_meta(
++        case,
++        &Meta {
++            kernels: "tiled_transpose_kernel",
++            launches: 1,
++            scratch_bytes: tile.tile * (tile.tile + tile.padding) * 4,
++            allocations: 0,
++            zero_fills: 0,
++        },
++        "ok",
++        "",
++    );
++}
++
++fn run_materialize_negative_stride(case: &str, side: usize) {
++    if !wanted(case) {
++        return;
++    }
++    let backend = backend();
++    let client = client(&backend);
++    let len = side * side;
++    let mut rng = Rng::new(0x1234_5678);
++    let values: Vec<f32> = (0..len).map(|_| rng.f32()).collect();
++    let src = upload(client, &values);
++    let dst = client.empty(len * 4);
++    let shape = [side, side];
++    let src_strides = [-(1i64), -(side as i64)];
++    let src_offset = (len - 1) as i64;
++    let (count, dim) = flat(len);
++    let mut run = || unsafe {
++        kernels::structural::materialize_strided_kernel::launch_unchecked::<f32>(
++            client,
++            count.clone(),
++            dim,
++            arg(&dst, len),
++            arg(&src, len),
++            runtime_sequence(&shape),
++            runtime_sequence(&src_strides),
++            src_offset,
++            len,
++            2usize,
++        );
++    };
++    run();
++    backend.runtime().synchronize().unwrap();
++    let got = read::<f32>(client, &dst, len);
++    let mut ok = true;
++    for i in 0..side {
++        for j in 0..side {
++            let expected = values[(src_offset as usize) - i - j * side];
++            if !close_f32(got[i + j * side], expected) {
++                ok = false;
++            }
++        }
++    }
++    checked(ok, case);
++    measure(backend.runtime(), &mut run);
++    emit_meta(case, &Meta::simple("materialize_strided_kernel"), "ok", "");
++}
++
++/// Static window slice of a 4096² F32 source; one `(start, size, step)` set per
++/// case. The baseline takes the steps as compile-time configuration.
++fn run_slice_f32(case: &str, set: usize) {
++    if !wanted(case) {
++        return;
++    }
++    let side = 4096usize;
++    let (starts, sizes, steps): ([usize; 2], [usize; 2], [usize; 2]) = match set {
++        1 => ([3, 5], [1_000, 2_000], [1, 1]),
++        2 => ([0, 0], [2_048, 2_048], [2, 1]),
++        3 => ([17, 4_095], [2_048, 1], [1, 1]),
++        _ => ([1, 2], [4_095, 4_093], [1, 1]),
++    };
++    let backend = backend();
++    let client = client(&backend);
++    let len = side * side;
++    let out_len = sizes[0] * sizes[1];
++    let mut rng = Rng::new(0x9999 + set as u64);
++    let values: Vec<f32> = (0..len).map(|_| rng.f32()).collect();
++    let src = upload(client, &values);
++    let dst = client.empty(out_len * 4);
++    let (count, dim) = flat(out_len);
++    let mut run = || unsafe {
++        kernels::indexing::slice_kernel::launch_unchecked::<f32>(
++            client,
++            count.clone(),
++            dim,
++            binding(&dst, &sizes, &[1, sizes[0]]).into_tensor_arg(),
++            binding(&src, &[side, side], &[1, side]).into_tensor_arg(),
++            runtime_sequence(&starts),
++            comptime_sequence(&steps),
++        );
++    };
++    run();
++    backend.runtime().synchronize().unwrap();
++    let got = read::<f32>(client, &dst, out_len);
++    let mut ok = true;
++    for i in 0..sizes[0] {
++        for j in 0..sizes[1] {
++            let expected = values[starts[0] + i * steps[0] + (starts[1] + j * steps[1]) * side];
++            if !close_f32(got[i + j * sizes[0]], expected) {
++                ok = false;
++            }
++        }
++    }
++    checked(ok, case);
++    measure(backend.runtime(), &mut run);
++    emit_meta(case, &Meta::simple("slice_kernel"), "ok", "");
++}
++
++/// Padding of a 4096² F32 source; one `(low, high, interior)` set per case.
++/// The baseline's pad kernel leaves out-of-source positions untouched, so only
++/// in-source positions are checked on this side.
++fn run_pad_f32(case: &str, set: usize) {
++    if !wanted(case) {
++        return;
++    }
++    let side = 4096usize;
++    let (low, high, interior): ([i64; 2], [i64; 2], [i64; 2]) = match set {
++        1 => ([1, 2], [3, 4], [0, 0]),
++        2 => ([0, 0], [0, 1], [1, 0]),
++        3 => ([5, 7], [0, 0], [0, 2]),
++        _ => ([2, 2], [2, 2], [1, 1]),
++    };
++    let out_extent = |axis: usize| -> usize {
++        ((side as i64 - 1) * (interior[axis] + 1) + 1 + low[axis] + high[axis]) as usize
++    };
++    let out_shape = [out_extent(0), out_extent(1)];
++    let out_len = out_shape[0] * out_shape[1];
++    let backend = backend();
++    let client = client(&backend);
++    let len = side * side;
++    let mut rng = Rng::new(0xAAAA + set as u64);
++    let values: Vec<f32> = (0..len).map(|_| rng.f32()).collect();
++    let src = upload(client, &values);
++    let dst = client.empty(out_len * 4);
++    let (count, dim) = flat(out_len);
++    let mut run = || unsafe {
++        kernels::indexing::pad_kernel::launch_unchecked::<f32>(
++            client,
++            count.clone(),
++            dim,
++            binding(&dst, &out_shape, &[1, out_shape[0]]).into_tensor_arg(),
++            binding(&src, &[side, side], &[1, side]).into_tensor_arg(),
++            runtime_sequence(&low),
++            runtime_sequence(&interior),
++            2usize,
++        );
++    };
++    run();
++    backend.runtime().synchronize().unwrap();
++    let got = read::<f32>(client, &dst, out_len);
++    let mut ok = true;
++    for i in 0..out_shape[0] {
++        for j in 0..out_shape[1] {
++            let i_shift = i as i64 - low[0];
++            let j_shift = j as i64 - low[1];
++            let spacing_i = interior[0] + 1;
++            let spacing_j = interior[1] + 1;
++            if i_shift < 0 || j_shift < 0 {
++                continue;
++            }
++            if i_shift % spacing_i != 0 || j_shift % spacing_j != 0 {
++                continue;
++            }
++            let source_i = (i_shift / spacing_i) as usize;
++            let source_j = (j_shift / spacing_j) as usize;
++            if source_i >= side || source_j >= side {
++                continue;
++            }
++            let expected = values[source_i + source_j * side];
++            if !close_f32(got[i + j * out_shape[0]], expected) {
++                ok = false;
++            }
++        }
++    }
++    checked(ok, case);
++    measure(backend.runtime(), &mut run);
++    emit_meta(case, &Meta::simple("pad_kernel"), "ok", "");
++}
++
++// ---------------------------------------------------------------------------
++// Reduction
++// ---------------------------------------------------------------------------
++
++/// Everything one reduction case needs to submit its matched sequence.
++struct ReduceCase {
++    out_shape: Vec<usize>,
++    in_shape: Vec<usize>,
++    partials_shape: Option<Vec<usize>>,
++    launches: usize,
++}
++
++fn reduce_case(
++    client: &cubecl::client::Client,
++    in_shape: &[usize],
++    axis: usize,
++    dst: &Handle,
++    src: &Handle,
++) -> ReduceCase {
++    let mut out_shape = in_shape.to_vec();
++    out_shape[axis] = 1;
++    let in_strides = compact_strides(in_shape);
++    let out_strides = compact_strides(&out_shape);
++    let plan = kernels::reduce::plan(
++        client,
++        &binding(src, in_shape, &in_strides),
++        &binding(dst, &out_shape, &out_strides),
++        axis,
++        kernels::reduce::ReduceStrategy::Auto,
++    )
++    .expect("reduce plan");
++    let partials_shape = kernels::reduce::partials_shape(&plan, &out_shape, axis);
++    ReduceCase {
++        launches: if partials_shape.is_some() { 2 } else { 1 },
++        partials_shape,
++        out_shape,
++        in_shape: in_shape.to_vec(),
++    }
++}
++
++/// Plan the case with a throwaway one-element destination probe, then allocate
++/// the real destination at the planned size.
++fn plan_reduce(
++    client: &cubecl::client::Client,
++    in_shape: &[usize],
++    axis: usize,
++    src: &Handle,
++    probe_bytes: usize,
++) -> ReduceCase {
++    let probe = client.empty(probe_bytes);
++    let case = reduce_case(client, in_shape, axis, &probe, src);
++    drop(probe);
++    case
++}
++
++fn reduce_bindings(
++    case: &ReduceCase,
++    dst: &Handle,
++    src: &Handle,
++    partials: Option<&Handle>,
++) -> (TensorBinding, TensorBinding, Option<TensorBinding>) {
++    let out = binding(dst, &case.out_shape, &compact_strides(&case.out_shape));
++    let input = binding(src, &case.in_shape, &compact_strides(&case.in_shape));
++    let partials = partials.map(|handle| {
++        let shape = case.partials_shape.as_ref().unwrap();
++        binding(handle, shape, &compact_strides(shape))
++    });
++    (out, input, partials)
++}
++
++fn partials_bytes(case: &ReduceCase, elem_size: usize) -> usize {
++    case.partials_shape
++        .as_ref()
++        .map(|shape| shape.iter().product::<usize>() * elem_size)
++        .unwrap_or(0)
++}
++
++fn run_reduce_sum_f32(case: &str, in_shape: [usize; 2], axis: usize) {
++    if !wanted(case) {
++        return;
++    }
++    let backend = backend();
++    let client = client(&backend);
++    let in_len = in_shape[0] * in_shape[1];
++    let mut rng = Rng::new(0x1357_9BDF ^ in_shape[0] as u64);
++    let values: Vec<f32> = (0..in_len).map(|_| rng.f32()).collect();
++    let src = upload(client, &values);
++    let meta = plan_reduce(client, &in_shape, axis, &src, 4);
++    let out_len = meta.out_shape[0] * meta.out_shape[1];
++    let dst = client.empty(out_len * 4);
++    let partials = meta
++        .partials_shape
++        .as_ref()
++        .map(|shape| client.empty(shape.iter().product::<usize>() * 4));
++    let mut run = || {
++        let (out, input, partials_binding) = reduce_bindings(&meta, &dst, &src, partials.as_ref());
++        kernels::reduce::launch_sum_float::<f32>(
++            client,
++            input,
++            out,
++            axis,
++            kernels::reduce::ReduceStrategy::Auto,
++            partials_binding,
++        )
++        .expect("reduce launch");
++    };
++    run();
++    backend.runtime().synchronize().unwrap();
++    let got = read::<f32>(client, &dst, out_len);
++    let mut ok = true;
++    for out_flat in 0..out_len {
++        let mut sum = 0.0f64;
++        let mut abs_sum = 0.0f64;
++        for index in 0..in_shape[axis] {
++            let source = if axis == 0 {
++                index + (out_flat / meta.out_shape[0]) * in_shape[0]
++            } else {
++                (out_flat % meta.out_shape[0]) + index * in_shape[0]
++            };
++            let value = values[source] as f64;
++            sum += value;
++            abs_sum += value.abs();
++        }
++        if !close_sum(got[out_flat] as f64, sum, abs_sum) {
++            ok = false;
++        }
++    }
++    checked(ok, case);
++    measure(backend.runtime(), &mut run);
++    let kernels_used = if meta.launches == 2 {
++        "reduce_sum_float_chunked|reduce_sum_float|reduce_sum_float_plane"
++    } else {
++        "reduce_sum_float|reduce_sum_float_plane"
++    };
++    let launches = meta.launches;
++    let scratch = partials_bytes(&meta, 4);
++    emit_meta(
++        case,
++        &Meta {
++            kernels: kernels_used,
++            launches,
++            scratch_bytes: scratch,
++            allocations: 0,
++            zero_fills: 0,
++        },
++        "ok",
++        &format!("reduce_len={} output_len={out_len}", in_shape[axis]),
++    );
++}
++
++fn run_reduce_max_i32(case: &str, side: usize) {
++    if !wanted(case) {
++        return;
++    }
++    let backend = backend();
++    let client = client(&backend);
++    let in_shape = [side, side];
++    let in_len = side * side;
++    let mut rng = Rng::new(0x2468_ACE0);
++    let values: Vec<i32> = (0..in_len).map(|_| rng.i32()).collect();
++    let src = upload(client, &values);
++    let meta = plan_reduce(client, &in_shape, 0, &src, 8);
++    let out_len = meta.out_shape[0] * meta.out_shape[1];
++    let dst = client.empty(out_len * 4);
++    let partials = meta
++        .partials_shape
++        .as_ref()
++        .map(|shape| client.empty(shape.iter().product::<usize>() * 4));
++    let mut run = || {
++        let (out, input, partials_binding) = reduce_bindings(&meta, &dst, &src, partials.as_ref());
++        kernels::reduce::launch_max_int::<i32>(
++            client,
++            input,
++            out,
++            0,
++            kernels::reduce::ReduceStrategy::Auto,
++            partials_binding,
++        )
++        .expect("reduce launch");
++    };
++    run();
++    backend.runtime().synchronize().unwrap();
++    let got = read::<i32>(client, &dst, out_len);
++    let mut ok = true;
++    for out_flat in 0..out_len {
++        let mut best = i32::MIN;
++        for index in 0..side {
++            best = best.max(values[index + out_flat * side]);
++        }
++        if got[out_flat] != best {
++            ok = false;
++        }
++    }
++    checked(ok, case);
++    measure(backend.runtime(), &mut run);
++    let launches = meta.launches;
++    let scratch = partials_bytes(&meta, 4);
++    emit_meta(
++        case,
++        &Meta {
++            kernels: "reduce_max_int|reduce_max_int_plane",
++            launches,
++            scratch_bytes: scratch,
++            allocations: 0,
++            zero_fills: 0,
++        },
++        "ok",
++        &format!("reduce_len={side} output_len={out_len}"),
++    );
++}
++
++fn run_reduce_sum_f64(case: &str, side: usize) {
++    if !wanted(case) {
++        return;
++    }
++    let backend = backend();
++    let client = client(&backend);
++    let in_shape = [side, side];
++    let in_len = side * side;
++    let mut rng = Rng::new(0x0F0F_0F0F);
++    let values: Vec<f64> = (0..in_len).map(|_| rng.f64()).collect();
++    let src = upload(client, &values);
++    let meta = plan_reduce(client, &in_shape, 0, &src, 8);
++    let out_len = meta.out_shape[0] * meta.out_shape[1];
++    let dst = client.empty(out_len * 8);
++    let partials = meta
++        .partials_shape
++        .as_ref()
++        .map(|shape| client.empty(shape.iter().product::<usize>() * 8));
++    let mut run = || {
++        let (out, input, partials_binding) = reduce_bindings(&meta, &dst, &src, partials.as_ref());
++        kernels::reduce::launch_sum_float::<f64>(
++            client,
++            input,
++            out,
++            0,
++            kernels::reduce::ReduceStrategy::Auto,
++            partials_binding,
++        )
++        .expect("reduce launch");
++    };
++    run();
++    backend.runtime().synchronize().unwrap();
++    let got = read::<f64>(client, &dst, out_len);
++    let mut ok = true;
++    for out_flat in 0..out_len {
++        let mut sum = 0.0f64;
++        let mut abs_sum = 0.0f64;
++        for index in 0..side {
++            let value = values[index + out_flat * side];
++            sum += value;
++            abs_sum += value.abs();
++        }
++        if !close_sum(got[out_flat], sum, abs_sum) {
++            ok = false;
++        }
++    }
++    checked(ok, case);
++    measure(backend.runtime(), &mut run);
++    let launches = meta.launches;
++    let scratch = partials_bytes(&meta, 8);
++    emit_meta(
++        case,
++        &Meta {
++            kernels: "reduce_sum_float|reduce_sum_float_plane",
++            launches,
++            scratch_bytes: scratch,
++            allocations: 0,
++            zero_fills: 0,
++        },
++        "ok",
++        &format!("reduce_len={side} output_len={out_len}"),
++    );
++}
++
++fn run_reduce_sum_c64(case: &str, side: usize) {
++    if !wanted(case) {
++        return;
++    }
++    let backend = backend();
++    let client = client(&backend);
++    let in_shape = [side, side];
++    let in_len = side * side;
++    let mut rng = Rng::new(0x0E0E_0E0E);
++    let values: Vec<Complex64> = (0..in_len).map(|_| rng.c64()).collect();
++    let src = upload(client, &values);
++    let meta = plan_reduce(client, &in_shape, 0, &src, 8);
++    let out_len = meta.out_shape[0] * meta.out_shape[1];
++    let dst = client.empty(out_len * std::mem::size_of::<Complex64>());
++    let partials = meta.partials_shape.as_ref().map(|shape| {
++        client.empty(shape.iter().product::<usize>() * std::mem::size_of::<Complex64>())
++    });
++    let mut run = || {
++        let (out, input, partials_binding) = reduce_bindings(&meta, &dst, &src, partials.as_ref());
++        kernels::reduce::launch_sum_complex::<Complex64>(
++            client,
++            input,
++            out,
++            0,
++            kernels::reduce::ReduceStrategy::Auto,
++            partials_binding,
++        )
++        .expect("reduce launch");
++    };
++    run();
++    backend.runtime().synchronize().unwrap();
++    let got = read::<Complex64>(client, &dst, out_len);
++    let mut ok = true;
++    for out_flat in 0..out_len {
++        let mut sum = Complex64::new(0.0, 0.0);
++        let mut abs_sum = 0.0f64;
++        for index in 0..side {
++            let value = values[index + out_flat * side];
++            sum += value;
++            abs_sum += value.norm();
++        }
++        if !close_sum(got[out_flat].re, sum.re, abs_sum) || !close_sum(got[out_flat].im, sum.im, abs_sum)
++        {
++            ok = false;
++        }
++    }
++    checked(ok, case);
++    measure(backend.runtime(), &mut run);
++    let launches = meta.launches;
++    let scratch = partials_bytes(&meta, 16);
++    emit_meta(
++        case,
++        &Meta {
++            kernels: "reduce_sum_complex|reduce_sum_complex_plane",
++            launches,
++            scratch_bytes: scratch,
++            allocations: 0,
++            zero_fills: 0,
++        },
++        "ok",
++        &format!("reduce_len={side} output_len={out_len}"),
++    );
++}
++
++// ---------------------------------------------------------------------------
++// Gather and additive scatter
++// ---------------------------------------------------------------------------
++
++fn run_gather(case: &str, rows: usize) {
++    if !wanted(case) {
++        return;
++    }
++    let backend = backend();
++    let client = client(&backend);
++    let cols = 256usize;
++    let requested = 1024usize;
++    let mut rng = Rng::new(0xFACE_0000 + rows as u64);
++    let table: Vec<f32> = (0..rows * cols).map(|_| rng.f32()).collect();
++    let indices: Vec<i32> = (0..requested)
++        .map(|_| (rng.next_u64() % rows as u64) as i32)
++        .collect();
++    let operand = upload(client, &table);
++    let index_buf = upload(client, &indices);
++    let out_len = requested * cols;
++    let dst = client.empty(out_len * 4);
++    let operand_shape = [rows, cols];
++    let index_shape = [requested, 1usize];
++    let out_shape = [requested, cols];
++    let (count, dim) = flat(out_len);
++    let mut run = || unsafe {
++        kernels::indexing::gather_kernel::launch_unchecked::<f32, i32>(
++            client,
++            count.clone(),
++            dim,
++            binding(&dst, &out_shape, &compact_strides(&out_shape)).into_tensor_arg(),
++            binding(&operand, &operand_shape, &compact_strides(&operand_shape)).into_tensor_arg(),
++            binding(&index_buf, &index_shape, &compact_strides(&index_shape)).into_tensor_arg(),
++            comptime_sequence(&[1usize]),
++            comptime_sequence(&[1usize]),
++            comptime_sequence(&[0usize]),
++            runtime_sequence(&[1usize, cols]),
++            1usize,
++            2usize,
++            2usize,
++            2usize,
++        );
++    };
++    run();
++    backend.runtime().synchronize().unwrap();
++    let got = read::<f32>(client, &dst, out_len);
++    let mut ok = true;
++    for row in 0..requested {
++        for col in 0..cols {
++            let expected = table[indices[row] as usize + col * rows];
++            if !close_f32(got[row + col * requested], expected) {
++                ok = false;
++            }
++        }
++    }
++    checked(ok, case);
++    measure(backend.runtime(), &mut run);
++    emit_meta(case, &Meta::simple("gather_kernel"), "ok", "");
++}
++
++fn run_scatter_add(case: &str, complex: bool) {
++    if !wanted(case) {
++        return;
++    }
++    let backend = backend();
++    let client = client(&backend);
++    let slots = 16usize;
++    let updates = 1_000_000usize;
++    let indices: Vec<i32> = (0..updates)
++        .map(|index| ((index * 7 + index / 3) % slots) as i32)
++        .collect();
++    let mut rng = Rng::new(0xF00D_0000 + u64::from(complex));
++    let operand_shape = [slots];
++    let index_shape = [updates, 1usize];
++    let update_shape = [updates];
++    let elem = if complex { 16 } else { 4 };
++    let dst = client.empty(slots * elem);
++    let (copy_count, copy_dim) = flat(slots);
++    let (count, dim) = flat(updates);
++    // Values are generated before the measured region; the two sides differ
++    // only in the element type and the atomic kernel.
++    let (operand, update_values): (Vec<u8>, Vec<u8>) = if complex {
++        let operand: Vec<Complex64> = (0..slots)
++            .map(|index| Complex64::new(index as f64, -(index as f64)))
++            .collect();
++        let updates: Vec<Complex64> = (0..updates).map(|_| rng.c64()).collect();
++        (bytes_of(&operand).to_vec(), bytes_of(&updates).to_vec())
++    } else {
++        let operand: Vec<f32> = (0..slots).map(|index| index as f32).collect();
++        let updates: Vec<f32> = (0..updates).map(|_| rng.f32()).collect();
++        (bytes_of(&operand).to_vec(), bytes_of(&updates).to_vec())
++    };
++    let operand_h = client.create_from_slice(&operand);
++    let index_h = upload(client, &indices);
++    let update_h = client.create_from_slice(&update_values);
++    let index_binding = binding(&index_h, &index_shape, &compact_strides(&index_shape));
++    let operand_tensor = binding(&operand_h, &operand_shape, &[1]);
++    let update_tensor = binding(&update_h, &update_shape, &[1]);
++
++    let mut run = || unsafe {
++        if complex {
++            kernels::indexing::scatter_copy_kernel::launch_unchecked::<Complex64>(
++                client,
++                copy_count.clone(),
++                copy_dim,
++                binding(&dst, &operand_shape, &[1]).into_tensor_arg(),
++                operand_tensor.clone().into_tensor_arg(),
++            );
++            kernels::indexing::scatter_complex_kernel::launch_unchecked::<Complex64, f64, i32>(
++                client,
++                count.clone(),
++                dim,
++                arg(&dst, slots * 2),
++                operand_tensor.clone().into_tensor_arg(),
++                index_binding.clone().into_tensor_arg(),
++                update_tensor.clone().into_tensor_arg(),
++                arg(&update_h, updates * 2),
++                comptime_sequence::<usize>(&[]),
++                comptime_sequence::<usize>(&[]),
++                comptime_sequence(&[0usize]),
++                1usize,
++                1usize,
++                1usize,
++                2usize,
++            );
++        } else {
++            kernels::indexing::scatter_copy_kernel::launch_unchecked::<f32>(
++                client,
++                copy_count.clone(),
++                copy_dim,
++                binding(&dst, &operand_shape, &[1]).into_tensor_arg(),
++                operand_tensor.clone().into_tensor_arg(),
++            );
++            kernels::indexing::scatter_float_kernel::launch_unchecked::<f32, i32>(
++                client,
++                count.clone(),
++                dim,
++                arg(&dst, slots),
++                operand_tensor.clone().into_tensor_arg(),
++                index_binding.clone().into_tensor_arg(),
++                update_tensor.clone().into_tensor_arg(),
++                comptime_sequence::<usize>(&[]),
++                comptime_sequence::<usize>(&[]),
++                comptime_sequence(&[0usize]),
++                1usize,
++                1usize,
++                1usize,
++                2usize,
++            );
++        }
++    };
++    run();
++    backend.runtime().synchronize().unwrap();
++    let mut ok = true;
++    if complex {
++        let got = read::<Complex64>(client, &dst, slots);
++        let operand_values: Vec<Complex64> = typed(&operand);
++        let update_elements: Vec<Complex64> = typed(&update_values);
++        let mut expected = operand_values;
++        for index in 0..updates {
++            expected[indices[index] as usize] += update_elements[index];
++        }
++        for slot in 0..slots {
++            if !close_f64(got[slot].re, expected[slot].re)
++                || !close_f64(got[slot].im, expected[slot].im)
++            {
++                ok = false;
++            }
++        }
++    } else {
++        let got = read::<f32>(client, &dst, slots);
++        let operand_values: Vec<f32> = typed(&operand);
++        let update_elements: Vec<f32> = typed(&update_values);
++        let mut expected: Vec<f64> = operand_values.iter().map(|&value| value as f64).collect();
++        let mut magnitude: Vec<f64> = operand_values.iter().map(|&value| (value as f64).abs()).collect();
++        for index in 0..updates {
++            let slot = indices[index] as usize;
++            expected[slot] += update_elements[index] as f64;
++            magnitude[slot] += (update_elements[index] as f64).abs();
++        }
++        // The f32 atomic accumulation rounds at the running-sum magnitude, so
++        // the tolerance is relative to the accumulated magnitude, not the
++        // final value.
++        for slot in 0..slots {
++            if !close_sum(got[slot] as f64, expected[slot], magnitude[slot]) {
++                ok = false;
++            }
++        }
++    }
++    checked(ok, case);
++    measure(backend.runtime(), &mut run);
++    emit_meta(
++        case,
++        &Meta {
++            kernels: if complex {
++                "scatter_copy_kernel|scatter_complex_kernel"
++            } else {
++                "scatter_copy_kernel|scatter_float_kernel"
++            },
++            launches: 2,
++            scratch_bytes: 0,
++            allocations: 0,
++            zero_fills: 0,
++        },
++        "ok",
++        "",
++    );
++}
++
++// ---------------------------------------------------------------------------
++// The case table
++// ---------------------------------------------------------------------------
++
++#[test]
++#[ignore = "requires CUDA and an idle GPU"]
++fn bench_tenferro_gpu() {
++    assert!(crate::cuda::gpu_available(), "CUDA device required");
++    let cases = std::env::var("T4A_BENCH_CASES").unwrap_or_else(|_| "all".to_string());
++    println!("BENCH_CASES requested={cases}");
++
++    for &len in &[1_000usize, 1_000_000, 100_000_000] {
++        run_add_f32(&format!("elementwise-add-f32-{len}"), len);
++    }
++    run_exp_f32("elementwise-exp-f32-10000000", 10_000_000);
++    run_mul_c64("elementwise-mul-c64-10000000", 10_000_000);
++    run_div_c64("elementwise-div-c64-10000000", 10_000_000);
++
++    run_fused_chain_f32("fusion-chain-f32-1000", 1_000);
++    run_fused_chain_f32("fusion-chain-f32-10000000", 10_000_000);
++    run_fused_add_mul_c64("fusion-add-mul-c64-10000000", 10_000_000);
++    run_fused_two_live_outs_f32("fusion-two-live-outs-f32-10000000", 10_000_000);
++    run_fused_cold_compile("prepare-fused-cold-compile");
++
++    run_copy_f32("layout-copy-f32-4096sq", 4096);
++    run_tiled_transpose("layout-transpose-f32-4096sq", Tile::DEFAULT, 4096, 4096, 1, 0);
++    run_tiled_transpose(
++        "layout-transpose-f32-4093x4099",
++        Tile::DEFAULT,
++        4093,
++        4099,
++        1,
++        0,
++    );
++    run_tiled_transpose(
++        "layout-transpose-f32-4099x4093",
++        Tile::DEFAULT,
++        4099,
++        4093,
++        1,
++        0,
++    );
++    run_tiled_transpose(
++        "layout-transpose-offset-f32-4096sq",
++        Tile::DEFAULT,
++        4096,
++        4096,
++        1,
++        64,
++    );
++    run_tiled_transpose(
++        "layout-transpose-batched-f32-64x256x256",
++        Tile::DEFAULT,
++        256,
++        256,
++        64,
++        0,
++    );
++    run_tiled_transpose(
++        "layout-transpose-32x8-p1-v1-f32-4096sq",
++        Tile {
++            tile: 32,
++            block_rows: 8,
++            padding: 1,
++            vector_width: 1,
++        },
++        4096,
++        4096,
++        1,
++        0,
++    );
++    run_tiled_transpose(
++        "layout-transpose-16x8-p1-v2-f32-4096sq",
++        Tile {
++            tile: 16,
++            block_rows: 8,
++            padding: 1,
++            vector_width: 2,
++        },
++        4096,
++        4096,
++        1,
++        0,
++    );
++    run_materialize_negative_stride("layout-materialize-negative-stride-f32-4096sq", 4096);
++    for set in 1..=4 {
++        run_slice_f32(&format!("layout-slice-f32-4096sq-set{set}"), set);
++        run_pad_f32(&format!("layout-pad-f32-4096sq-set{set}"), set);
++    }
++
++    for &len in &[511usize, 512, 513, 600] {
++        run_reduce_sum_f32(&format!("reduce-sum-f32-axis-{len}"), [len, 4096], 0);
++    }
++    run_reduce_sum_f32("reduce-sum-f32-4096sq-axis0", [4096, 4096], 0);
++    run_reduce_sum_f32("reduce-sum-f32-4096sq-axis1", [4096, 4096], 1);
++    run_reduce_sum_f64("reduce-sum-f64-4096sq-axis0", 4096);
++    run_reduce_sum_c64("reduce-sum-c64-4096sq-axis0", 4096);
++    run_reduce_max_i32("reduce-max-i32-4096sq-axis0", 4096);
++    for &len in &[1_000_000usize, 10_000_000] {
++        run_reduce_sum_f32(&format!("reduce-sum-f32-full-{len}"), [len, 1], 0);
++    }
++
++    run_gather("indexing-gather-f32-1024x256-table1000", 1_000);
++    run_gather("indexing-gather-f32-1024x256-table100000", 100_000);
++    run_gather("indexing-gather-f32-1024x256-table1000000", 1_000_000);
++    run_scatter_add("indexing-scatter-add-f32-1e6-into-16", false);
++    run_scatter_add("indexing-scatter-add-c64-1e6-into-16", true);
++}
+diff --git a/crates/tenferro-gpu/src/cubecl/mod.rs b/crates/tenferro-gpu/src/cubecl/mod.rs
+index 975e26314..a33298fdc 100644
+--- a/crates/tenferro-gpu/src/cubecl/mod.rs
++++ b/crates/tenferro-gpu/src/cubecl/mod.rs
+@@ -5749,3 +5749,8 @@ fn concatenate_output_shape<T>(
+ 
+ #[cfg(test)]
+ mod tests;
++
++/// Paired A100 benchmark harness added by the t4a-cuda-kernels U6
++/// performance-evidence patch (`bench/cubecl-baseline/baseline.patch`).
++#[cfg(all(test, feature = "cuda"))]
++mod bench_harness;
+diff --git a/crates/tenferro-linalg/src/gpu/linalg/rank_revealing_qr.rs b/crates/tenferro-linalg/src/gpu/linalg/rank_revealing_qr.rs
+index 89b43a42c..93bab8e50 100644
+--- a/crates/tenferro-linalg/src/gpu/linalg/rank_revealing_qr.rs
++++ b/crates/tenferro-linalg/src/gpu/linalg/rank_revealing_qr.rs
+@@ -928,3 +928,9 @@ fn wrap_tensor<T: RrqrTensorVariant>(tensor: TypedTensor<T>) -> Tensor {
+ fn unwrap_tensor<T: RrqrTensorVariant>(tensor: Tensor) -> Result<TypedTensor<T>> {
+     T::unwrap(tensor)
+ }
++
++/// Paired A100 benchmark harness added by the t4a-cuda-kernels U6
++/// performance-evidence patch (`bench/cubecl-baseline/baseline.patch`). It lives
++/// here so it can mirror the host loop one private launch at a time.
++#[cfg(all(test, feature = "cuda"))]
++mod bench_harness;
+diff --git a/crates/tenferro-linalg/src/gpu/linalg/rank_revealing_qr/bench_harness.rs b/crates/tenferro-linalg/src/gpu/linalg/rank_revealing_qr/bench_harness.rs
+new file mode 100644
+index 000000000..b07769b4b
+--- /dev/null
++++ b/crates/tenferro-linalg/src/gpu/linalg/rank_revealing_qr/bench_harness.rs
+@@ -0,0 +1,857 @@
++//! Paired A100 benchmark harness for the linalg auxiliary kernels and the RRQR
++//! primitive sequence (slice F, unit U6).
++//!
++//! Added by `bench/cubecl-baseline/baseline.patch` of `t4a-cuda-kernels`; it is
++//! not part of the shipped crate. It lives inside the RRQR host-orchestration
++//! module so it can call the private per-step launchers and mirror the host
++//! loop one launch at a time.
++//!
++//! Protocol: 10 warm-ups outside the capture range, `cuProfilerStart`, 100
++//! timed iterations, one barrier at the observation boundary,
++//! `cuProfilerStop`. `T4A_BENCH_CASES` selects the cases (comma separated, or
++//! `all`).
++
++use std::ffi::c_void;
++
++use cubecl::prelude::{CubeCount, CubeDim, Scalar, TensorBinding};
++use tenferro_gpu::cuda::{
++    download_tensor, upload_tensor, with_cuda_exec_session, CudaBackend, CudaExecSession,
++    CudaRuntime,
++};
++use tenferro_tensor::backend::BackendSessionHost;
++use num_complex::Complex64;
++use tenferro_tensor::{Tensor, TypedTensor};
++
++use super::*;
++
++const WARMUPS: usize = 10;
++const ITERS: usize = 100;
++
++// ---------------------------------------------------------------------------
++// CUDA profiler range (cuProfilerStart / cuProfilerStop are not bound by
++// cudarc; they are resolved from the driver library at run time).
++// ---------------------------------------------------------------------------
++
++struct Profiler {
++    start: unsafe extern "C" fn(u32) -> i32,
++    stop: unsafe extern "C" fn(u32) -> i32,
++}
++
++unsafe extern "C" {
++    fn dlopen(filename: *const i8, flag: i32) -> *mut c_void;
++    fn dlsym(handle: *mut c_void, symbol: *const i8) -> *mut c_void;
++}
++
++fn profiler() -> &'static Profiler {
++    static PROFILER: std::sync::OnceLock<Profiler> = std::sync::OnceLock::new();
++    PROFILER.get_or_init(|| unsafe {
++        let handle = dlopen(c"libcuda.so.1".as_ptr(), 1);
++        assert!(!handle.is_null(), "libcuda.so.1 not loadable");
++        let resolve = |symbol: &std::ffi::CStr| -> *mut c_void {
++            let pointer = dlsym(handle, symbol.as_ptr());
++            assert!(!pointer.is_null(), "driver profiler symbol missing");
++            pointer
++        };
++        Profiler {
++            start: std::mem::transmute::<*mut c_void, unsafe extern "C" fn(u32) -> i32>(resolve(
++                c"cuProfilerStart",
++            )),
++            stop: std::mem::transmute::<*mut c_void, unsafe extern "C" fn(u32) -> i32>(resolve(
++                c"cuProfilerStop",
++            )),
++        }
++    })
++}
++
++fn profile_start() {
++    // SAFETY: the driver entry point takes the CUDA context (0 = current).
++    let status = unsafe { (profiler().start)(0) };
++    assert_eq!(status, 0, "cuProfilerStart failed with {status}");
++}
++
++fn profile_stop() {
++    let status = unsafe { (profiler().stop)(0) };
++    assert_eq!(status, 0, "cuProfilerStop failed with {status}");
++}
++
++// ---------------------------------------------------------------------------
++// Bookkeeping
++// ---------------------------------------------------------------------------
++
++fn wanted(case: &str) -> bool {
++    match std::env::var("T4A_BENCH_CASES") {
++        Err(_) => true,
++        Ok(value) => value
++            .split(',')
++            .map(str::trim)
++            .any(|entry| entry == case || entry == "all"),
++    }
++}
++
++fn emit_meta(case: &str, kernels: &str, launches: usize, scratch_bytes: usize, check: &str) {
++    println!(
++        "BENCH_META case={case} kernels={kernels} launches_per_iter={launches} \
++         scratch_bytes={scratch_bytes} host_waits_per_iter=0 transfer_bytes_per_iter=0 \
++         device_allocations_per_iter=0 zero_fills_per_iter=0 boundary_barriers=1 check={check}"
++    );
++}
++
++/// The frozen protocol around a prepared submission closure.
++fn measure(runtime: &CudaRuntime, run: &mut impl FnMut()) {
++    for _ in 0..WARMUPS {
++        run();
++    }
++    runtime.synchronize().expect("warm-up synchronize");
++    profile_start();
++    for _ in 0..ITERS {
++        run();
++    }
++    runtime.synchronize().expect("measured synchronize");
++    profile_stop();
++}
++
++fn backend() -> CudaBackend {
++    let devices = tenferro_gpu::cuda::cuda_devices().expect("CUDA device discovery");
++    let device = devices.first().expect("at least one CUDA device");
++    CudaBackend::new(device.id()).expect("CUDA backend")
++}
++
++fn with_cuda_exec<R>(
++    backend: &mut CudaBackend,
++    f: impl FnOnce(&mut CudaExecSession<'_>) -> R + Send,
++) -> R {
++    backend
++        .with_backend_session(|session| with_cuda_exec_session(session, f).expect("CUDA session"))
++        .unwrap()
++}
++
++struct Rng(u64);
++
++impl Rng {
++    fn new(seed: u64) -> Rng {
++        Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1)
++    }
++
++    fn next_u64(&mut self) -> u64 {
++        let mut x = self.0;
++        x ^= x << 13;
++        x ^= x >> 7;
++        x ^= x << 17;
++        self.0 = x;
++        x
++    }
++
++    fn f64(&mut self) -> f64 {
++        (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64 - 0.5
++    }
++
++    fn c64(&mut self) -> num_complex::Complex64 {
++        num_complex::Complex64::new(self.f64() * 2.0, self.f64() * 2.0)
++    }
++}
++
++/// A host tensor placed on the device before the measured region.
++fn placed<T: TensorScalar>(backend: &CudaBackend, shape: Vec<usize>, data: Vec<T>) -> Tensor {
++    let host = TypedTensor::<T>::from_vec_col_major(shape, data).expect("host tensor");
++    upload_tensor(backend.runtime(), &Tensor::from_typed::<T>(host)).expect("upload")
++}
++
++fn typed<'a, T: TensorScalar>(tensor: &'a Tensor) -> &'a TypedTensor<T> {
++    tensor.as_typed::<T>().expect("typed device tensor")
++}
++
++fn downloaded<T: TensorScalar>(runtime: &CudaRuntime, tensor: &Tensor) -> Vec<T> {
++    let host = download_tensor(runtime, tensor).expect("download");
++    host.as_typed::<T>()
++        .expect("typed host tensor")
++        .as_slice()
++        .expect("contiguous host tensor")
++        .to_vec()
++}
++
++/// Scalar arithmetic and magnitude for the host-side reference checks.
++trait BenchScalar: Copy {
++    fn zero() -> Self;
++    fn sum(self, other: Self) -> Self;
++    fn difference(self, other: Self) -> Self;
++    fn product(self, other: Self) -> Self;
++    fn magnitude(self) -> f64;
++    fn conjugate(self) -> Self;
++}
++
++impl BenchScalar for f64 {
++    fn zero() -> Self {
++        0.0
++    }
++    fn sum(self, other: Self) -> Self {
++        self + other
++    }
++    fn difference(self, other: Self) -> Self {
++        self - other
++    }
++    fn product(self, other: Self) -> Self {
++        self * other
++    }
++    fn magnitude(self) -> f64 {
++        self.abs()
++    }
++    fn conjugate(self) -> Self {
++        self
++    }
++}
++
++impl BenchScalar for num_complex::Complex64 {
++    fn zero() -> Self {
++        num_complex::Complex64::new(0.0, 0.0)
++    }
++    fn sum(self, other: Self) -> Self {
++        self + other
++    }
++    fn difference(self, other: Self) -> Self {
++        self - other
++    }
++    fn product(self, other: Self) -> Self {
++        self * other
++    }
++    fn magnitude(self) -> f64 {
++        Complex64::norm(self)
++    }
++    fn conjugate(self) -> Self {
++        Complex64::conj(&self)
++    }
++}
++
++// ---------------------------------------------------------------------------
++// RRQR per-step sequence
++// ---------------------------------------------------------------------------
++
++fn run_rrqr(case: &str, m: usize, n: usize, complex: bool) {
++    if !wanted(case) {
++        return;
++    }
++    let mut backend = backend();
++    let mut rng = Rng::new(0x5151 + (m * 31 + n) as u64);
++    if complex {
++        let values: Vec<num_complex::Complex64> = (0..m * n)
++            .map(|_| rng.c64() + num_complex::Complex64::new(0.75, 0.25))
++            .collect();
++        rrqr_typed::<num_complex::Complex64>(&mut backend, case, m, n, values);
++    } else {
++        let values: Vec<f64> = (0..m * n).map(|_| rng.f64() + 0.75).collect();
++        rrqr_typed::<f64>(&mut backend, case, m, n, values);
++    }
++}
++
++/// One full per-step factorization per iteration: exactly the launch sequence of
++/// `rank_revealing_qr_typed` — initialize the permutation, then for every step
++/// norms, pivot, swap, reflector and the trailing update, then extract R,
++/// initialize Q, apply the reflectors to Q in reverse and compute the rank.
++///
++/// The input clone the host function performs before the loop is a device-to-device
++/// memcpy, not a kernel, and is excluded on both sides, so the compared quantity is
++/// the per-step kernel sequence. Nothing restores the work buffer between iterations:
++/// the measured region starts from this reference-check factorization's leftover work
++/// matrix, and each iteration factorizes the previous iteration's leftover.
++fn rrqr_typed<T>(backend: &mut CudaBackend, case: &str, m: usize, n: usize, values: Vec<T>)
++where
++    T: CudaRrqrScalar + RrqrTensorVariant + Scalar + BenchScalar,
++    <T as LinalgScalar>::Real: Scalar,
++{
++    let k = m.min(n);
++    let options = RankRevealingQrOptions::default();
++    let work = placed(backend, vec![m, n], values.clone());
++    let work_typed = typed::<T>(&work);
++    let imaginary_unit = with_cuda_exec(backend, |exec| T::device_imaginary_unit(exec)).unwrap();
++    let runtime = backend.runtime().clone();
++    let launches = 1 + k * 5 - 1 + 1 + 1 + k + 1;
++
++    let (q, r, permutation, scratch_bytes) = with_cuda_exec(backend, |exec| {
++        exec.with_cubecl("bench_rrqr", |cubecl| {
++            // Every buffer is allocated once, outside the capture range.
++            let coeff = cubecl.alloc_output::<T>(&vec![k])?;
++            let norms = cubecl.alloc_output::<<T as LinalgScalar>::Real>(&vec![n])?;
++            let pivots = cubecl.alloc_output::<i64>(&[1])?;
++            let status = cubecl.alloc_zero_output::<i64>(&[k])?;
++            let rank = cubecl.alloc_output::<i64>(&[1])?;
++            let permutation = cubecl.alloc_output::<i64>(&[n])?;
++            let q = cubecl.alloc_output::<T>(&[m, k])?;
++            let r = cubecl.alloc_output::<T>(&[k, n])?;
++            // One extra output set for the single reference-checked run, so the
++            // measured iterations do not overwrite what the check reads.
++            let check_permutation = cubecl.alloc_output::<i64>(&[n])?;
++            let check_q = cubecl.alloc_output::<T>(&[m, k])?;
++            let check_r = cubecl.alloc_output::<T>(&[k, n])?;
++            let scratch_bytes = coeff.n_elements() * std::mem::size_of::<T>()
++                + norms.n_elements() * std::mem::size_of::<<T as LinalgScalar>::Real>()
++                + (pivots.n_elements() + status.n_elements() + rank.n_elements() + permutation.n_elements())
++                    * 8
++                + (q.n_elements() + r.n_elements() + check_q.n_elements() + check_r.n_elements())
++                    * std::mem::size_of::<T>()
++                + check_permutation.n_elements() * 8;
++
++            let batch_planes = rrqr_cube_count(1)?;
++
++            let sequence = |q: &TypedTensor<T>,
++                            r: &TypedTensor<T>,
++                            rank: &TypedTensor<i64>,
++                            permutation: &TypedTensor<i64>| {
++                for step in 0..k {
++                    let norm_planes = rrqr_cube_count(n - step).unwrap();
++                    T::launch_norms(cubecl, work_typed, &norms, norm_planes, step, m, n).unwrap();
++                    T::launch_pivot(
++                        cubecl,
++                        &norms,
++                        permutation,
++                        &pivots,
++                        &status,
++                        batch_planes.clone(),
++                        step,
++                        n,
++                    )
++                    .unwrap();
++                    launch_swap_columns(cubecl, work_typed, permutation, &pivots, step, m, n, 1)
++                        .unwrap();
++                    T::launch_reflector(
++                        cubecl,
++                        work_typed,
++                        &coeff,
++                        batch_planes.clone(),
++                        step,
++                        m,
++                        n,
++                        k,
++                    )
++                    .unwrap();
++                    let trailing = n - step - 1;
++                    if trailing > 0 {
++                        let apply_planes = rrqr_cube_count(trailing).unwrap();
++                        T::launch_apply(
++                            cubecl,
++                            work_typed,
++                            work_typed,
++                            &coeff,
++                            imaginary_unit.as_ref(),
++                            apply_planes,
++                            step,
++                            step + 1,
++                            trailing,
++                            m,
++                            n,
++                            n,
++                            k,
++                        )
++                        .unwrap();
++                    }
++                }
++                launch_extract_r(cubecl, work_typed, r, m, n, k).unwrap();
++                launch_initialize_q(cubecl, q, m, k).unwrap();
++                for step in (0..k).rev() {
++                    let q_planes = rrqr_cube_count(k).unwrap();
++                    T::launch_apply(
++                        cubecl,
++                        work_typed,
++                        q,
++                        &coeff,
++                        imaginary_unit.as_ref(),
++                        q_planes,
++                        step,
++                        0,
++                        k,
++                        m,
++                        n,
++                        k,
++                        k,
++                    )
++                    .unwrap();
++                }
++                T::launch_rank(cubecl, r, rank, &status, batch_planes.clone(), k, n, options)
++                    .unwrap();
++            };
++
++            // One reference-checked factorization before the capture range: the
++            // outputs must reconstruct A P = Q R, so a mis-wired launch sequence
++            // is not silently benchmarked.
++            launch_initialize_permutation(cubecl, &check_permutation, n)?;
++            sequence(&check_q, &check_r, &rank, &check_permutation);
++            runtime.synchronize().expect("check synchronize");
++
++            let mut run = || {
++                launch_initialize_permutation(cubecl, &permutation, n).unwrap();
++                sequence(&q, &r, &rank, &permutation);
++            };
++            measure(&runtime, &mut run);
++            Ok((
++                Tensor::from_typed::<T>(check_q),
++                Tensor::from_typed::<T>(check_r),
++                Tensor::from_typed::<i64>(check_permutation),
++                scratch_bytes,
++            ))
++        })
++        .unwrap()
++    });
++
++    let q_host: Vec<T> = downloaded(&runtime, &q);
++    let r_host: Vec<T> = downloaded(&runtime, &r);
++    let perm: Vec<i64> = downloaded(&runtime, &permutation);
++    let check = if reconstruction_ok::<T>(&values, &q_host, &r_host, &perm, m, n, k) {
++        "ok"
++    } else {
++        "FAIL"
++    };
++    emit_meta(
++        case,
++        "rrqr_initialize_permutation|rrqr_column_norms|rrqr_select_pivot|rrqr_swap_columns|\
++         rrqr_reflector|rrqr_apply_reflector|rrqr_extract_r|rrqr_initialize_q|rrqr_prefix_rank",
++        launches,
++        scratch_bytes,
++        check,
++    );
++}
++
++/// `A[.., permutation] == Q R` in the Frobenius norm, relative to `||A||`.
++fn reconstruction_ok<T: BenchScalar>(
++    a: &[T],
++    q: &[T],
++    r: &[T],
++    permutation: &[i64],
++    m: usize,
++    n: usize,
++    k: usize,
++) -> bool {
++    if permutation.len() != n || q.len() != m * k || r.len() != k * n {
++        return false;
++    }
++    let mut residual = 0.0f64;
++    let mut scale = 0.0f64;
++    for i in 0..m {
++        for j in 0..n {
++            let mut sum = T::zero();
++            for l in 0..k {
++                sum = BenchScalar::sum(
++                    sum,
++                    BenchScalar::product(q[i + l * m], r[l + j * k]),
++                );
++            }
++            let original = a[i + (permutation[j] as usize) * m];
++            let difference = BenchScalar::difference(sum, original);
++            residual += BenchScalar::magnitude(difference).powi(2);
++            scale += BenchScalar::magnitude(original).powi(2);
++        }
++    }
++    residual.sqrt() <= 1e-8 * scale.sqrt().max(1.0)
++}
++
++// ---------------------------------------------------------------------------
++// LU apply-pivots
++// ---------------------------------------------------------------------------
++
++fn run_lu_apply_pivots(case: &str, side: usize) {
++    if !wanted(case) {
++        return;
++    }
++    let mut backend = backend();
++    let mut rng = Rng::new(0x6060);
++    let values: Vec<f64> = (0..side * side).map(|_| rng.f64()).collect();
++    let input = placed(&backend, vec![side, side], values.clone());
++    // Identity pivots (1-based, LAPACK order), so the apply is a bit-exact copy.
++    let pivots: Vec<i32> = (0..side).map(|index| index as i32 + 1).collect();
++    let pivots_tensor = placed(&backend, vec![side], pivots);
++    let runtime = backend.runtime().clone();
++
++    let out = with_cuda_exec(&mut backend, |exec| {
++        exec.with_cubecl("bench_lu_apply_pivots", |cubecl| {
++            let out = cubecl.alloc_output::<f64>(&[side, side])?;
++            let out_arg = unsafe { cubecl.tensor_binding(&out, "bench") }?;
++            let input_arg = unsafe { cubecl.tensor_binding(typed::<f64>(&input), "bench") }?;
++            let count = cubecl.cube_count_1d(out.n_elements())?;
++            let mut run = || unsafe {
++                // The pivot vector is a raw `&[i32]` argument; the array
++                // argument has no clone, so it is rebuilt per iteration from
++                // the same device buffer (host-side validation only).
++                let pivots_arg = cubecl
++                    .array_arg(typed::<i32>(&pivots_tensor), "bench")
++                    .unwrap();
++                cubecl_linalg::lu_apply_pivots::launch_unchecked::<f64>(
++                    cubecl.client(),
++                    count.clone(),
++                    cubecl.cube_dim_1d(),
++                    out_arg.clone().into_tensor_arg(),
++                    input_arg.clone().into_tensor_arg(),
++                    pivots_arg,
++                    side,
++                    2usize,
++                    false,
++                );
++            };
++            run();
++            runtime.synchronize().expect("check synchronize");
++            measure(&runtime, &mut run);
++            Ok(Tensor::from_typed::<f64>(out))
++        })
++        .unwrap()
++    });
++    let got: Vec<f64> = downloaded(&runtime, &out);
++    let check = if got == values { "ok" } else { "FAIL" };
++    emit_meta(case, "lu_apply_pivots", 1, 0, check);
++}
++
++// ---------------------------------------------------------------------------
++// QR phase + apply-phase
++// ---------------------------------------------------------------------------
++
++/// The real and complex QR phase application differ in the kernel they launch
++/// and in whether R takes the conjugate phase.
++trait QrPhaseOps: LinalgScalar + TensorScalar + Scalar + BenchScalar + 'static {
++    fn launch_phase(
++        client: &cubecl::client::Client,
++        count: CubeCount,
++        phase: TensorBinding,
++        r: TensorBinding,
++        rank: usize,
++    );
++    fn launch_apply(
++        client: &cubecl::client::Client,
++        count: CubeCount,
++        q: TensorBinding,
++        r: TensorBinding,
++        phase: TensorBinding,
++        rank: usize,
++    );
++    /// The phase the kernel computes for one R diagonal entry.
++    fn phase(diagonal: Self) -> Self;
++    /// Whether R takes the conjugate phase (complex only).
++    fn conjugate_r() -> bool;
++    const KERNELS: &'static str;
++}
++
++impl QrPhaseOps for f64 {
++    fn launch_phase(
++        client: &cubecl::client::Client,
++        count: CubeCount,
++        phase: TensorBinding,
++        r: TensorBinding,
++        rank: usize,
++    ) {
++        // SAFETY: both bindings describe live device tensors of this call.
++        unsafe {
++            cubecl_linalg::qr_phase_real::launch_unchecked::<f64>(
++                client,
++                count,
++                CubeDim::new_1d(256),
++                phase.into_tensor_arg(),
++                r.into_tensor_arg(),
++                rank,
++            );
++        }
++    }
++
++    fn launch_apply(
++        client: &cubecl::client::Client,
++        count: CubeCount,
++        q: TensorBinding,
++        r: TensorBinding,
++        phase: TensorBinding,
++        rank: usize,
++    ) {
++        // SAFETY: all bindings describe live device tensors of this call.
++        unsafe {
++            cubecl_linalg::qr_apply_phase_real::launch_unchecked::<f64>(
++                client,
++                count,
++                CubeDim::new_1d(256),
++                q.into_tensor_arg(),
++                r.into_tensor_arg(),
++                phase.into_tensor_arg(),
++                0usize,
++                rank,
++            );
++        }
++    }
++
++    fn phase(diagonal: Self) -> Self {
++        if diagonal < 0.0 {
++            -1.0
++        } else {
++            1.0
++        }
++    }
++
++    fn conjugate_r() -> bool {
++        false
++    }
++
++    const KERNELS: &'static str = "qr_phase_real|qr_apply_phase_real";
++}
++
++impl QrPhaseOps for num_complex::Complex64 {
++    fn launch_phase(
++        client: &cubecl::client::Client,
++        count: CubeCount,
++        phase: TensorBinding,
++        r: TensorBinding,
++        rank: usize,
++    ) {
++        // SAFETY: both bindings describe live device tensors of this call.
++        unsafe {
++            cubecl_linalg::qr_phase_c64::launch_unchecked(
++                client,
++                count,
++                CubeDim::new_1d(256),
++                phase.into_tensor_arg(),
++                r.into_tensor_arg(),
++                rank,
++            );
++        }
++    }
++
++    fn launch_apply(
++        client: &cubecl::client::Client,
++        count: CubeCount,
++        q: TensorBinding,
++        r: TensorBinding,
++        phase: TensorBinding,
++        rank: usize,
++    ) {
++        // SAFETY: all bindings describe live device tensors of this call.
++        unsafe {
++            cubecl_linalg::qr_apply_phase_complex::launch_unchecked::<num_complex::Complex64>(
++                client,
++                count,
++                CubeDim::new_1d(256),
++                q.into_tensor_arg(),
++                r.into_tensor_arg(),
++                phase.into_tensor_arg(),
++                0usize,
++                rank,
++            );
++        }
++    }
++
++    fn phase(diagonal: Self) -> Self {
++        let magnitude = Complex64::norm(diagonal);
++        if magnitude == 0.0 {
++            num_complex::Complex64::new(1.0, 0.0)
++        } else {
++            diagonal / num_complex::Complex64::new(magnitude, 0.0)
++        }
++    }
++
++    fn conjugate_r() -> bool {
++        true
++    }
++
++    const KERNELS: &'static str = "qr_phase_c64|qr_apply_phase_complex";
++}
++
++fn run_qr_apply_phase<T>(case: &str, rows: usize, cols: usize, q_values: Vec<T>, r_values: Vec<T>)
++where
++    T: QrPhaseOps,
++{
++    if !wanted(case) {
++        return;
++    }
++    let mut backend = backend();
++    let q_tensor = placed(&backend, vec![rows, cols], q_values.clone());
++    let r_tensor = placed(&backend, vec![cols, cols], r_values.clone());
++    let runtime = backend.runtime().clone();
++
++    let (q, r) = with_cuda_exec(&mut backend, |exec| {
++        exec.with_cubecl("bench_qr_apply_phase", |cubecl| {
++            let phase = cubecl.alloc_output::<T>(&[cols])?;
++            let q_arg = unsafe { cubecl.tensor_binding(typed::<T>(&q_tensor), "bench") }?;
++            let r_arg = unsafe { cubecl.tensor_binding(typed::<T>(&r_tensor), "bench") }?;
++            let phase_arg = unsafe { cubecl.tensor_binding(&phase, "bench") }?;
++            let phase_count = cubecl.cube_count_1d(phase.n_elements())?;
++            let apply_count = cubecl.cube_count_1d((rows * cols).max(cols * cols))?;
++            let mut run = || {
++                T::launch_phase(
++                    cubecl.client(),
++                    phase_count.clone(),
++                    phase_arg.clone(),
++                    r_arg.clone(),
++                    2usize,
++                );
++                T::launch_apply(
++                    cubecl.client(),
++                    apply_count.clone(),
++                    q_arg.clone(),
++                    r_arg.clone(),
++                    phase_arg.clone(),
++                    2usize,
++                );
++            };
++            run();
++            runtime.synchronize().expect("check synchronize");
++            measure(&runtime, &mut run);
++            Ok((q_tensor, r_tensor))
++        })
++        .unwrap()
++    });
++
++    // Expected: every Q column and every R row is scaled by the phase of the
++    // initial R diagonal; the complex kernel conjugates the phase on R.
++    let q_host: Vec<T> = downloaded(&runtime, &q);
++    let r_host: Vec<T> = downloaded(&runtime, &r);
++    let mut ok = q_host.len() == rows * cols && r_host.len() == cols * cols;
++    let row_phase = |i: usize| {
++        let phase = T::phase(r_values[i + i * cols]);
++        if T::conjugate_r() {
++            BenchScalar::conjugate(phase)
++        } else {
++            phase
++        }
++    };
++    for j in 0..cols {
++        let column_phase = T::phase(r_values[j + j * cols]);
++        for i in 0..rows {
++            let expected = BenchScalar::product(q_values[i + j * rows], column_phase);
++            if BenchScalar::magnitude(BenchScalar::difference(q_host[i + j * rows], expected))
++                > 1e-12
++            {
++                ok = false;
++            }
++        }
++        for i in 0..cols {
++            let expected = BenchScalar::product(r_values[i + j * cols], row_phase(i));
++            if BenchScalar::magnitude(BenchScalar::difference(r_host[i + j * cols], expected))
++                > 1e-12
++            {
++                ok = false;
++            }
++        }
++    }
++    emit_meta(
++        case,
++        T::KERNELS,
++        2,
++        cols * std::mem::size_of::<T>(),
++        if ok { "ok" } else { "FAIL" },
++    );
++}
++
++// ---------------------------------------------------------------------------
++// Householder explicit V
++// ---------------------------------------------------------------------------
++
++fn run_householder_explicit_v<T>(case: &str, rows: usize, cols: usize, values: Vec<T>)
++where
++    T: LinalgScalar + TensorScalar + Scalar + BenchScalar,
++{
++    if !wanted(case) {
++        return;
++    }
++    let mut backend = backend();
++    let packed = placed(&backend, vec![rows, cols], values.clone());
++    let runtime = backend.runtime().clone();
++    let out = with_cuda_exec(&mut backend, |exec| {
++        exec.with_cubecl("bench_householder_explicit_v", |cubecl| {
++            let out = cubecl.alloc_output::<T>(&[rows, cols])?;
++            let out_arg = unsafe { cubecl.tensor_binding(&out, "bench") }?;
++            let packed_arg = unsafe { cubecl.tensor_binding(typed::<T>(&packed), "bench") }?;
++            let count = cubecl.cube_count_1d(out.n_elements())?;
++            let mut run = || unsafe {
++                cubecl_linalg::householder_explicit_v::launch_unchecked::<T>(
++                    cubecl.client(),
++                    count.clone(),
++                    cubecl.cube_dim_1d(),
++                    out_arg.clone().into_tensor_arg(),
++                    packed_arg.clone().into_tensor_arg(),
++                );
++            };
++            run();
++            runtime.synchronize().expect("check synchronize");
++            measure(&runtime, &mut run);
++            Ok(Tensor::from_typed::<T>(out))
++        })
++        .unwrap()
++    });
++    let got: Vec<T> = downloaded(&runtime, &out);
++    let mut ok = got.len() == rows * cols;
++    for i in 0..rows {
++        for j in 0..cols {
++            let expected = if i < j {
++                0.0
++            } else if i == j {
++                1.0
++            } else {
++                BenchScalar::magnitude(values[i + j * rows])
++            };
++            if (BenchScalar::magnitude(got[i + j * rows]) - expected).abs() > 1e-12 {
++                ok = false;
++            }
++        }
++    }
++    emit_meta(
++        case,
++        "householder_explicit_v",
++        1,
++        0,
++        if ok { "ok" } else { "FAIL" },
++    );
++}
++
++// ---------------------------------------------------------------------------
++// The case table
++// ---------------------------------------------------------------------------
++
++#[test]
++#[ignore = "requires CUDA and an idle GPU"]
++fn bench_tenferro_linalg() {
++    assert!(tenferro_gpu::cuda::gpu_available(), "CUDA device required");
++    let cases = std::env::var("T4A_BENCH_CASES").unwrap_or_else(|_| "all".to_string());
++    println!("BENCH_CASES requested={cases}");
++
++    run_rrqr("linalg-rrqr-256x256-f64", 256, 256, false);
++    run_rrqr("linalg-rrqr-256x256-c64", 256, 256, true);
++    run_rrqr("linalg-rrqr-1024x256-f64", 1024, 256, false);
++    run_rrqr("linalg-rrqr-1024x256-c64", 1024, 256, true);
++    run_lu_apply_pivots("linalg-lu-apply-pivots-1024-f64", 1024);
++
++    let rows = 1024usize;
++    let cols = 256usize;
++    let mut rng = Rng::new(0x7070);
++    // Upper-triangular R with alternating diagonal signs, so both real phases
++    // and a spread of complex phases occur.
++    let mut r_real = vec![0.0f64; cols * cols];
++    let mut r_complex = vec![num_complex::Complex64::new(0.0, 0.0); cols * cols];
++    for j in 0..cols {
++        for i in 0..=j {
++            if i == j {
++                let magnitude = 2.0 + i as f64;
++                r_real[i + j * cols] = if i % 2 == 0 { magnitude } else { -magnitude };
++                r_complex[i + j * cols] = num_complex::Complex64::new(magnitude, 0.5);
++            } else {
++                r_real[i + j * cols] = rng.f64();
++                r_complex[i + j * cols] = rng.c64();
++            }
++        }
++    }
++    run_qr_apply_phase(
++        "linalg-qr-apply-phase-1024x256-f64",
++        rows,
++        cols,
++        (0..rows * cols).map(|_| rng.f64()).collect(),
++        r_real,
++    );
++    run_qr_apply_phase(
++        "linalg-qr-apply-phase-1024x256-c64",
++        rows,
++        cols,
++        (0..rows * cols).map(|_| rng.c64()).collect(),
++        r_complex,
++    );
++
++    let mut rng = Rng::new(0x8080);
++    run_householder_explicit_v(
++        "linalg-householder-explicit-v-1024x256-f64",
++        rows,
++        cols,
++        (0..rows * cols).map(|_| rng.f64()).collect(),
++    );
++    let mut rng = Rng::new(0x8081);
++    run_householder_explicit_v(
++        "linalg-householder-explicit-v-1024x256-c64",
++        rows,
++        cols,
++        (0..rows * cols).map(|_| rng.c64()).collect(),
++    );
++}

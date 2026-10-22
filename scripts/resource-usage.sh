@@ -11,10 +11,13 @@
 # shared memory (`t4a_cuda_tiled_transpose`) report 0 here and receive it at
 # launch time. `local` is the per-thread local memory that ptxas would spill
 # into; spill stores/loads come from ptxas. `local_memory_ops` is the number of
-# SASS local-memory instructions (`LDL`/`STL`, every width) in the entry's body:
-# the stack frame is only a size, this column shows whether the code actually
-# touches it per element (a dynamically indexed by-value layout POD copies the
-# POD into the stack frame and reads it back with `LDL`).
+# static SASS local-memory instructions (`LDL`/`STL`, every width, with or without
+# a guard predicate such as `@P0`) in the entry's body: the stack frame is only a
+# size, this column shows whether the code actually touches it per element (a
+# dynamically indexed by-value layout POD copies the POD into the stack frame and
+# reads it back with `LDL`). It is a static instruction count, not a dynamic
+# per-element count; predicated `LDL`/`STL` are included, so the diagnostic cannot
+# silently undercount a guarded local access.
 #
 # Usage: scripts/resource-usage.sh [-a ARCH]
 # Exit status is non-zero when a source fails to compile.
@@ -97,10 +100,13 @@ with open(cuobjdump_path) as handle:
                     usage[current][key] = value
 
 # SASS local-memory instructions per entry: LDL/STL (any width or variant
-# suffix, e.g. LDL.64/STL.128/STL.STRONG). Shared memory (LDS/STS) is not local.
+# suffix, e.g. LDL.64/STL.128/STL.STRONG), with or without a leading guard
+# predicate (`@P0 LDL.64 ...`, `@!P3 STL.64 ...`). Shared memory (LDS/STS) is
+# not local. The column is a *static* instruction count, not a dynamic count.
 local_ops = {}
 current = None
-mnemonic = re.compile(r"\s*/\*[0-9a-f]+\*/\s+([A-Z][A-Z0-9._]*)")
+# An instruction line is `/*<hex>*/ [predicate] MNEMONIC operands ;`.
+mnemonic = re.compile(r"\s*/\*[0-9a-f]+\*/\s+(?:@!?P\d+\s+)?([A-Z][A-Z0-9._]*)")
 local_pattern = re.compile(r"(?:LDL|STL)(?:\.\w+)*")
 with open(sass_path) as handle:
     for line in handle:

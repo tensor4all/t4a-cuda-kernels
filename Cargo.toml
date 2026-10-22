@@ -61,3 +61,8 @@ required-features = ["gpu-tests"]
 name = "gpu_linalg_aux"
 path = "tests/gpu_linalg_aux.rs"
 required-features = ["gpu-tests"]
+
+[[test]]
+name = "gpu_rrqr"
+path = "tests/gpu_rrqr.rs"
+required-features = ["gpu-tests"]

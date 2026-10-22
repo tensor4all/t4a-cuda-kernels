@@ -57,7 +57,8 @@ __device__ __forceinline__ t4a_cuda_c64 positive_phase(t4a_cuda_c64 diagonal) {
 
 // Batch linear index over axes 2.. of `layout` for logical position `flat`,
 // accumulated in ascending axis order like the baseline's batch_linear_index.
-__device__ __forceinline__ long long batch_linear_index(long long flat, t4a_cuda_layout layout) {
+__device__ __forceinline__ long long batch_linear_index(long long flat,
+                                                       const t4a_cuda_layout& layout) {
   long long batch = 0;
   long long stride = 1;
   for (int axis = 0; axis < layout.rank; ++axis) {
@@ -75,8 +76,8 @@ __device__ __forceinline__ long long batch_linear_index(long long flat, t4a_cuda
 // Element offset contributed by axes 2.. of `out_layout`, applied to the matching
 // axes of another layout of the same rank (the baseline's matching_work_offset).
 __device__ __forceinline__ long long batch_axis_offset(long long flat,
-                                                       t4a_cuda_layout out_layout,
-                                                       t4a_cuda_layout target_layout) {
+                                                       const t4a_cuda_layout& out_layout,
+                                                       const t4a_cuda_layout& target_layout) {
   long long remaining = flat / (out_layout.extents[0] * out_layout.extents[1]);
   long long offset = 0;
   for (int axis = 2; axis < out_layout.rank; ++axis) {
@@ -84,6 +85,27 @@ __device__ __forceinline__ long long batch_axis_offset(long long flat,
     const long long coordinate = remaining % extent;
     remaining /= extent;
     offset += coordinate * target_layout.strides[axis];
+  }
+  return offset;
+}
+
+// Address of logical element `flat` in `layout`, with the axis walk unrolled over
+// literal metadata indices. Handing `extents`/`strides` to `t4a_cuda_decode` makes
+// their addresses escape to pointer parameters, and the bodies below walk a second
+// layout or a plan array as well, which is what copies the by-value layouts into
+// the per-thread stack frame and turns every metadata access into `LDL`/`STL` (see
+// the metadata-access note in t4a/abi.cuh).
+__device__ __forceinline__ long long linalg_address(long long flat,
+                                                   const t4a_cuda_layout& layout) {
+  long long offset = layout.offset;
+  long long rest = flat;
+#pragma unroll
+  for (int axis = 0; axis < T4A_CUDA_MAX_RANK; ++axis) {
+    if (axis < layout.rank) {
+      const long long extent = layout.extents[axis];
+      offset += (rest % extent) * layout.strides[axis];
+      rest /= extent;
+    }
   }
   return offset;
 }
@@ -232,8 +254,7 @@ __device__ __forceinline__ void qr_apply_phase_body(void* q, void* r, const void
     const long long index = q_start + column;
     if (index < phase_layout.extents[0]) {
       long long remaining = flat / (q_layout.extents[0] * q_layout.extents[1]);
-      long long q_index = t4a_cuda_decode(flat, q_layout.rank, q_layout.extents,
-                                          q_layout.strides, q_layout.offset);
+      const long long q_index = linalg_address(flat, q_layout);
       long long phase_index = phase_layout.offset + index * phase_layout.strides[0];
       for (int axis = 2; axis < q_layout.rank; ++axis) {
         const long long extent = q_layout.extents[axis];
@@ -248,8 +269,7 @@ __device__ __forceinline__ void qr_apply_phase_body(void* q, void* r, const void
   if (flat < r_count) {
     const long long index = flat % r_layout.extents[0];
     long long remaining = flat / (r_layout.extents[0] * r_layout.extents[1]);
-    long long r_index = t4a_cuda_decode(flat, r_layout.rank, r_layout.extents, r_layout.strides,
-                                        r_layout.offset);
+    const long long r_index = linalg_address(flat, r_layout);
     long long phase_index = phase_layout.offset + index * phase_layout.strides[0];
     for (int axis = 2; axis < r_layout.rank; ++axis) {
       const long long extent = r_layout.extents[axis];
@@ -348,15 +368,13 @@ __device__ __forceinline__ void lu_extract_body(void* p_out, void* l_out, void* 
         final_row = step;
       }
     }
-    const long long index =
-        t4a_cuda_decode(pos, p_layout.rank, p_layout.extents, p_layout.strides, p_layout.offset);
+    const long long index = linalg_address(pos, p_layout);
     static_cast<T*>(p_out)[index] = final_row == row ? t4a_cuda_one<T>() : t4a_cuda_zero<T>();
   }
   if (pos < l_len) {
     const long long row = pos % l_layout.extents[0];
     const long long col = (pos / l_layout.extents[0]) % l_layout.extents[1];
-    const long long index = t4a_cuda_decode(pos, l_layout.rank, l_layout.extents, l_layout.strides,
-                                            l_layout.offset);
+    const long long index = linalg_address(pos, l_layout);
     T value;
     if (row < col) {
       value = t4a_cuda_zero<T>();
@@ -372,8 +390,7 @@ __device__ __forceinline__ void lu_extract_body(void* p_out, void* l_out, void* 
   if (pos < u_len) {
     const long long row = pos % u_layout.extents[0];
     const long long col = (pos / u_layout.extents[0]) % u_layout.extents[1];
-    const long long index = t4a_cuda_decode(pos, u_layout.rank, u_layout.extents, u_layout.strides,
-                                            u_layout.offset);
+    const long long index = linalg_address(pos, u_layout);
     static_cast<T*>(u_out)[index] =
         row <= col ? static_cast<const T*>(work)[work_layout.offset +
                                                  row * work_layout.strides[0] +
@@ -445,9 +462,7 @@ __device__ __forceinline__ void lu_apply_pivots_body(void* out, const void* inpu
       }
     }
   }
-  const long long out_index =
-      t4a_cuda_decode(pos, out_layout.rank, out_layout.extents, out_layout.strides,
-                      out_layout.offset);
+  const long long out_index = linalg_address(pos, out_layout);
   const long long in_index = in_layout.offset + source_row * in_layout.strides[0] +
                              col * in_layout.strides[1] +
                              batch_axis_offset(pos, out_layout, in_layout);

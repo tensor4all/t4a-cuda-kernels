@@ -17,17 +17,23 @@
 
 namespace {
 
-// Logical coordinates of `flat` in a compact layout, axis 0 fastest.
+// Logical coordinates of `flat` in a compact layout, axis 0 fastest. Every slot is
+// written, including the ones past `layout.rank`: `t4a_cuda_axis_value` reads the
+// whole array, and the masked zero does not make an uninitialized slot defined.
+// The axis walk is unrolled with literal metadata indices so the coordinate vector
+// and the by-value layout stay in registers / the constant bank (see the
+// metadata-access note in t4a/abi.cuh).
 __device__ __forceinline__ void t4a_cuda_compact_coordinates(long long flat,
-                                                             const t4a_cuda_layout& layout,
-                                                             long long* coordinates) {
+                                                            const t4a_cuda_layout& layout,
+                                                            long long* coordinates) {
 #pragma unroll
   for (int axis = 0; axis < T4A_CUDA_MAX_RANK; ++axis) {
-    if (axis >= layout.rank) {
-      break;
+    long long coordinate = 0;
+    if (axis < layout.rank) {
+      coordinate = flat % layout.extents[axis];
+      flat /= layout.extents[axis];
     }
-    coordinates[axis] = flat % layout.extents[axis];
-    flat /= layout.extents[axis];
+    coordinates[axis] = coordinate;
   }
 }
 
@@ -47,27 +53,28 @@ __device__ __forceinline__ void extract_diagonal_body(void* out_ptr,
   t4a_cuda_compact_coordinates(flat, out_layout, out_coords);
 
   const int diag_axis = axis_a - (axis_b < axis_a ? 1 : 0);
-  const long long diagonal = out_coords[diag_axis];
+  const long long diagonal = t4a_cuda_axis_value(out_coords, diag_axis);
 
   long long in_index = in_layout.offset;
   int out_axis = 0;
-  for (int axis = 0; axis < in_layout.rank; ++axis) {
-    long long coordinate;
-    if (axis == axis_a || axis == axis_b) {
-      coordinate = diagonal;
-    } else {
-      if (out_axis == diag_axis) {
+#pragma unroll
+  for (int axis = 0; axis < T4A_CUDA_MAX_RANK; ++axis) {
+    if (axis < in_layout.rank) {
+      long long coordinate;
+      if (axis == axis_a || axis == axis_b) {
+        coordinate = diagonal;
+      } else {
+        if (out_axis == diag_axis) {
+          ++out_axis;
+        }
+        coordinate = t4a_cuda_axis_value(out_coords, out_axis);
         ++out_axis;
       }
-      coordinate = out_coords[out_axis];
-      ++out_axis;
+      in_index += coordinate * in_layout.strides[axis];
     }
-    in_index += coordinate * in_layout.strides[axis];
   }
-  const long long out_index =
-      t4a_cuda_decode(flat, out_layout.rank, out_layout.extents, out_layout.strides,
-                      out_layout.offset);
-  static_cast<T*>(out_ptr)[out_index] = static_cast<const T*>(in_ptr)[in_index];
+  // The destination is compact (`require_compact` in `plan_extract_diagonal`).
+  static_cast<T*>(out_ptr)[flat] = static_cast<const T*>(in_ptr)[in_index];
 }
 
 template <typename T>
@@ -84,18 +91,24 @@ __device__ __forceinline__ void embed_diagonal_copy_body(void* out_ptr,
   }
   long long in_coords[T4A_CUDA_MAX_RANK];
   t4a_cuda_compact_coordinates(flat, in_layout, in_coords);
-  const long long diagonal = in_coords[axis_a];
+  const long long diagonal = t4a_cuda_axis_value(in_coords, axis_a);
 
   long long out_index = out_layout.offset;
   int in_axis = 0;
-  for (int out_axis = 0; out_axis < out_layout.rank; ++out_axis) {
-    const long long coordinate = out_axis == axis_b ? diagonal : in_coords[in_axis++];
-    out_index += coordinate * out_layout.strides[out_axis];
+#pragma unroll
+  for (int out_axis = 0; out_axis < T4A_CUDA_MAX_RANK; ++out_axis) {
+    if (out_axis < out_layout.rank) {
+      const bool inserted = out_axis == axis_b;
+      const long long coordinate =
+          inserted ? diagonal : t4a_cuda_axis_value(in_coords, in_axis);
+      if (!inserted) {
+        ++in_axis;
+      }
+      out_index += coordinate * out_layout.strides[out_axis];
+    }
   }
-  const long long in_index =
-      t4a_cuda_decode(flat, in_layout.rank, in_layout.extents, in_layout.strides,
-                      in_layout.offset);
-  static_cast<T*>(out_ptr)[out_index] = static_cast<const T*>(in_ptr)[in_index];
+  // The source is compact (`require_compact` in `plan_embed_diagonal_copy`).
+  static_cast<T*>(out_ptr)[out_index] = static_cast<const T*>(in_ptr)[flat];
 }
 
 // Both operands are compact over the same extents; axes 0 and 1 carry the

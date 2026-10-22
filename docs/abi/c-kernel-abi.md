@@ -91,6 +91,18 @@ For all whole-view entries, `len` equals the extent product, including the
 empty (`len == 0`) and rank-0 (`len == 1`) cases. The two layouts of
 `t4a_cuda_strided_to_strided` must have identical extents.
 
+### Fixed-size metadata arrays
+
+Each `long long x[8]` in the PODs above is a slot array of which the first
+`rank` (or `*_len` / `window_rank`) entries are significant. A kernel resolves a
+*runtime* axis with an unrolled masked select
+(`t4a_cuda_axis_value`/`t4a_cuda_axis_add` in the header), which reads all eight
+slots and masks the contribution of the insignificant ones; the coordinate
+vectors a kernel builds for itself are filled completely for the same reason.
+Callers must therefore zero-initialize the whole array -- every facade-side
+mirror and every `plan_*` output does -- so that an insignificant slot is never
+an uninitialized read. Its value cannot change a result.
+
 ## Entries
 
 | Symbol | Arguments | Semantics |

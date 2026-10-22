@@ -136,7 +136,9 @@ This is the same coordinate map in column-major storage, not a relabelled
 non-negative and `batch_stride` must equal `M*N` in revision 1. The kernel uses
 dynamic shared memory: pass `tile * (tile + padding) * element_size` bytes.
 Shared-memory padding is deliberate: it removes bank conflicts between the
-transposed read and write patterns.
+transposed read and write patterns. The tile configuration selects a compiled
+body (see the [specialization record](#specialization-record)); the extents, the
+offset and the batch stride stay runtime scalars.
 
 ### Arithmetic semantics
 
@@ -725,6 +727,31 @@ The facade rejects any destination axis that has stride zero with extent greater
 than one, for every destination including `t4a_cuda_fill_zero_view`. That is a
 necessary condition only: full injectivity of a destination remains the caller's
 proof, as it already is in the consumer planners.
+
+## Specialization record
+
+Every compiled parameter of a static entry is classified as rank, operation
+attribute or algorithm configuration, per the [performance preservation
+contract](../design/cubecl-performance-parity.md) §1. Concrete extents, strides,
+offsets, lengths, starts and padding/window amounts are runtime arguments
+everywhere: no entry is compiled per shape, and no shape value enters a compiled
+constant. The variants below are algorithm configuration, they are selected from
+runtime values by a launch-uniform branch inside the single ABI symbol, and they
+are the complete set the facade can request.
+
+| Entry | Compiled variants | Selection |
+| --- | --- | --- |
+| `t4a_cuda_tiled_transpose` | `tile ∈ {8,16,32}` × `block_rows ∈ {4,8,16}` × `padding ∈ {0,1}` × `vector_width ∈ {1,2,4}` (54 tile bodies per dtype), each with its row-loop unroll factor (4 for `tile = 32`, 2 otherwise) | the runtime `config` fields, by a uniform switch; a configuration outside the facade's set performs no work, like an unknown dtype |
+| `t4a_cuda_tiled_transpose` | 32-bit and 64-bit element indices | `src_offset`, `batch_stride`, both fast extents and the batch span must be non-negative and the last reachable index `(batches-1)*batch_stride + dst_fast_extent*src_fast_extent - 1` must fit `INT32_MAX`; otherwise the generic 64-bit body runs |
+| `t4a_cuda_materialize_strided`, `t4a_cuda_contiguous_to_view`, `t4a_cuda_strided_to_strided`, `t4a_cuda_fill_zero_view` | 32-bit and 64-bit quotient walk of the coordinate decode; the element address is 64-bit in both | `len <= INT32_MAX`, where `len` is the logical count and therefore the extent product, so every extent and every quotient fits 32 bits; otherwise the 64-bit decoder runs |
+| every other entry | dtype, plus the op/strategy tags of the reduction and elementwise entries | runtime tags |
+
+Rank stays a runtime argument in every entry (the layout POD carries it), and so
+do the reduction split policy, the reduction order and the shuffle topology; none
+of them is a compiled variant. The two index-width variants change no result: they
+replace a 64-bit quotient by a 32-bit one over a proved range and keep the same
+64-bit address arithmetic, so the element index, and with it every value, is
+identical.
 
 ## Launch geometry
 

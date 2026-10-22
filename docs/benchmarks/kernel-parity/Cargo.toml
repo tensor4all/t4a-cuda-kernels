@@ -1,0 +1,20 @@
+[package]
+name = "parity-bench"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Standalone crate (own workspace table) so the pinned tenferro checkout stays
+# unmodified apart from nothing: it is a plain path dependency.
+[workspace]
+
+[dependencies]
+tenferro-gpu = { path = "../tenferro-parity/crates/tenferro-gpu", features = ["cuda"] }
+tenferro-tensor = { path = "../tenferro-parity/crates/tenferro-tensor" }
+tenferro-linalg = { path = "../tenferro-parity/crates/tenferro-linalg" }
+t4a-cuda-kernels = { path = "../t4a-cuda-kernels" }
+
+num-complex = "0.4"
+
+[profile.release]
+debug = false

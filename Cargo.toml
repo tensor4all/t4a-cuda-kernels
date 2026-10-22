@@ -56,3 +56,8 @@ required-features = ["gpu-tests"]
 name = "gpu_elementwise"
 path = "tests/gpu_elementwise.rs"
 required-features = ["gpu-tests"]
+
+[[test]]
+name = "gpu_linalg_aux"
+path = "tests/gpu_linalg_aux.rs"
+required-features = ["gpu-tests"]

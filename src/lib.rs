@@ -36,7 +36,7 @@ pub use fusion::{
 /// device memory, selected through [`RankVariant`].
 pub const MAX_RANK: usize = 8;
 /// Version of the C ABI described by this crate.
-pub const ABI_REVISION: u32 = 9;
+pub const ABI_REVISION: u32 = 10;
 /// Threads per block for the flat (element-wise) entries.
 pub const FLAT_BLOCK: u32 = 256;
 /// Lanes per block for the plane-reduction entries: one 32-lane plane per block.
@@ -453,6 +453,8 @@ pub enum Entry {
     Select,
     Clamp,
     CombinedStrided,
+    BroadcastInDim,
+    ConcatenateCopy,
     FillOne,
     MatrixAdjoint,
     HouseholderExplicitV,
@@ -475,7 +477,7 @@ pub enum Entry {
 }
 
 impl Entry {
-    pub const ALL: [Entry; 53] = [
+    pub const ALL: [Entry; 55] = [
         Entry::FillZero,
         Entry::FillZeroView,
         Entry::CopyExact,
@@ -510,6 +512,8 @@ impl Entry {
         Entry::Select,
         Entry::Clamp,
         Entry::CombinedStrided,
+        Entry::BroadcastInDim,
+        Entry::ConcatenateCopy,
         Entry::FillOne,
         Entry::MatrixAdjoint,
         Entry::HouseholderExplicitV,
@@ -568,6 +572,8 @@ impl Entry {
             Entry::Select => "t4a_cuda_select",
             Entry::Clamp => "t4a_cuda_clamp",
             Entry::CombinedStrided => "t4a_cuda_combined_strided",
+            Entry::BroadcastInDim => "t4a_cuda_broadcast_in_dim",
+            Entry::ConcatenateCopy => "t4a_cuda_concatenate_copy",
             Entry::FillOne => "t4a_cuda_fill_one",
             Entry::MatrixAdjoint => "t4a_cuda_matrix_adjoint",
             Entry::HouseholderExplicitV => "t4a_cuda_householder_explicit_v",
@@ -1258,7 +1264,7 @@ pub struct GeneralEntry {
 
 impl GeneralEntry {
     /// Every general-path symbol, in `Entry::ALL` order.
-    pub const ALL: [GeneralEntry; 31] = [
+    pub const ALL: [GeneralEntry; 33] = [
         GeneralEntry::new("t4a_cuda_fill_zero_view_any", Entry::FillZeroView),
         GeneralEntry::new(
             "t4a_cuda_materialize_strided_any",
@@ -1276,6 +1282,8 @@ impl GeneralEntry {
         GeneralEntry::new("t4a_cuda_gather_any", Entry::Gather),
         GeneralEntry::new("t4a_cuda_scatter_add_any", Entry::ScatterAdd),
         GeneralEntry::new("t4a_cuda_combined_strided_any", Entry::CombinedStrided),
+        GeneralEntry::new("t4a_cuda_broadcast_in_dim_any", Entry::BroadcastInDim),
+        GeneralEntry::new("t4a_cuda_concatenate_copy_any", Entry::ConcatenateCopy),
         GeneralEntry::new("t4a_cuda_fill_one_any", Entry::FillOne),
         GeneralEntry::new("t4a_cuda_matrix_adjoint_any", Entry::MatrixAdjoint),
         GeneralEntry::new(
@@ -1356,6 +1364,113 @@ fn flat_launch(len: i64) -> Result<Launch, Error> {
         shared_bytes: 0,
         variant: RankVariant::Fast,
     })
+}
+
+/// Plan [`Entry::BroadcastInDim`]: a rank-mapped broadcast from `input` into the
+/// compact destination `out`.
+///
+/// `dims[src_axis]` is the destination axis that carries the input's `src_axis`
+/// (tenferro's map); an input axis with extent one is broadcast, so its coordinate
+/// is zero. `dims.len()` is the input rank and may be zero (a scalar input).
+///
+/// # Errors
+///
+/// [`Error::RankLength`] when `dims` does not name one axis per input axis,
+/// [`Error::InvalidAxis`] for an axis outside the destination rank,
+/// [`Error::DuplicateAxis`] for a repeated destination axis,
+/// [`Error::ShapeMismatch`] when an input extent is neither the destination extent
+/// nor one, and the layout/span errors of [`LayoutRef::new`].
+pub fn plan_broadcast_in_dim<'a>(
+    dtype: DType,
+    out: impl Into<LayoutRef<'a>>,
+    out_len: i64,
+    input: impl Into<LayoutRef<'a>>,
+    in_len: i64,
+    dims: &[i64],
+) -> Result<Launch, Error> {
+    let out = out.into();
+    let input = input.into();
+
+    check_dtype(Entry::BroadcastInDim, dtype)?;
+    require_compact(out)?;
+    require_destination(out)?;
+    if dims.len() != input.rank() as usize {
+        return Err(Error::RankLength);
+    }
+    let mut seen: Vec<usize> = Vec::with_capacity(dims.len());
+    for (src_axis, &dst_axis) in dims.iter().enumerate() {
+        if dst_axis < 0 || dst_axis >= out.rank() as i64 {
+            return Err(Error::InvalidAxis);
+        }
+        let dst_axis = dst_axis as usize;
+        if seen.contains(&dst_axis) {
+            return Err(Error::DuplicateAxis);
+        }
+        seen.push(dst_axis);
+        let in_extent = input.extents()[src_axis];
+        let out_extent = out.extents()[dst_axis];
+        if in_extent != out_extent && in_extent != 1 {
+            return Err(Error::ShapeMismatch);
+        }
+    }
+    let len = out.element_count()?;
+    input.check_span(in_len, dtype.size())?;
+    out.check_span(out_len, dtype.size())?;
+    Ok(flat_launch(len)?.with_variant(&[out, input], &[dims.len()]))
+}
+
+/// Plan [`Entry::ConcatenateCopy`]: copy the compact `input` into `out` shifted by
+/// `axis_offset` along `axis`.
+///
+/// One launch per input, as the consumer does; overlapping inputs are the caller's
+/// plan, so two launches may target overlapping regions of the same destination in
+/// stream order.
+///
+/// # Errors
+///
+/// [`Error::RankLength`] for different ranks, [`Error::InvalidAxis`] for an axis
+/// outside the rank, [`Error::NegativeCount`] for a negative offset,
+/// [`Error::ShapeMismatch`] when an axis other than `axis` differs or the shifted
+/// input does not fit, and the usual span errors.
+pub fn plan_concatenate_copy<'a>(
+    dtype: DType,
+    out: impl Into<LayoutRef<'a>>,
+    out_len: i64,
+    input: impl Into<LayoutRef<'a>>,
+    in_len: i64,
+    axis: u32,
+    axis_offset: i64,
+) -> Result<Launch, Error> {
+    let out = out.into();
+    let input = input.into();
+
+    check_dtype(Entry::ConcatenateCopy, dtype)?;
+    require_compact(input)?;
+    if out.rank() != input.rank() {
+        return Err(Error::RankLength);
+    }
+    if axis >= out.rank() {
+        return Err(Error::InvalidAxis);
+    }
+    if axis_offset < 0 {
+        return Err(Error::NegativeCount);
+    }
+    require_destination(out)?;
+    for candidate in 0..out.rank() as usize {
+        if candidate != axis as usize && out.extents()[candidate] != input.extents()[candidate] {
+            return Err(Error::ShapeMismatch);
+        }
+    }
+    let end = axis_offset
+        .checked_add(input.extents()[axis as usize])
+        .ok_or(Error::Overflow)?;
+    if end > out.extents()[axis as usize] {
+        return Err(Error::ShapeMismatch);
+    }
+    let len = input.element_count()?;
+    input.check_span(in_len, dtype.size())?;
+    out.check_span(out_len, dtype.size())?;
+    Ok(flat_launch(len)?.with_variant(&[out, input], &[]))
 }
 
 /// Plan an element-wise entry over `len` contiguous elements.

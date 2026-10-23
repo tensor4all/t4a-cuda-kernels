@@ -1,4 +1,4 @@
-# C kernel ABI (revision 9)
+# C kernel ABI (revision 10)
 
 Every entry is an `extern "C" __global__` CUDA function in `cuda/src/`. A caller
 loads the compiled module into its own context, looks the symbol up by the name
@@ -18,15 +18,17 @@ nothing, so the same text compiles under NVCC and NVRTC.
 
 ## Revision
 
-`T4A_CUDA_ABI_REVISION == 9`. Revision 2 added `t4a_cuda_axis_values` and the
+`T4A_CUDA_ABI_REVISION == 10`. Revision 2 added `t4a_cuda_axis_values` and the
 diagonal, windowing and validation-status entries; revision 3 added the reduction
 entries; revision 4 added gather and additive scatter; revision 5 added the dtype
 conversion entry; revision 6 added the elementwise, comparison and
 strided-combination entries; revision 7 added the linalg auxiliary entries;
-revision 8 added the rank-revealing QR primitives; revision 9 adds dynamic rank:
-four pointer-geometry structs and one general-path twin per rank-walking entry.
-**Nothing in revisions 1-8 changed** — the 53 existing symbols, their signatures
-and the five existing struct layouts (144/16/72/280/216 bytes) are identical. Any
+revision 8 added the rank-revealing QR primitives; revision 9 added dynamic rank:
+four pointer-geometry structs and one general-path twin per rank-walking entry;
+revision 10 adds the two remaining kernel families (`broadcast_in_dim` and
+`concatenate_copy`) with their general-path twins.
+**Nothing in revisions 1-9 changed** — the 84 existing symbols, their signatures
+and the nine existing struct layouts are identical. Any
 change to a struct layout, an entry signature, an element type
 mapping or a launch contract requires a further revision bump and an entry in the
 compilation/artifact key of any consumer that caches compiled code.
@@ -666,6 +668,40 @@ F32/F64); `select_pivot` serves F32/F64 (its `norms` payload);
 `swap_columns` serves F32/F64/I32/I64/C32/C64; `reflector`, `apply_reflector`,
 `extract_r` and `prefix_rank` serve F32/F64/C32/C64.
 
+## Revision 10: the remaining kernel families
+
+Two families in tenferro's CUDA library had no entry. Both are pure copies, so
+every dtype is eligible and the destination (broadcast) or source (concatenate) is
+compact:
+
+| Symbol | Arguments | Semantics |
+| --- | --- | --- |
+| `t4a_cuda_broadcast_in_dim` | `(void* out, const void* in, int dtype, t4a_cuda_layout out, t4a_cuda_layout in, t4a_cuda_axis_values dims, long long out_len)` | rank-mapped broadcast into the compact destination |
+| `t4a_cuda_broadcast_in_dim_any` | same with `t4a_cuda_layout_any` ×2 and `t4a_cuda_axis_values_any` | general path, any rank |
+| `t4a_cuda_concatenate_copy` | `(void* out, const void* in, int dtype, t4a_cuda_layout out, t4a_cuda_layout in, int axis, long long axis_offset, long long in_len)` | copy the compact source into `out` at `axis_offset` along `axis` |
+| `t4a_cuda_concatenate_copy_any` | same with the `_any` layouts | general path, any rank |
+
+- **broadcast_in_dim** — one thread per destination element. `dims` is the input
+  rank (which may be 0, a scalar input); `dims.values[src_axis]` is the destination
+  axis carrying the input's `src_axis`, so a caller that wants the input axis 1 to
+  land on the destination axis 2 passes `values[1] = 2`. The destination extent on
+  that axis either equals the input extent or the input extent is 1 (broadcast, the
+  coordinate is then 0). The destination axes no input axis maps to are free. The
+  facade requires `dims.len() == in.rank`, every value below `out.rank`, no repeated
+  value, the extent rule above, a **compact** destination and no broadcast axis in
+  it.
+- **concatenate_copy** — one thread per source element, source compact. The
+  destination coordinate is the source coordinate with `axis_offset` added on
+  `axis`; every other axis must match, and `axis_offset + in.extents[axis]` must fit
+  the destination axis. One launch per input at the caller's stream order, so
+  overlapping inputs are legal and ordered.
+- Two families need **no new entry**: a per-axis reversal is a strided copy with
+  negated strides and a rebased offset (`offset' += (extent - 1) * stride`, then
+  `stride = -stride`) through `t4a_cuda_materialize_strided` (reading) or
+  `t4a_cuda_contiguous_to_view` (writing), and the two `scale_in_place` kernels are
+  `t4a_cuda_binary` with `op = MUL`, a scalar `rhs` and `out` aliasing `lhs`, which
+  the aliasing rule below already permits.
+
 ## Dynamic rank (revision 9)
 
 Every entry that takes a `t4a_cuda_layout`, `t4a_cuda_axis_values`,
@@ -853,6 +889,7 @@ are the complete set the facade can request.
 | `t4a_cuda_tiled_transpose` | 32-bit and 64-bit element indices | every argument that the narrow body declares as a 32-bit `int` must fit the signed 32-bit range before the cast: `src_offset`, `batch_stride`, `dst_fast_extent`, `src_fast_extent` are all non-negative and at most `2^31-1`, and the last reachable index `src_offset + (batches-1)*batch_stride + dst_fast_extent*src_fast_extent - 1` is at most `2^31-1` too. Testing only that span is not enough: an extent of `2^31` with the other extent one has a last index of `2^31-1` while its own value does not fit. Otherwise the generic 64-bit body runs |
 | `t4a_cuda_materialize_strided`, `t4a_cuda_contiguous_to_view`, `t4a_cuda_strided_to_strided`, `t4a_cuda_fill_zero_view` | 32-bit and 64-bit quotient walk of the coordinate decode; the element address, the strides and the offset are 64-bit in both | `len <= INT32_MAX`, where `len` is the logical count and therefore the extent product, so every extent and every quotient fits 32 bits before anything is cast; otherwise the 64-bit decoder runs |
 | every other entry | dtype, plus the op/strategy tags of the reduction and elementwise entries | runtime tags |
+| `t4a_cuda_broadcast_in_dim` | the dimension map is a by-value `t4a_cuda_axis_values` (bounded by `T4A_CUDA_MAX_RANK`) or a device-resident int64 array in the `_any` form | the host: the map is runtime data, never a compiled constant, so one module serves every map of a rank |
 | every rank-walking entry (`t4a_cuda_layout`, `t4a_cuda_axis_values`, gather/scatter plan parameters) | fast path (rank <= 8, unrolled literal subscripts) and general path (`_any` symbol, runtime-bounded walk, geometry in device memory) | the **host** selects the symbol from every participating rank and map length. The variant is therefore host-side, never a launch-uniform branch inside one symbol, and the symbol name is part of the consumer's artifact / prepared-plan key so the two variants cannot share a cached module. Concrete ranks, extents and map lengths stay runtime values in both |
 
 Rank stays a runtime argument in every entry (the layout POD carries it), and so

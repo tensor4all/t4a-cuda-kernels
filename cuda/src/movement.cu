@@ -4,7 +4,8 @@
 // crates/tenferro-gpu/src/kernels/structural.rs: fill_zero_kernel (L27),
 // fill_zero_view_kernel (L40), copy_bool_kernel (L63), materialize_strided_kernel
 // (L102), tiled_transpose_kernel (L164), contiguous_to_view_kernel (L284),
-// strided_to_strided_kernel (L299). Copyright (c) 2026 Hiroshi Shinaoka and
+// strided_to_strided_kernel (L299), broadcast_in_dim_kernel (L327) and
+// concatenate_copy_kernel (L570), the last two added in ABI revision 10. Copyright (c) 2026 Hiroshi Shinaoka and
 // tenferro-rs contributors; MIT OR Apache-2.0.
 //
 // The *_comptime_layout_kernel twins at L133/L227 are the WebGPU/Metal-only
@@ -384,6 +385,130 @@ __device__ __noinline__ void tiled_transpose_wide(void* dst_ptr, const void* src
 #undef T4A_WIDE_BODY
 }
 
+// --- Revision 10: broadcast_in_dim and concatenate_copy -------------------------
+//
+// Both entries are one thread per destination (broadcast) or source
+// (concatenate) element over a compact fast operand. The fast bodies keep the
+// unrolled literal-subscript form, so the by-value PODs stay in the constant bank;
+// the general bodies recompute each coordinate on demand and carry no per-axis
+// array.
+
+// Coordinates of a compact layout for `flat`, unrolled with literal subscripts.
+__device__ __forceinline__ void t4a_cuda_coords(long long flat, const t4a_cuda_layout& layout,
+                                                long long* coordinates) {
+#pragma unroll
+  for (int axis = 0; axis < T4A_CUDA_MAX_RANK; ++axis) {
+    long long coordinate = 0;
+    if (axis < layout.rank) {
+      coordinate = flat % layout.extents[axis];
+      flat /= layout.extents[axis];
+    }
+    coordinates[axis] = coordinate;
+  }
+}
+
+// Rank-mapped broadcast: `dims.values[src_axis]` is the destination axis that
+// carries the source axis, and a source extent of one is broadcast.
+template <typename T>
+__device__ __forceinline__ void broadcast_in_dim_body(void* out_ptr,
+                                                      const void* in_ptr,
+                                                      const t4a_cuda_layout& out_layout,
+                                                      const t4a_cuda_layout& in_layout,
+                                                      const t4a_cuda_axis_values& dims,
+                                                      long long out_len) {
+  long long flat;
+  if (!t4a_cuda_tail_index(&flat, out_len)) {
+    return;
+  }
+  long long out_coords[T4A_CUDA_MAX_RANK];
+  t4a_cuda_coords(flat, out_layout, out_coords);
+
+  long long in_index = in_layout.offset;
+#pragma unroll
+  for (int src_axis = 0; src_axis < T4A_CUDA_MAX_RANK; ++src_axis) {
+    if (src_axis < dims.rank) {
+      const int dst_axis = static_cast<int>(t4a_cuda_axis_value(dims.values, src_axis));
+      const long long coordinate =
+          in_layout.extents[src_axis] == 1 ? 0 : t4a_cuda_axis_value(out_coords, dst_axis);
+      in_index += coordinate * in_layout.strides[src_axis];
+    }
+  }
+  // The destination is compact (`require_compact` in `plan_broadcast_in_dim`).
+  static_cast<T*>(out_ptr)[flat] = static_cast<const T*>(in_ptr)[in_index];
+}
+
+template <typename T>
+__device__ __forceinline__ void concatenate_copy_body(void* out_ptr,
+                                                      const void* in_ptr,
+                                                      const t4a_cuda_layout& out_layout,
+                                                      const t4a_cuda_layout& in_layout,
+                                                      int axis,
+                                                      long long axis_offset,
+                                                      long long in_len) {
+  long long flat;
+  if (!t4a_cuda_tail_index(&flat, in_len)) {
+    return;
+  }
+  long long in_coords[T4A_CUDA_MAX_RANK];
+  t4a_cuda_coords(flat, in_layout, in_coords);
+  const long long shifted = t4a_cuda_axis_value(in_coords, axis) + axis_offset;
+
+  long long out_index = out_layout.offset;
+#pragma unroll
+  for (int dst_axis = 0; dst_axis < T4A_CUDA_MAX_RANK; ++dst_axis) {
+    if (dst_axis < out_layout.rank) {
+      const long long coordinate =
+          dst_axis == axis ? shifted : t4a_cuda_axis_value(in_coords, dst_axis);
+      out_index += coordinate * out_layout.strides[dst_axis];
+    }
+  }
+  // The source is compact (`require_compact` in `plan_concatenate_copy`).
+  static_cast<T*>(out_ptr)[out_index] = static_cast<const T*>(in_ptr)[flat];
+}
+
+// --- Revision 10 general path ---------------------------------------------------
+
+template <typename T>
+__device__ __forceinline__ void broadcast_in_dim_body_any(
+    void* out_ptr, const void* in_ptr, const t4a_cuda_layout_any& out_layout,
+    const t4a_cuda_layout_any& in_layout, const t4a_cuda_axis_values_any& dims,
+    long long out_len) {
+  long long flat;
+  if (!t4a_cuda_tail_index(&flat, out_len)) {
+    return;
+  }
+  long long in_index = in_layout.offset;
+  for (int src_axis = 0; src_axis < dims.rank; ++src_axis) {
+    const int dst_axis = static_cast<int>(t4a_cuda_axis_value_any(dims.values, src_axis));
+    const long long coordinate =
+        in_layout.extents[src_axis] == 1
+            ? 0
+            : t4a_cuda_compact_coordinate_any(flat, out_layout, dst_axis);
+    in_index += coordinate * in_layout.strides[src_axis];
+  }
+  static_cast<T*>(out_ptr)[flat] = static_cast<const T*>(in_ptr)[in_index];
+}
+
+template <typename T>
+__device__ __forceinline__ void concatenate_copy_body_any(
+    void* out_ptr, const void* in_ptr, const t4a_cuda_layout_any& out_layout,
+    const t4a_cuda_layout_any& in_layout, int axis, long long axis_offset,
+    long long in_len) {
+  long long flat;
+  if (!t4a_cuda_tail_index(&flat, in_len)) {
+    return;
+  }
+  long long out_index = out_layout.offset;
+  for (int dst_axis = 0; dst_axis < out_layout.rank; ++dst_axis) {
+    const long long coordinate =
+        dst_axis == axis
+            ? t4a_cuda_compact_coordinate_any(flat, in_layout, axis) + axis_offset
+            : t4a_cuda_compact_coordinate_any(flat, in_layout, dst_axis);
+    out_index += coordinate * out_layout.strides[dst_axis];
+  }
+  static_cast<T*>(out_ptr)[out_index] = static_cast<const T*>(in_ptr)[flat];
+}
+
 }  // namespace
 
 extern "C" __global__ void t4a_cuda_fill_zero(void* out, int dtype, long long len) {
@@ -516,6 +641,45 @@ extern "C" __global__ void t4a_cuda_strided_to_strided_any(void* dst, const void
                                                            t4a_cuda_layout_any dst_layout,
                                                            long long len) {
 #define T4A_BODY(T) strided_to_strided_body_any<T>(dst, src, src_layout, dst_layout, len)
+  T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+}
+
+extern "C" __global__ void t4a_cuda_broadcast_in_dim(void* out, const void* in, int dtype,
+                                                     t4a_cuda_layout out_layout,
+                                                     t4a_cuda_layout in_layout,
+                                                     t4a_cuda_axis_values dims,
+                                                     long long out_len) {
+#define T4A_BODY(T) broadcast_in_dim_body<T>(out, in, out_layout, in_layout, dims, out_len)
+  T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+}
+
+extern "C" __global__ void t4a_cuda_broadcast_in_dim_any(void* out, const void* in, int dtype,
+                                                         t4a_cuda_layout_any out_layout,
+                                                         t4a_cuda_layout_any in_layout,
+                                                         t4a_cuda_axis_values_any dims,
+                                                         long long out_len) {
+#define T4A_BODY(T) broadcast_in_dim_body_any<T>(out, in, out_layout, in_layout, dims, out_len)
+  T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+}
+
+extern "C" __global__ void t4a_cuda_concatenate_copy(void* out, const void* in, int dtype,
+                                                     t4a_cuda_layout out_layout,
+                                                     t4a_cuda_layout in_layout, int axis,
+                                                     long long axis_offset, long long in_len) {
+#define T4A_BODY(T) \
+  concatenate_copy_body<T>(out, in, out_layout, in_layout, axis, axis_offset, in_len)
+  T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+}
+
+extern "C" __global__ void t4a_cuda_concatenate_copy_any(
+    void* out, const void* in, int dtype, t4a_cuda_layout_any out_layout,
+    t4a_cuda_layout_any in_layout, int axis, long long axis_offset, long long in_len) {
+#define T4A_BODY(T) \
+  concatenate_copy_body_any<T>(out, in, out_layout, in_layout, axis, axis_offset, in_len)
   T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
 #undef T4A_BODY
 }

@@ -40,10 +40,13 @@ compiling and loading remain the caller's service, as the design requires.
 | `t4a_cuda_initialize_permutation`, `_column_norms`, `_select_pivot`, `_swap_columns` | the RRQR permutation, column-norm and pivot-selection primitives | payload-dependent |
 | `t4a_cuda_reflector`, `_apply_reflector`, `_extract_r`, `_prefix_rank` | the RRQR Householder and rank primitives | F32/F64/C32/C64 |
 
-The baseline's `broadcast_in_dim`, `reverse` and `concatenate_copy` kernels need
-no entry of their own: an explicit layout (expanded broadcast source, negative
-stride, shifted destination view) expresses the same address map through the
-movement entries.
+Revision 10 adds the two families that had no entry — `t4a_cuda_broadcast_in_dim`
+(rank-mapped broadcast, runtime dimension map) and `t4a_cuda_concatenate_copy`
+(copy at an axis offset) — each with a revision 9 general-path twin. `reverse` and
+`scale_in_place_*` still need no entry of their own: a reversed layout (negated
+strides and a rebased offset) expresses the reversal through the movement entries,
+and the in-place factor multiply is `t4a_cuda_binary` with a scalar `rhs` and the
+destination aliasing `lhs`.
 
 Not implemented, deliberately: nothing in the kernel inventory. Compilation, module
 loading and artifact persistence are the caller's, per

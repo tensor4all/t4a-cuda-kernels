@@ -116,13 +116,18 @@ DECLARED_CASES = [
 
 # --- Declared kernel correspondence ----------------------------------------
 #
-# One row per (baseline kernel symbol prefix, candidate entry). The baseline's
+# One row per (baseline kernel symbol prefix, candidate entry, alternative). The
+# baseline's
 # CubeCL kernels carry a mangled suffix (`add_float_f_f32_a70f4883`,
 # `column_norms_c64_6973f0d6`), so a row matches by prefix; the longest matching
 # prefix wins, which keeps `reduce_sum_float_chunked*` from being read as
 # `reduce_sum_float*`. A candidate entry is our own ABI symbol and matches
 # exactly. `None` on the baseline side declares a candidate-side helper that the
-# baseline arm has no equivalent of.
+# baseline arm has no equivalent of. `alternative=True` marks a row that is
+# mutually exclusive with another row of the same case: the split policy decides
+# whether a reduction runs as one direct pass or as two passes, so `chunked` and
+# every possible combine row are alternatives and any subset may be present. Every
+# row that is *not* marked alternative must be submitted by both arms.
 #
 # Instance counts: for every candidate entry, the observed per-iteration instance
 # count must equal the sum, over the declared rows mapping to it, of the
@@ -132,30 +137,32 @@ DECLARED_CASES = [
 # pass-1 row.
 
 REDUCE_ROWS = [
-    ("reduce_sum_complex_chunked", "t4a_cuda_reduce_partials"),
-    ("reduce_sum_float_chunked", "t4a_cuda_reduce_partials"),
-    ("reduce_max_int_chunked", "t4a_cuda_reduce_partials"),
-    ("reduce_sum_complex", "t4a_cuda_reduce"),
-    ("reduce_sum_float_plane", "t4a_cuda_reduce"),
-    ("reduce_sum_float", "t4a_cuda_reduce"),
-    ("reduce_max_int", "t4a_cuda_reduce"),
+    # The split-policy alternatives: pass 1 exists only for a split reduction, and
+    # the combine pass is the plane or the unit kernel depending on the split count.
+    ("reduce_sum_complex_chunked", "t4a_cuda_reduce_partials", True),
+    ("reduce_sum_float_chunked", "t4a_cuda_reduce_partials", True),
+    ("reduce_max_int_chunked", "t4a_cuda_reduce_partials", True),
+    ("reduce_sum_complex", "t4a_cuda_reduce", True),
+    ("reduce_sum_float_plane", "t4a_cuda_reduce", True),
+    ("reduce_sum_float", "t4a_cuda_reduce", True),
+    ("reduce_max_int", "t4a_cuda_reduce", True),
 ]
 
 QR_APPLY_PHASE_ROWS = [
-    ("qr_phase", "t4a_cuda_qr_phase"),
-    ("qr_apply_phase", "t4a_cuda_qr_apply_phase"),
+    ("qr_phase", "t4a_cuda_qr_phase", False),
+    ("qr_apply_phase", "t4a_cuda_qr_apply_phase", False),
 ]
 
 RRQR_ROWS = [
-    ("initialize_permutation", "t4a_cuda_initialize_permutation"),
-    ("column_norms", "t4a_cuda_column_norms"),
-    ("select_pivot", "t4a_cuda_select_pivot"),
-    ("swap_columns", "t4a_cuda_swap_columns"),
-    ("reflector", "t4a_cuda_reflector"),
-    ("apply_reflector", "t4a_cuda_apply_reflector"),
-    ("extract_r", "t4a_cuda_extract_r"),
-    ("initialize_q", "t4a_cuda_identity_shifted"),
-    ("prefix_rank", "t4a_cuda_prefix_rank"),
+    ("initialize_permutation", "t4a_cuda_initialize_permutation", False),
+    ("column_norms", "t4a_cuda_column_norms", False),
+    ("select_pivot", "t4a_cuda_select_pivot", False),
+    ("swap_columns", "t4a_cuda_swap_columns", False),
+    ("reflector", "t4a_cuda_reflector", False),
+    ("apply_reflector", "t4a_cuda_apply_reflector", False),
+    ("extract_r", "t4a_cuda_extract_r", False),
+    ("initialize_q", "t4a_cuda_identity_shifted", False),
+    ("prefix_rank", "t4a_cuda_prefix_rank", False),
     # Revision 8 requires `apply_reflector`'s packed reflector storage and its
     # target to be disjoint allocations, so the candidate arm copies each step's
     # reflector vector out of the work matrix into its own buffer (one `copy_exact`
@@ -163,52 +170,54 @@ RRQR_ROWS = [
     # baseline arm applies the reflector in place and has no equivalent kernel, so
     # this row is declared a candidate-side helper rather than being paired with a
     # baseline kernel.
-    (None, "t4a_cuda_copy_exact"),
+    (None, "t4a_cuda_copy_exact", False),
 ]
 
 PAIRING = {}
 for _case in DECLARED_CASES:
     if _case.startswith("elementwise-add"):
-        PAIRING[_case] = [("add_float", "t4a_cuda_add")]
+        PAIRING[_case] = [("add_float", "t4a_cuda_add", False)]
     elif _case.startswith("elementwise-exp"):
-        PAIRING[_case] = [("exp_float", "t4a_cuda_unary")]
+        PAIRING[_case] = [("exp_float", "t4a_cuda_unary", False)]
     elif _case.startswith("elementwise-mul"):
-        PAIRING[_case] = [("mul_complex", "t4a_cuda_mul")]
+        PAIRING[_case] = [("mul_complex", "t4a_cuda_mul", False)]
     elif _case.startswith("elementwise-div"):
         # Revision 8 keeps `t4a_cuda_div` for F32/F64 only; the complex route is
         # `t4a_cuda_binary`'s `DIV_COMPLEX` tag (the scale-robust form the
         # baseline's `div_complex_parts` kernel implements).
-        PAIRING[_case] = [("div_complex_parts", "t4a_cuda_binary")]
+        PAIRING[_case] = [("div_complex_parts", "t4a_cuda_binary", False)]
     elif _case.startswith("fusion-") or _case.startswith("prepare-"):
-        PAIRING[_case] = [("tenferro_fused_elementwise", "t4a_fused_elementwise")]
+        PAIRING[_case] = [("tenferro_fused_elementwise", "t4a_fused_elementwise", False)]
     elif _case == "layout-copy-f32-4096sq":
-        PAIRING[_case] = [("materialize_strided_kernel", "t4a_cuda_copy_exact")]
+        PAIRING[_case] = [("materialize_strided_kernel", "t4a_cuda_copy_exact", False)]
     elif _case.startswith("layout-materialize-negative-stride"):
-        PAIRING[_case] = [("materialize_strided_kernel", "t4a_cuda_materialize_strided")]
+        PAIRING[_case] = [("materialize_strided_kernel", "t4a_cuda_materialize_strided", False)]
     elif _case.startswith("layout-transpose"):
-        PAIRING[_case] = [("tiled_transpose_kernel", "t4a_cuda_tiled_transpose")]
+        PAIRING[_case] = [("tiled_transpose_kernel", "t4a_cuda_tiled_transpose", False)]
     elif _case.startswith("layout-slice"):
-        PAIRING[_case] = [("slice_kernel", "t4a_cuda_slice")]
+        PAIRING[_case] = [("slice_kernel", "t4a_cuda_slice", False)]
     elif _case.startswith("layout-pad"):
-        PAIRING[_case] = [("pad_kernel", "t4a_cuda_pad")]
+        PAIRING[_case] = [("pad_kernel", "t4a_cuda_pad", False)]
     elif _case.startswith("reduce-"):
         PAIRING[_case] = REDUCE_ROWS
     elif _case.startswith("indexing-gather"):
-        PAIRING[_case] = [("gather_kernel", "t4a_cuda_gather")]
+        PAIRING[_case] = [("gather_kernel", "t4a_cuda_gather", False)]
     elif _case.startswith("indexing-scatter-add"):
         PAIRING[_case] = [
-            ("scatter_copy_kernel", "t4a_cuda_copy_exact"),
-            ("scatter_float_kernel", "t4a_cuda_scatter_add"),
-            ("scatter_complex_kernel", "t4a_cuda_scatter_add"),
+            # The copy always runs; the update kernel is the case's element type, so
+            # the float and complex rows are alternatives of each other.
+            ("scatter_copy_kernel", "t4a_cuda_copy_exact", False),
+            ("scatter_float_kernel", "t4a_cuda_scatter_add", True),
+            ("scatter_complex_kernel", "t4a_cuda_scatter_add", True),
         ]
     elif _case.startswith("linalg-rrqr"):
         PAIRING[_case] = RRQR_ROWS
     elif _case.startswith("linalg-lu-apply-pivots"):
-        PAIRING[_case] = [("lu_apply_pivots", "t4a_cuda_lu_apply_pivots")]
+        PAIRING[_case] = [("lu_apply_pivots", "t4a_cuda_lu_apply_pivots", False)]
     elif _case.startswith("linalg-qr-apply-phase"):
         PAIRING[_case] = QR_APPLY_PHASE_ROWS
     elif _case.startswith("linalg-householder-explicit-v"):
-        PAIRING[_case] = [("householder_explicit_v", "t4a_cuda_householder_explicit_v")]
+        PAIRING[_case] = [("householder_explicit_v", "t4a_cuda_householder_explicit_v", False)]
     else:  # pragma: no cover - a case without a declared correspondence
         PAIRING[_case] = []
 
@@ -424,11 +433,12 @@ def pair_case(case, base_kernels, cand_kernels, reps):
     """Pair the two sides through the declared table; return rows + problems.
 
     Baseline kernels are matched to declared rows by their longest matching
-    symbol prefix; candidate entries are matched by exact ABI symbol. Per
-    candidate entry the *sum* of the declared baseline rows' per-iteration
-    instance counts must equal the candidate's own count: a reduction declares
-    its `chunked` pass-1 row and every possible combine row, of which exactly one
-    is present in a given case.
+    symbol prefix; candidate entries are matched by exact ABI symbol. Every
+    declared row that is not marked `alternative` must be submitted by **both**
+    arms, and for every candidate entry the *per-repetition* instance counts must
+    agree with the sum of its declared baseline rows: a rate summed over the
+    repetitions would accept `[100, 200, 300]` against `[200, 200, 200]`, which is
+    three different workloads.
     """
     rows = PAIRING.get(case, [])
     problems = []
@@ -436,7 +446,7 @@ def pair_case(case, base_kernels, cand_kernels, reps):
     assigned = {}
     for name in base_kernels:
         best = None
-        for index, (prefix, _) in enumerate(rows):
+        for index, (prefix, _, _) in enumerate(rows):
             if prefix is not None and name.startswith(prefix):
                 if best is None or len(prefix) > len(rows[best][0]):
                     best = index
@@ -446,7 +456,7 @@ def pair_case(case, base_kernels, cand_kernels, reps):
             assigned.setdefault(best, []).append(name)
 
     groups = {}
-    for index, (_, candidate) in enumerate(rows):
+    for index, (_, candidate, _) in enumerate(rows):
         groups.setdefault(candidate, []).append(index)
 
     for name in cand_kernels:
@@ -454,7 +464,11 @@ def pair_case(case, base_kernels, cand_kernels, reps):
             problems.append("candidate kernel `%s` has no declared correspondence" % name)
 
     def values_of(per_rep):
-        return [entry["med"] for entry in per_rep.values()]
+        return [per_rep[rep]["med"] for rep in sorted(per_rep)]
+
+    def instances_of(per_rep, rep):
+        entry = per_rep.get(rep)
+        return entry["instances"] if entry else 0.0
 
     kernel_rows = []
     for candidate, indices in groups.items():
@@ -465,45 +479,66 @@ def pair_case(case, base_kernels, cand_kernels, reps):
             for name in assigned.get(index, [])
         ]
         cand_per_rep = cand_kernels.get(candidate, {})
-        cand_rate = instance_rate(cand_per_rep, reps) if cand_per_rep else 0.0
-        base_rate = sum(instance_rate(base_kernels[name], reps) for _, name in present)
-        if not helper:
-            if abs(base_rate - cand_rate) > 1e-6:
-                problems.append(
-                    "%s: %s vs %s submit %.3f/iter against %.3f/iter"
-                    % (
-                        case,
-                        ", ".join(sorted({name for _, name in present})) or "<absent>",
-                        candidate,
-                        base_rate,
-                        cand_rate,
+
+        # Every declared row that is not an alternative and not a candidate-only
+        # helper must be submitted by both arms, in every repetition.
+        missing_required = [
+            rows[index][0]
+            for index in indices
+            if not rows[index][2]
+            and rows[index][0] is not None
+            and (not assigned.get(index) or not cand_per_rep)
+        ]
+        for prefix in missing_required:
+            problems.append(
+                "%s: the declared row `%s` -> %s is not submitted by both arms"
+                % (case, prefix, candidate)
+            )
+
+        if helper:
+            for rep in range(1, reps + 1):
+                if rep not in cand_per_rep:
+                    problems.append(
+                        "%s: declared helper %s is missing from repetition %d"
+                        % (case, candidate, rep)
+                    )
+        else:
+            for rep in range(1, reps + 1):
+                base_instances = sum(
+                    instances_of(base_kernels[name], rep) for _, name in present
+                )
+                cand_instances = instances_of(cand_per_rep, rep)
+                if abs(base_instances - cand_instances) > 1e-6:
+                    problems.append(
+                        "%s: repetition %d submits %s x%.0f against %s x%.0f"
+                        % (
+                            case,
+                            rep,
+                            ", ".join(sorted({name for _, name in present})) or "<absent>",
+                            base_instances / ITERS,
+                            candidate,
+                            cand_instances / ITERS,
+                        )
+                    )
+
+        if helper:
+            # A declared candidate-side helper has no baseline counterpart, so it has
+            # no ratio and cannot regress; it still carries its device time into the
+            # candidate total.
+            if cand_per_rep:
+                flags = row_flags([], values_of(cand_per_rep))
+                flags["valid"] = True
+                flags["regressed"] = False
+                kernel_rows.append(
+                    (
+                        "- -> %s (candidate-side helper)" % candidate,
+                        flags,
+                        0.0,
+                        instance_rate(cand_per_rep, reps),
                     )
                 )
-            elif not present:
-                # A declared row that neither side submits is not part of this
-                # case (a reduction declares both its split and its single-pass
-                # combine rows; exactly one shape runs). Unmapped kernels are
-                # caught by the two loops above, so this is not a silent skip.
-                continue
-        elif not cand_per_rep:
-            problems.append("%s: declared helper %s is missing" % (case, candidate))
-
-        if cand_per_rep and not present and helper:
-            # A declared candidate-side helper has no baseline counterpart, so it
-            # has no ratio and cannot be a regression; it still contributes its
-            # device time to the candidate total.
-            flags = row_flags([], values_of(cand_per_rep))
-            flags["valid"] = True
-            flags["regressed"] = False
-            kernel_rows.append(
-                (
-                    "- -> %s (candidate-side helper)" % candidate,
-                    flags,
-                    0.0,
-                    cand_rate,
-                )
-            )
             continue
+
         for index, name in present:
             if not cand_per_rep:
                 problems.append(
@@ -512,14 +547,67 @@ def pair_case(case, base_kernels, cand_kernels, reps):
                 continue
             kernel_rows.append(
                 (
-                    "%s -> %s%s"
-                    % (name, candidate, " (candidate-side helper)" if helper else ""),
+                    "%s -> %s" % (name, candidate),
                     row_flags(values_of(base_kernels[name]), values_of(cand_per_rep)),
                     instance_rate(base_kernels[name], reps),
-                    cand_rate,
+                    instance_rate(cand_per_rep, reps),
                 )
             )
     return kernel_rows, problems
+
+
+# --- Campaign evidence ------------------------------------------------------
+
+
+def validate_campaign(root, cases, sides, reps):
+    """Case identity, numerical verdict and launch reconciliation per repetition.
+
+    An implementation that prints `check=FAIL` (the baseline QR harness does) would
+    otherwise be summarised as performance evidence, and a capture whose declared
+    launch count disagrees with the kernels nsys recorded is not the case that was
+    declared. Either makes the whole campaign invalid: no verdicts, non-zero exit.
+    """
+    problems = []
+    for side in sides:
+        for case in cases:
+            for rep in range(1, reps + 1):
+                base = os.path.join(root, side, "%s.rep%d" % (case, rep))
+                meta = parse_meta(base + ".stdout")
+                if not meta:
+                    problems.append("%s/%s rep%d: no BENCH_META" % (side, case, rep))
+                    continue
+                if meta.get("case") != case:
+                    problems.append(
+                        "%s/%s rep%d: BENCH_META declares case=%s"
+                        % (side, case, rep, meta.get("case", "<absent>"))
+                    )
+                check = meta.get("check", "")
+                # The candidate must have validated its own result; the baseline
+                # arm's cold-prepare case declares that it has no numerical check
+                # (`check=n/a`, recorded in bench/cubecl-baseline/README.md).
+                allowed = {"ok"} if side == "candidate" else {"ok", "n/a"}
+                if check not in allowed:
+                    problems.append(
+                        "%s/%s rep%d: numerical check is `%s`"
+                        % (side, case, rep, check or "<absent>")
+                    )
+                try:
+                    declared = float(meta.get("launches_per_iter", "-"))
+                except ValueError:
+                    problems.append(
+                        "%s/%s rep%d: no launches_per_iter" % (side, case, rep)
+                    )
+                    continue
+                captured = sum(
+                    entry["instances"]
+                    for entry in parse_kern_sum(base + ".kern.csv").values()
+                ) / ITERS
+                if abs(captured - declared) > 1e-6:
+                    problems.append(
+                        "%s/%s rep%d: the capture holds %.0f submissions/iteration "
+                        "against %.0f declared" % (side, case, rep, captured, declared)
+                    )
+    return problems
 
 
 # --- Report -----------------------------------------------------------------
@@ -571,6 +659,18 @@ def main():
         print(
             "No verdict is reported: every declared case x repetition x side is "
             "required, and a smaller sample is not a valid pair."
+        )
+        return 1
+
+    invalid = validate_campaign(args.root, cases, sides, reps)
+    if invalid:
+        print("CAMPAIGN INVALID: %d evidence violation(s)" % len(invalid))
+        for problem in invalid:
+            print("  invalid: %s" % problem)
+        print("")
+        print(
+            "No verdict is reported: a case whose identity, numerical check or "
+            "declared launch count does not match the capture is not evidence."
         )
         return 1
 

@@ -36,6 +36,16 @@ Case selection is `T4A_BENCH_CASES` (comma-separated, or `all`).
 
 Notes on fidelity, all of them recorded in the worklog:
 
+- **Same inputs on both arms.** Every case's host input is generated with the same
+  generator, seed, element order and complex scale as `examples/bench_kernels.rs`
+  (the complex generator is `f64() * 4.0` per component on both sides), and both
+  harnesses print an `input_digest` — FNV-1a 64 over the case's initial host bytes,
+  one length-prefixed part per operand — in `BENCH_META` and in the `BENCH_META` of
+  the cold-prepare case. `bench/summarize.py` does not compare the digests; they are
+  there so a run can be audited: equal digests on the two sides mean equal data.
+  The one case whose digest is not a *numerical* input is not exempt from this:
+  `prepare-fused-cold-compile` uses the same `0x5555_6666` chain generator as
+  `fusion-chain-f32-*`.
 - **RRQR factorization state.** The RRQR arm is a caller-side host loop in the
   baseline too (`rank_revealing_qr_typed`). The harness mirrors that loop launch
   by launch, excludes the input `cuMemcpyDtoDAsync` clone the host function
@@ -51,10 +61,18 @@ Notes on fidelity, all of them recorded in the worklog:
   from the reflector column it reads, which is what its DSL allows. Revision 8 of
   the candidate ABI requires the packed reflector storage and the target to be
   disjoint allocations, so the candidate arm copies each step's reflector vector
-  into its own buffer (one `t4a_cuda_strided_to_strided` launch per step with a
-  trailing block). `bench/summarize.py` declares that kernel as a candidate-side
+  into its own buffer (one `t4a_cuda_copy_exact` launch per step with a trailing
+  block). `bench/summarize.py` declares that kernel as a candidate-side
   helper instead of pairing it with a baseline kernel, and the candidate's launch
   count for the RRQR cases is therefore `7k+3` instead of `6k+3`.
+- **Q/R state.** `qr_apply_phase` scales Q's columns and R's rows in place, so its
+  iterations compound. Neither arm restores Q or R after its reference check: the
+  measured region starts from the state one application of the two kernels left, on
+  both sides.
+- **`check=n/a`.** The cold-prepare case on this side declares that it runs no
+  numerical reference (`check=n/a`) because the baseline has no compile-count hook
+  and the case only observes cold/warm wall time; `bench/summarize.py` accepts `ok`
+  or `n/a` from the baseline arm and only `ok` from the candidate.
 - **Compile counts** are not observable on this side: the pinned tenferro-rs
   records the missing NVRTC observation hook
   (`docs/design/cubecl-011-compile-count-hook.md`), so the cold-prepare case
@@ -99,8 +117,8 @@ T4A_BENCH_CASES=linalg-rrqr-256x256-f64 \
 ```
 
 Each case prints a `BENCH_META` line (physical launches per iteration, scratch
-bytes, transfers, allocations, zero fills, host waits, reference-check verdict)
-and, for the prepared-fusion cases, a `BENCH_PREPARE` line.
+bytes, transfers, allocations, zero fills, host waits, `input_digest`,
+reference-check verdict) and, for the prepared-fusion cases, a `BENCH_PREPARE` line.
 
 ## The paired run
 
@@ -113,3 +131,9 @@ capture is never swallowed, and a campaign that is missing any declared
 case × repetition × side reports itself incomplete and produces no verdict.
 The worktree and the target directory are disposable and are deleted after
 review.
+
+`python3 bench/test_summarize.py -v` runs the CPU-only fixture tests of the
+summariser (no GPU, no `nsys`): a complete synthetic campaign, a missing required
+kernel row, a legitimate reduction alternative, instance counts that cancel across
+repetitions, a failed numerical check, a mismatched case identity and a declared
+launch count that disagrees with the capture.

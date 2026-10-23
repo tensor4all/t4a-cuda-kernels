@@ -35,12 +35,24 @@
 //!   starts from a restored matrix.
 //! - **QR phase/apply** (`bench_qr_apply_phase`): Q's columns and R's rows are
 //!   scaled in place every iteration, so the phases compound; the baseline arm
-//!   submits the same in-place sequence against the same operands.
+//!   submits the same in-place sequence against the same operands, and neither arm
+//!   restores Q or R after its reference check.
 //!
 //! Every other case writes a destination it never reads or overwrites its state
 //! completely (element-wise, copy/transpose/materialize, windowing, reductions,
 //! gather, collision-heavy scatter, LU apply-pivots, Householder explicit-V), so
 //! their iterations are independent of each other.
+//!
+//! `input_digest` in `BENCH_META` is an FNV-1a 64 of the case's initial host input
+//! (one length-prefixed part per operand, in upload order), computed with the same
+//! helper as the baseline arm, so two harnesses that print the same digest were
+//! given the same data even for the in-place cases above.
+//!
+//! `scratch_bytes` counts every device buffer a case allocates besides the input
+//! operands it uploads: for a split reduction the caller-provided partials, for the
+//! RRQR loop the norms, coefficient, permutation, pivot, status and rank arrays, the
+//! Q and R working outputs and the `m`-element packed-reflector buffer. Cases with no
+//! such buffer report 0.
 
 #[path = "../tests/gpu/mod.rs"]
 mod gpu;
@@ -160,6 +172,47 @@ fn profiler_stop() -> i32 {
 // Case driver
 // ---------------------------------------------------------------------------
 
+thread_local! {
+    /// `input_digest` of the case currently running: recorded once by the case body
+    /// from the host bytes it uploads, printed by `emit_meta`. The baseline arm
+    /// implements the same helper, so equal digests prove the paired experiment gave
+    /// both sides the same data.
+    static INPUT_DIGEST: Cell<Option<u64>> = const { Cell::new(None) };
+}
+
+/// FNV-1a 64 over a case's initial host input: one length-prefixed part per operand,
+/// in the order the case uploads them. Byte-for-byte identical to the helper in
+/// `bench/cubecl-baseline/baseline.patch`.
+fn input_digest(parts: &[&[u8]]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for part in parts {
+        hash ^= part.len() as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        for byte in part.iter() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    hash
+}
+
+fn record_input_digest(parts: &[&[u8]]) {
+    let digest = input_digest(parts);
+    INPUT_DIGEST.with(|cell| {
+        assert!(
+            cell.get().is_none(),
+            "a case recorded its input digest twice"
+        );
+        cell.set(Some(digest));
+    });
+}
+
+fn take_input_digest(case: &str) -> u64 {
+    INPUT_DIGEST
+        .with(|cell| cell.take())
+        .unwrap_or_else(|| panic!("{case}: no input digest was recorded"))
+}
+
 struct Meta {
     kernels: &'static str,
     launches: usize,
@@ -168,10 +221,11 @@ struct Meta {
 }
 
 fn emit_meta(case: &str, meta: &Meta, observed: Counters) {
+    let digest = take_input_digest(case);
     println!(
         "BENCH_META case={case} kernels={} launches_per_iter={} scratch_bytes={} \
          host_waits_per_iter={} transfer_bytes_per_iter={} device_allocations_per_iter={} \
-         zero_fills_per_iter={} boundary_barriers=1 check={}",
+         zero_fills_per_iter={} boundary_barriers=1 input_digest=0x{digest:016x} check={}",
         meta.kernels,
         meta.launches,
         meta.scratch_bytes,
@@ -369,6 +423,7 @@ fn bench_add_f32(case: &str, len: usize, filter: &[String]) {
     let mut rng = Rng::new(len as u64);
     let lhs: Vec<f32> = (0..len).map(|_| rng.f32()).collect();
     let rhs: Vec<f32> = (0..len).map(|_| rng.f32()).collect();
+    record_input_digest(&[gpu::as_bytes(&lhs), gpu::as_bytes(&rhs)]);
     let lhs_buf = upload_counted(&session, &lhs);
     let rhs_buf = upload_counted(&session, &rhs);
     let out = alloc(&session, len * 4);
@@ -410,6 +465,7 @@ fn bench_exp_f32(case: &str, len: usize, filter: &[String]) {
     let plan = plan_unary(UnaryOp::Exp, DType::F32, DType::F32, len as i64).unwrap();
     let mut rng = Rng::new(0x5F5F_5555);
     let input: Vec<f32> = (0..len).map(|_| rng.f32()).collect();
+    record_input_digest(&[gpu::as_bytes(&input)]);
     let input_buf = upload_counted(&session, &input);
     let out = alloc(&session, len * 4);
     let mut run = || {
@@ -452,6 +508,7 @@ fn bench_mul_c64(case: &str, len: usize, filter: &[String]) {
     let mut rng = Rng::new(0x1111_2222);
     let lhs: Vec<C64> = (0..len).map(|_| rng.c64()).collect();
     let rhs: Vec<C64> = (0..len).map(|_| rng.c64()).collect();
+    record_input_digest(&[gpu::as_bytes(&lhs), gpu::as_bytes(&rhs)]);
     let lhs_buf = upload_counted(&session, &lhs);
     let rhs_buf = upload_counted(&session, &rhs);
     let out = alloc(&session, len * 16);
@@ -516,6 +573,7 @@ fn bench_div_c64(case: &str, len: usize, filter: &[String]) {
             }
         })
         .collect();
+    record_input_digest(&[gpu::as_bytes(&lhs), gpu::as_bytes(&rhs)]);
     let lhs_buf = upload_counted(&session, &lhs);
     let rhs_buf = upload_counted(&session, &rhs);
     // `err` is required for the checked integer tags only and untouched by
@@ -574,6 +632,7 @@ fn bench_copy_f32(case: &str, side: usize, filter: &[String]) {
     let plan = plan_copy_exact(DType::F32, len as i64).unwrap();
     let mut rng = Rng::new(0xBBBB_CCCC);
     let values: Vec<f32> = (0..len).map(|_| rng.f32()).collect();
+    record_input_digest(&[gpu::as_bytes(&values)]);
     let src = upload_counted(&session, &values);
     let dst = alloc(&session, len * 4);
     let mut run = || {
@@ -629,6 +688,7 @@ fn bench_tiled_transpose(
     .unwrap();
     let mut rng = Rng::new(0xDDDD_EEEE + src_offset as u64);
     let values: Vec<f32> = (0..span + src_offset).map(|_| rng.f32()).collect();
+    record_input_digest(&[gpu::as_bytes(&values)]);
     let src = upload_counted(&session, &values);
     let dst = alloc(&session, span * 4);
     let mut run = || {
@@ -681,6 +741,7 @@ fn bench_materialize_negative_stride(case: &str, side: usize, filter: &[String])
     let plan = plan_materialize_strided(DType::F32, &src_layout, len as i64).unwrap();
     let mut rng = Rng::new(0x1234_5678);
     let values: Vec<f32> = (0..len).map(|_| rng.f32()).collect();
+    record_input_digest(&[gpu::as_bytes(&values)]);
     let src = upload_counted(&session, &values);
     let dst = alloc(&session, len * 4);
     let src_c = CLayout::new(&src_layout);
@@ -746,6 +807,7 @@ fn bench_slice_f32(case: &str, set: usize, filter: &[String]) {
     .unwrap();
     let mut rng = Rng::new(0x9999 + set as u64);
     let values: Vec<f32> = (0..side * side).map(|_| rng.f32()).collect();
+    record_input_digest(&[gpu::as_bytes(&values)]);
     let src = upload_counted(&session, &values);
     let dst = alloc(&session, out_len as usize * 4);
     let in_c = CLayout::new(&in_layout);
@@ -823,6 +885,7 @@ fn bench_pad_f32(case: &str, set: usize, filter: &[String]) {
     .unwrap();
     let mut rng = Rng::new(0xAAAA + set as u64);
     let values: Vec<f32> = (0..side * side).map(|_| rng.f32()).collect();
+    record_input_digest(&[gpu::as_bytes(&values)]);
     let src = upload_counted(&session, &values);
     let dst = alloc_zero(&session, out_len as usize * 4);
     let in_c = CLayout::new(&in_layout);
@@ -956,6 +1019,7 @@ fn bench_reduce_f32(case: &str, in_extents: &[i64], axis: u32, filter: &[String]
     let out_len = product(setup.out_layout.extents());
     let mut rng = Rng::new(0x1357_9BDF ^ in_extents[0] as u64);
     let values: Vec<f32> = (0..in_len).map(|_| rng.f32()).collect();
+    record_input_digest(&[gpu::as_bytes(&values)]);
     let src = upload_counted(&session, &values);
     let dst = alloc(&session, out_len as usize * 4);
     let partials = setup
@@ -1069,6 +1133,7 @@ fn bench_reduce_f64(case: &str, side: usize, filter: &[String]) {
     let out_len = product(setup.out_layout.extents());
     let mut rng = Rng::new(0x0F0F_0F0F);
     let values: Vec<f64> = (0..in_len).map(|_| rng.f64()).collect();
+    record_input_digest(&[gpu::as_bytes(&values)]);
     let src = upload_counted(&session, &values);
     let dst = alloc(&session, out_len as usize * 8);
     let partials = setup
@@ -1170,6 +1235,7 @@ fn bench_reduce_c64(case: &str, side: usize, filter: &[String]) {
     let out_len = product(setup.out_layout.extents());
     let mut rng = Rng::new(0x0E0E_0E0E);
     let values: Vec<C64> = (0..in_len).map(|_| rng.c64()).collect();
+    record_input_digest(&[gpu::as_bytes(&values)]);
     let src = upload_counted(&session, &values);
     let dst = alloc(&session, out_len as usize * 16);
     let partials = setup
@@ -1274,6 +1340,7 @@ fn bench_reduce_max_i32(case: &str, side: usize, filter: &[String]) {
     let out_len = product(setup.out_layout.extents());
     let mut rng = Rng::new(0x2468_ACE0);
     let values: Vec<i32> = (0..in_len).map(|_| rng.i32()).collect();
+    record_input_digest(&[gpu::as_bytes(&values)]);
     let src = upload_counted(&session, &values);
     let dst = alloc(&session, out_len as usize * 4);
     let partials = setup
@@ -1376,6 +1443,7 @@ fn bench_gather(case: &str, rows: usize, filter: &[String]) {
     let indices: Vec<i32> = (0..requested)
         .map(|_| (rng.next_u64() % rows as u64) as i32)
         .collect();
+    record_input_digest(&[gpu::as_bytes(&table), gpu::as_bytes(&indices)]);
     let plan = GatherPlan {
         window_dims: vec![1],
         offset_dims: vec![1],
@@ -1547,6 +1615,7 @@ fn bench_scatter_add(case: &str, complex: bool, filter: &[String]) {
             )
         };
     let operand = written(&session, &operand_bytes);
+    record_input_digest(&[&operand_bytes, &update_bytes]);
     ALLOCATIONS.with(|count| count.set(count.get() + 1));
     TRANSFER_BYTES.with(|count| count.set(count.get() + operand_bytes.len()));
     let index_buf = upload_counted(&session, &indices);
@@ -1657,6 +1726,7 @@ fn bench_householder_explicit_v(
         gpu::as_bytes(&real).to_vec()
     };
     let packed = written(&session, &packed_bytes);
+    record_input_digest(&[&packed_bytes]);
     ALLOCATIONS.with(|count| count.set(count.get() + 1));
     TRANSFER_BYTES.with(|count| count.set(count.get() + packed_bytes.len()));
     let out = alloc(&session, len as usize * elem);
@@ -1810,6 +1880,7 @@ fn bench_qr_apply_phase(case: &str, rows: usize, cols: usize, complex: bool, fil
         )
     };
     let q_buf = written(&session, &q_bytes);
+    record_input_digest(&[&q_bytes, &r_bytes]);
     ALLOCATIONS.with(|count| count.set(count.get() + 1));
     TRANSFER_BYTES.with(|count| count.set(count.get() + q_bytes.len()));
     let r_buf = written(&session, &r_bytes);
@@ -1923,9 +1994,6 @@ fn bench_qr_apply_phase(case: &str, rows: usize, cols: usize, complex: bool, fil
             }
         }
     }
-    // Restore the inputs for the measured region (the check ran in place).
-    gpu::write(&session, &q_buf, &q_bytes);
-    gpu::write(&session, &r_buf, &r_bytes);
     checked(case, ok);
     let meta = Meta {
         kernels: "t4a_cuda_qr_phase|t4a_cuda_qr_apply_phase",
@@ -1960,6 +2028,7 @@ fn bench_lu_apply_pivots(case: &str, side: usize, filter: &[String]) {
     .unwrap();
     let mut rng = Rng::new(0x6060);
     let values: Vec<f64> = (0..len).map(|_| rng.f64()).collect();
+    record_input_digest(&[gpu::as_bytes(&values)]);
     let input = upload_counted(&session, &values);
     let pivots_buf = upload_counted(&session, &pivots);
     let out = alloc(&session, len as usize * 8);
@@ -2084,6 +2153,7 @@ fn bench_rrqr(case: &str, m: usize, n: usize, complex: bool, filter: &[String]) 
         (gpu::as_bytes(&real).to_vec(), values.clone())
     };
     let work = written(&session, &work_bytes);
+    record_input_digest(&[&work_bytes]);
     ALLOCATIONS.with(|count| count.set(count.get() + 1));
     TRANSFER_BYTES.with(|count| count.set(count.get() + work_bytes.len()));
     // Revision 8 requires the packed reflector storage and the trailing-update
@@ -2389,7 +2459,10 @@ fn bench_rrqr(case: &str, m: usize, n: usize, complex: bool, filter: &[String]) 
     // + (k-1) x (reflector copy, trailing update) + extract_r
     // + identity_shifted + k x Q update + prefix_rank.
     let launches = 1 + k * 4 + 2 * (k - 1) + 1 + 1 + k + 1;
-    let scratch = n * real_elem + k * elem + (n + 1 + k + 1) * 8 + (m * k + k * n) * elem;
+    // norms + coeff + (permutation, pivots, status, rank) + (Q, R) + the packed
+    // reflector store the disjoint-operand contract needs.
+    let scratch =
+        n * real_elem + k * elem + (n + 1 + k + 1) * 8 + (m * k + k * n) * elem + m * elem;
     let meta = Meta {
         kernels: "t4a_cuda_initialize_permutation|t4a_cuda_column_norms|\
                   t4a_cuda_select_pivot|t4a_cuda_swap_columns|t4a_cuda_reflector|\
@@ -2452,6 +2525,8 @@ fn bench_fused(case: FusedCase<'_>, filter: &[String]) {
         .prepare_fused(&case.plan)
         .expect("prepare of the fused plan");
     let plan = plan_fused(case.len as i64).expect("fused launch plan");
+    let digest_parts: Vec<&[u8]> = case.inputs.iter().map(|bytes| bytes.as_slice()).collect();
+    record_input_digest(&digest_parts);
     let input_bufs: Vec<Buf> = case
         .inputs
         .iter()
@@ -2663,6 +2738,7 @@ fn bench_prepare_cold(case: &str, filter: &[String]) {
     let session = Session::with_modules(&[]);
     let consumer = prepare::Consumer::new(&session);
     let case_data = fused_chain_f32(len);
+    record_input_digest(&[case_data.inputs[0].as_slice()]);
     let cold_start = std::time::Instant::now();
     let (_emitted, prepared) = consumer
         .prepare_fused(&case_data.plan)

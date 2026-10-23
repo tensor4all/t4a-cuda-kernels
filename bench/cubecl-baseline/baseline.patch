@@ -1,17 +1,21 @@
 diff --git a/crates/tenferro-gpu/src/cubecl/bench_harness.rs b/crates/tenferro-gpu/src/cubecl/bench_harness.rs
 new file mode 100644
-index 000000000..efc91c428
+index 000000000..086ea6822
 --- /dev/null
 +++ b/crates/tenferro-gpu/src/cubecl/bench_harness.rs
-@@ -0,0 +1,1674 @@
+@@ -0,0 +1,1744 @@
 +//! Paired A100 benchmark harness for the CubeCL baseline (slice F, unit U6).
 +//!
 +//! This module is added by `bench/cubecl-baseline/baseline.patch` of
 +//! `t4a-cuda-kernels` and is not part of the shipped crate. It calls the
-+//! private CubeCL launchers directly with the frozen case list of
-+//! `docs/design/slice-complete-port.md` §7 as amended by §11 items 7-9, so the
-+//! candidate (`examples/bench_kernels.rs` in `t4a-cuda-kernels`) runs a matched
-+//! kernel sequence.
++//! private CubeCL launchers directly with the frozen case list of the paired
++//! experiment, so the candidate (`examples/bench_kernels.rs` in
++//! `t4a-cuda-kernels`) runs a matched kernel sequence.
++//!
++//! Both arms generate every case's input with the same generator, seed, element
++//! order and complex scale, and print an `input_digest` (FNV-1a 64 over the initial
++//! host bytes, one length-prefixed part per operand) in `BENCH_META`, so equal
++//! digests prove the two harnesses were given the same data.
 +//!
 +//! Every case is reachable through `T4A_BENCH_CASES` (a comma-separated list of
 +//! case names, or `all`). `run-paired.sh` runs one case per process so
@@ -117,10 +121,11 @@ index 000000000..efc91c428
 +}
 +
 +fn emit_meta(case: &str, meta: &Meta, check: &str, extra: &str) {
++    let digest = take_input_digest(case);
 +    println!(
 +        "BENCH_META case={case} kernels={} launches_per_iter={} scratch_bytes={} \
 +         host_waits_per_iter=0 transfer_bytes_per_iter=0 device_allocations_per_iter={} \
-+         zero_fills_per_iter={} boundary_barriers=1 check={check} {extra}",
++         zero_fills_per_iter={} boundary_barriers=1 input_digest=0x{digest:016x} check={check} {extra}",
 +        meta.kernels, meta.launches, meta.scratch_bytes, meta.allocations, meta.zero_fills
 +    );
 +}
@@ -164,6 +169,47 @@ index 000000000..efc91c428
 +
 +fn client(backend: &CudaBackend) -> &cubecl::client::Client {
 +    backend.runtime().client()
++}
++
++thread_local! {
++    /// `input_digest` of the case currently running. A case body records it once
++    /// from the host bytes it generates, and `emit_meta` prints it, so the two
++    /// arms of the paired experiment can prove they were given the same data. A
++    /// missing or double-recorded digest is a hard failure, never a silent zero.
++    static INPUT_DIGEST: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
++}
++
++/// FNV-1a 64 over a case's initial host input: one length-prefixed part per
++/// operand, in the order the case uploads them. Both arms implement this helper
++/// identically, so equal digests mean equal inputs.
++fn input_digest(parts: &[&[u8]]) -> u64 {
++    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
++    for part in parts {
++        hash ^= part.len() as u64;
++        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
++        for byte in part.iter() {
++            hash ^= u64::from(*byte);
++            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
++        }
++    }
++    hash
++}
++
++fn record_input_digest(parts: &[&[u8]]) {
++    let digest = input_digest(parts);
++    INPUT_DIGEST.with(|cell| {
++        assert!(
++            cell.get().is_none(),
++            "a case recorded its input digest twice"
++        );
++        cell.set(Some(digest));
++    });
++}
++
++fn take_input_digest(case: &str) -> u64 {
++    INPUT_DIGEST
++        .with(|cell| cell.take())
++        .unwrap_or_else(|| panic!("{case}: no input digest was recorded"))
 +}
 +
 +fn bytes_of<T: Copy>(values: &[T]) -> &[u8] {
@@ -322,6 +368,7 @@ index 000000000..efc91c428
 +    let mut rng = Rng::new(len as u64);
 +    let lhs: Vec<f32> = (0..len).map(|_| rng.f32()).collect();
 +    let rhs: Vec<f32> = (0..len).map(|_| rng.f32()).collect();
++    record_input_digest(&[bytes_of(&lhs), bytes_of(&rhs)]);
 +    let lhs_h = upload(client, &lhs);
 +    let rhs_h = upload(client, &rhs);
 +    let out_h = client.empty(len * 4);
@@ -357,6 +404,7 @@ index 000000000..efc91c428
 +    let client = client(&backend);
 +    let mut rng = Rng::new(0x5F5F_5555);
 +    let input: Vec<f32> = (0..len).map(|_| rng.f32()).collect();
++    record_input_digest(&[bytes_of(&input)]);
 +    let input_h = upload(client, &input);
 +    let out_h = client.empty(len * 4);
 +    let (count, dim) = flat(len);
@@ -391,6 +439,7 @@ index 000000000..efc91c428
 +    let mut rng = Rng::new(0x1111_2222);
 +    let lhs: Vec<Complex64> = (0..len).map(|_| rng.c64()).collect();
 +    let rhs: Vec<Complex64> = (0..len).map(|_| rng.c64()).collect();
++    record_input_digest(&[bytes_of(&lhs), bytes_of(&rhs)]);
 +    let lhs_h = upload(client, &lhs);
 +    let rhs_h = upload(client, &rhs);
 +    let out_h = client.empty(len * std::mem::size_of::<Complex64>());
@@ -430,6 +479,7 @@ index 000000000..efc91c428
 +    let rhs: Vec<Complex64> = (0..len)
 +        .map(|_| rng.c64() + Complex64::new(2.0, 1.0))
 +        .collect();
++    record_input_digest(&[bytes_of(&lhs), bytes_of(&rhs)]);
 +    let lhs_h = upload(client, &lhs);
 +    let rhs_h = upload(client, &rhs);
 +    let out_h = client.empty(len * std::mem::size_of::<Complex64>());
@@ -490,6 +540,7 @@ index 000000000..efc91c428
 +    let plan = fusion_plan_chain();
 +    let mut rng = Rng::new(0x5555_6666);
 +    let host: Vec<f32> = (0..len).map(|_| rng.f32()).collect();
++    record_input_digest(&[bytes_of(&host)]);
 +    let host_tensor =
 +        Tensor::from_typed::<f32>(TypedTensor::from_vec_col_major(vec![len], host.clone()).unwrap());
 +    let input = crate::cuda::upload_tensor(backend.runtime(), &host_tensor).unwrap();
@@ -549,6 +600,7 @@ index 000000000..efc91c428
 +    );
 +    let mut rng = Rng::new(0x7777_8888);
 +    let host: Vec<Complex64> = (0..len).map(|_| rng.c64()).collect();
++    record_input_digest(&[bytes_of(&host)]);
 +    let host_tensor = Tensor::from_typed::<tenferro_tensor::Complex64>(
 +        TypedTensor::from_vec_col_major(vec![len], host.clone()).unwrap(),
 +    );
@@ -612,6 +664,7 @@ index 000000000..efc91c428
 +    );
 +    let mut rng = Rng::new(0x9999_AAAA);
 +    let host: Vec<f32> = (0..len).map(|_| rng.f32()).collect();
++    record_input_digest(&[bytes_of(&host)]);
 +    let host_tensor =
 +        Tensor::from_typed::<f32>(TypedTensor::from_vec_col_major(vec![len], host.clone()).unwrap());
 +    let input = crate::cuda::upload_tensor(backend.runtime(), &host_tensor).unwrap();
@@ -666,7 +719,11 @@ index 000000000..efc91c428
 +    let len = 10_000usize;
 +    let backend = backend();
 +    let plan = fusion_plan_chain();
-+    let host: Vec<f32> = (0..len).map(|index| index as f32 * 1e-6).collect();
++    // The same generator and seed as `fusion-chain-f32-*`, so both arms feed the
++    // cold-prepare case the same chain input.
++    let mut rng = Rng::new(0x5555_6666);
++    let host: Vec<f32> = (0..len).map(|_| rng.f32()).collect();
++    record_input_digest(&[bytes_of(&host)]);
 +    let host_tensor =
 +        Tensor::from_typed::<f32>(TypedTensor::from_vec_col_major(vec![len], host).unwrap());
 +    let input = crate::cuda::upload_tensor(backend.runtime(), &host_tensor).unwrap();
@@ -689,10 +746,12 @@ index 000000000..efc91c428
 +    }
 +    let warm = warm_start.elapsed() / 10;
 +
++    let digest = take_input_digest(case);
 +    println!(
 +        "BENCH_META case={case} kernels=tenferro_fused_elementwise launches_per_iter=1 \
 +         scratch_bytes=0 host_waits_per_iter=10 transfer_bytes_per_iter=0 \
-+         device_allocations_per_iter=1 zero_fills_per_iter=0 boundary_barriers=0 check=n/a"
++         device_allocations_per_iter=1 zero_fills_per_iter=0 boundary_barriers=0 \
++         input_digest=0x{digest:016x} check=n/a"
 +    );
 +    // The baseline has no compile-count hook (the tenferro-rs design records the
 +    // missing observation hook), so only the wall times are observable here.
@@ -758,6 +817,7 @@ index 000000000..efc91c428
 +    let len = side * side;
 +    let mut rng = Rng::new(0xBBBB_CCCC);
 +    let values: Vec<f32> = (0..len).map(|_| rng.f32()).collect();
++    record_input_digest(&[bytes_of(&values)]);
 +    let src = upload(client, &values);
 +    let dst = client.empty(len * 4);
 +    let shape = [side, side];
@@ -804,6 +864,7 @@ index 000000000..efc91c428
 +    // A non-zero source offset is an offset into the source allocation, not a
 +    // shifted copy of it.
 +    let values: Vec<f32> = (0..span + src_offset).map(|_| rng.f32()).collect();
++    record_input_digest(&[bytes_of(&values)]);
 +    let src = upload(client, &values);
 +    let dst = client.empty(span * 4);
 +    let (count, dim) = tile.grid(dst_fast, src_fast, batches);
@@ -864,6 +925,7 @@ index 000000000..efc91c428
 +    let len = side * side;
 +    let mut rng = Rng::new(0x1234_5678);
 +    let values: Vec<f32> = (0..len).map(|_| rng.f32()).collect();
++    record_input_digest(&[bytes_of(&values)]);
 +    let src = upload(client, &values);
 +    let dst = client.empty(len * 4);
 +    let shape = [side, side];
@@ -920,6 +982,7 @@ index 000000000..efc91c428
 +    let out_len = sizes[0] * sizes[1];
 +    let mut rng = Rng::new(0x9999 + set as u64);
 +    let values: Vec<f32> = (0..len).map(|_| rng.f32()).collect();
++    record_input_digest(&[bytes_of(&values)]);
 +    let src = upload(client, &values);
 +    let dst = client.empty(out_len * 4);
 +    let (count, dim) = flat(out_len);
@@ -975,6 +1038,7 @@ index 000000000..efc91c428
 +    let len = side * side;
 +    let mut rng = Rng::new(0xAAAA + set as u64);
 +    let values: Vec<f32> = (0..len).map(|_| rng.f32()).collect();
++    record_input_digest(&[bytes_of(&values)]);
 +    let src = upload(client, &values);
 +    let dst = client.empty(out_len * 4);
 +    let (count, dim) = flat(out_len);
@@ -1108,6 +1172,7 @@ index 000000000..efc91c428
 +    let in_len = in_shape[0] * in_shape[1];
 +    let mut rng = Rng::new(0x1357_9BDF ^ in_shape[0] as u64);
 +    let values: Vec<f32> = (0..in_len).map(|_| rng.f32()).collect();
++    record_input_digest(&[bytes_of(&values)]);
 +    let src = upload(client, &values);
 +    let meta = plan_reduce(client, &in_shape, axis, &src, 4);
 +    let out_len = meta.out_shape[0] * meta.out_shape[1];
@@ -1182,6 +1247,7 @@ index 000000000..efc91c428
 +    let in_len = side * side;
 +    let mut rng = Rng::new(0x2468_ACE0);
 +    let values: Vec<i32> = (0..in_len).map(|_| rng.i32()).collect();
++    record_input_digest(&[bytes_of(&values)]);
 +    let src = upload(client, &values);
 +    let meta = plan_reduce(client, &in_shape, 0, &src, 8);
 +    let out_len = meta.out_shape[0] * meta.out_shape[1];
@@ -1243,6 +1309,7 @@ index 000000000..efc91c428
 +    let in_len = side * side;
 +    let mut rng = Rng::new(0x0F0F_0F0F);
 +    let values: Vec<f64> = (0..in_len).map(|_| rng.f64()).collect();
++    record_input_digest(&[bytes_of(&values)]);
 +    let src = upload(client, &values);
 +    let meta = plan_reduce(client, &in_shape, 0, &src, 8);
 +    let out_len = meta.out_shape[0] * meta.out_shape[1];
@@ -1307,6 +1374,7 @@ index 000000000..efc91c428
 +    let in_len = side * side;
 +    let mut rng = Rng::new(0x0E0E_0E0E);
 +    let values: Vec<Complex64> = (0..in_len).map(|_| rng.c64()).collect();
++    record_input_digest(&[bytes_of(&values)]);
 +    let src = upload(client, &values);
 +    let meta = plan_reduce(client, &in_shape, 0, &src, 8);
 +    let out_len = meta.out_shape[0] * meta.out_shape[1];
@@ -1378,6 +1446,7 @@ index 000000000..efc91c428
 +    let indices: Vec<i32> = (0..requested)
 +        .map(|_| (rng.next_u64() % rows as u64) as i32)
 +        .collect();
++    record_input_digest(&[bytes_of(&table), bytes_of(&indices)]);
 +    let operand = upload(client, &table);
 +    let index_buf = upload(client, &indices);
 +    let out_len = requested * cols;
@@ -1453,6 +1522,7 @@ index 000000000..efc91c428
 +        let updates: Vec<f32> = (0..updates).map(|_| rng.f32()).collect();
 +        (bytes_of(&operand).to_vec(), bytes_of(&updates).to_vec())
 +    };
++    record_input_digest(&[operand.as_slice(), update_values.as_slice()]);
 +    let operand_h = client.create_from_slice(&operand);
 +    let index_h = upload(client, &indices);
 +    let update_h = client.create_from_slice(&update_values);
@@ -1707,10 +1777,10 @@ index 89b43a42c..93bab8e50 100644
 +mod bench_harness;
 diff --git a/crates/tenferro-linalg/src/gpu/linalg/rank_revealing_qr/bench_harness.rs b/crates/tenferro-linalg/src/gpu/linalg/rank_revealing_qr/bench_harness.rs
 new file mode 100644
-index 000000000..b07769b4b
+index 000000000..3720ebccf
 --- /dev/null
 +++ b/crates/tenferro-linalg/src/gpu/linalg/rank_revealing_qr/bench_harness.rs
-@@ -0,0 +1,857 @@
+@@ -0,0 +1,925 @@
 +//! Paired A100 benchmark harness for the linalg auxiliary kernels and the RRQR
 +//! primitive sequence (slice F, unit U6).
 +//!
@@ -1722,7 +1792,9 @@ index 000000000..b07769b4b
 +//! Protocol: 10 warm-ups outside the capture range, `cuProfilerStart`, 100
 +//! timed iterations, one barrier at the observation boundary,
 +//! `cuProfilerStop`. `T4A_BENCH_CASES` selects the cases (comma separated, or
-+//! `all`).
++//! `all`). Inputs are generated with the same generator, seeds, order and complex
++//! scale as `examples/bench_kernels.rs` in `t4a-cuda-kernels`, and every
++//! `BENCH_META` line carries the `input_digest` both arms can compare.
 +
 +use std::ffi::c_void;
 +
@@ -1801,11 +1873,62 @@ index 000000000..b07769b4b
 +    }
 +}
 +
++thread_local! {
++    /// `input_digest` of the case currently running: recorded once by the case
++    /// body from the host bytes it generates, printed by `emit_meta`, so the two
++    /// arms of the paired experiment can prove they were given the same data.
++    static INPUT_DIGEST: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
++}
++
++/// FNV-1a 64 over a case's initial host input: one length-prefixed part per
++/// operand, in the order the case uploads them. Identical to the helper in the
++/// `tenferro-gpu` half of this patch and in `examples/bench_kernels.rs`, so equal
++/// digests mean equal inputs.
++fn input_digest(parts: &[&[u8]]) -> u64 {
++    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
++    for part in parts {
++        hash ^= part.len() as u64;
++        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
++        for byte in part.iter() {
++            hash ^= u64::from(*byte);
++            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
++        }
++    }
++    hash
++}
++
++/// The byte image of a host vector, for the digest (plain scalars and `repr(C)`
++/// complex pairs only, so there is no uninitialised padding).
++fn bytes_of<T: Copy>(values: &[T]) -> &[u8] {
++    unsafe {
++        std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), std::mem::size_of_val(values))
++    }
++}
++
++fn record_input_digest(parts: &[&[u8]]) {
++    let digest = input_digest(parts);
++    INPUT_DIGEST.with(|cell| {
++        assert!(
++            cell.get().is_none(),
++            "a case recorded its input digest twice"
++        );
++        cell.set(Some(digest));
++    });
++}
++
++fn take_input_digest(case: &str) -> u64 {
++    INPUT_DIGEST
++        .with(|cell| cell.take())
++        .unwrap_or_else(|| panic!("{case}: no input digest was recorded"))
++}
++
 +fn emit_meta(case: &str, kernels: &str, launches: usize, scratch_bytes: usize, check: &str) {
++    let digest = take_input_digest(case);
 +    println!(
 +        "BENCH_META case={case} kernels={kernels} launches_per_iter={launches} \
 +         scratch_bytes={scratch_bytes} host_waits_per_iter=0 transfer_bytes_per_iter=0 \
-+         device_allocations_per_iter=0 zero_fills_per_iter=0 boundary_barriers=1 check={check}"
++         device_allocations_per_iter=0 zero_fills_per_iter=0 boundary_barriers=1 \
++         input_digest=0x{digest:016x} check={check}"
 +    );
 +}
 +
@@ -1859,7 +1982,7 @@ index 000000000..b07769b4b
 +    }
 +
 +    fn c64(&mut self) -> num_complex::Complex64 {
-+        num_complex::Complex64::new(self.f64() * 2.0, self.f64() * 2.0)
++        num_complex::Complex64::new(self.f64() * 4.0, self.f64() * 4.0)
 +    }
 +}
 +
@@ -1960,16 +2083,16 @@ index 000000000..b07769b4b
 +/// norms, pivot, swap, reflector and the trailing update, then extract R,
 +/// initialize Q, apply the reflectors to Q in reverse and compute the rank.
 +///
-+/// The input clone the host function performs before the loop is a device-to-device
-+/// memcpy, not a kernel, and is excluded on both sides, so the compared quantity is
-+/// the per-step kernel sequence. Nothing restores the work buffer between iterations:
-+/// the measured region starts from this reference-check factorization's leftover work
-+/// matrix, and each iteration factorizes the previous iteration's leftover.
++/// The input clone the host function performs before the loop is a
++/// device-to-device memcpy, not a kernel, and is excluded on both sides, so the
++/// compared quantity is the per-step kernel sequence. The work buffer is reused
++/// across iterations, which changes neither the launch sequence nor its cost.
 +fn rrqr_typed<T>(backend: &mut CudaBackend, case: &str, m: usize, n: usize, values: Vec<T>)
 +where
 +    T: CudaRrqrScalar + RrqrTensorVariant + Scalar + BenchScalar,
 +    <T as LinalgScalar>::Real: Scalar,
 +{
++    record_input_digest(&[bytes_of(&values)]);
 +    let k = m.min(n);
 +    let options = RankRevealingQrOptions::default();
 +    let work = placed(backend, vec![m, n], values.clone());
@@ -2165,6 +2288,7 @@ index 000000000..b07769b4b
 +    let mut backend = backend();
 +    let mut rng = Rng::new(0x6060);
 +    let values: Vec<f64> = (0..side * side).map(|_| rng.f64()).collect();
++    record_input_digest(&[bytes_of(&values)]);
 +    let input = placed(&backend, vec![side, side], values.clone());
 +    // Identity pivots (1-based, LAPACK order), so the apply is a bit-exact copy.
 +    let pivots: Vec<i32> = (0..side).map(|index| index as i32 + 1).collect();
@@ -2363,6 +2487,7 @@ index 000000000..b07769b4b
 +    if !wanted(case) {
 +        return;
 +    }
++    record_input_digest(&[bytes_of(&q_values), bytes_of(&r_values)]);
 +    let mut backend = backend();
 +    let q_tensor = placed(&backend, vec![rows, cols], q_values.clone());
 +    let r_tensor = placed(&backend, vec![cols, cols], r_values.clone());
@@ -2453,6 +2578,7 @@ index 000000000..b07769b4b
 +    if !wanted(case) {
 +        return;
 +    }
++    record_input_digest(&[bytes_of(&values)]);
 +    let mut backend = backend();
 +    let packed = placed(&backend, vec![rows, cols], values.clone());
 +    let runtime = backend.runtime().clone();
@@ -2522,46 +2648,57 @@ index 000000000..b07769b4b
 +
 +    let rows = 1024usize;
 +    let cols = 256usize;
-+    let mut rng = Rng::new(0x7070);
-+    // Upper-triangular R with alternating diagonal signs, so both real phases
-+    // and a spread of complex phases occur.
++    // One generator per case, in the candidate's order: Q first, then R's upper
++    // triangle column by column, with alternating real diagonal signs and a
++    // constant complex diagonal imaginary part, so both real phases and a spread
++    // of complex phases occur.
++    let mut rng = Rng::new(0x7070_0000 + rows as u64);
++    let q_real: Vec<f64> = (0..rows * cols).map(|_| rng.f64()).collect();
 +    let mut r_real = vec![0.0f64; cols * cols];
++    for j in 0..cols {
++        for i in 0..=j {
++            r_real[i + j * cols] = if i == j {
++                let magnitude = 2.0 + i as f64;
++                if i % 2 == 0 {
++                    magnitude
++                } else {
++                    -magnitude
++                }
++            } else {
++                rng.f64()
++            };
++        }
++    }
++    run_qr_apply_phase("linalg-qr-apply-phase-1024x256-f64", rows, cols, q_real, r_real);
++
++    let mut rng = Rng::new(0x7070_0000 + rows as u64 + 1);
++    let q_complex: Vec<num_complex::Complex64> = (0..rows * cols).map(|_| rng.c64()).collect();
 +    let mut r_complex = vec![num_complex::Complex64::new(0.0, 0.0); cols * cols];
 +    for j in 0..cols {
 +        for i in 0..=j {
-+            if i == j {
-+                let magnitude = 2.0 + i as f64;
-+                r_real[i + j * cols] = if i % 2 == 0 { magnitude } else { -magnitude };
-+                r_complex[i + j * cols] = num_complex::Complex64::new(magnitude, 0.5);
++            r_complex[i + j * cols] = if i == j {
++                num_complex::Complex64::new(2.0 + i as f64, 0.5)
 +            } else {
-+                r_real[i + j * cols] = rng.f64();
-+                r_complex[i + j * cols] = rng.c64();
-+            }
++                rng.c64()
++            };
 +        }
 +    }
-+    run_qr_apply_phase(
-+        "linalg-qr-apply-phase-1024x256-f64",
-+        rows,
-+        cols,
-+        (0..rows * cols).map(|_| rng.f64()).collect(),
-+        r_real,
-+    );
 +    run_qr_apply_phase(
 +        "linalg-qr-apply-phase-1024x256-c64",
 +        rows,
 +        cols,
-+        (0..rows * cols).map(|_| rng.c64()).collect(),
++        q_complex,
 +        r_complex,
 +    );
 +
-+    let mut rng = Rng::new(0x8080);
++    let mut rng = Rng::new(0x8080_0000 + rows as u64);
 +    run_householder_explicit_v(
 +        "linalg-householder-explicit-v-1024x256-f64",
 +        rows,
 +        cols,
 +        (0..rows * cols).map(|_| rng.f64()).collect(),
 +    );
-+    let mut rng = Rng::new(0x8081);
++    let mut rng = Rng::new(0x8080_0000 + rows as u64 + 1);
 +    run_householder_explicit_v(
 +        "linalg-householder-explicit-v-1024x256-c64",
 +        rows,

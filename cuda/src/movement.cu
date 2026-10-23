@@ -55,6 +55,17 @@ __device__ __forceinline__ long long t4a_cuda_decode_indexed(long long flat, boo
   return t4a_cuda_decode(flat, rank, extents, strides, offset);
 }
 
+// Whether the narrow decoder may run. `len` is the layout's logical count, i.e.
+// the product of its non-negative extents, so `len <= INT32_MAX` bounds every
+// extent as well, and the quotient and coordinate of each axis fit 32 bits before
+// anything is cast; strides, offsets and the element addresses stay 64-bit in the
+// narrow decoder, so a signed stride or a large offset is unaffected. Testing every
+// extent explicitly instead costs 13 % on the per-element materialize case, and it
+// cannot differ for a layout whose count is the extent product.
+__device__ __forceinline__ bool t4a_cuda_decode_fits_narrow(long long len) {
+  return len >= 0 && len <= 0x7fffffffLL;
+}
+
 template <typename T>
 __device__ __forceinline__ void fill_zero_body(void* out, long long len) {
   long long index;
@@ -324,9 +335,7 @@ extern "C" __global__ void t4a_cuda_fill_zero(void* out, int dtype, long long le
 
 extern "C" __global__ void t4a_cuda_fill_zero_view(void* out, int dtype,
                                                    t4a_cuda_layout layout, long long len) {
-  // `len` is the layout's logical count (the extent product), so a 32-bit flat
-  // index and 32-bit quotient walk are safe exactly when it fits in INT32_MAX.
-  const bool narrow = len <= 0x7fffffffLL;
+  const bool narrow = t4a_cuda_decode_fits_narrow(len);
 #define T4A_BODY(T) fill_zero_view_body<T>(out, layout, len, narrow)
   T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
 #undef T4A_BODY
@@ -342,7 +351,7 @@ extern "C" __global__ void t4a_cuda_copy_exact(void* dst, const void* src, int d
 extern "C" __global__ void t4a_cuda_materialize_strided(void* dst, const void* src, int dtype,
                                                         t4a_cuda_layout src_layout,
                                                         long long len) {
-  const bool narrow = len <= 0x7fffffffLL;
+  const bool narrow = t4a_cuda_decode_fits_narrow(len);
 #define T4A_BODY(T) materialize_strided_body<T>(dst, src, src_layout, len, narrow)
   T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
 #undef T4A_BODY
@@ -351,7 +360,7 @@ extern "C" __global__ void t4a_cuda_materialize_strided(void* dst, const void* s
 extern "C" __global__ void t4a_cuda_contiguous_to_view(void* dst, const void* src, int dtype,
                                                        t4a_cuda_layout dst_layout,
                                                        long long len) {
-  const bool narrow = len <= 0x7fffffffLL;
+  const bool narrow = t4a_cuda_decode_fits_narrow(len);
 #define T4A_BODY(T) contiguous_to_view_body<T>(dst, src, dst_layout, len, narrow)
   T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
 #undef T4A_BODY
@@ -361,7 +370,9 @@ extern "C" __global__ void t4a_cuda_strided_to_strided(void* dst, const void* sr
                                                        t4a_cuda_layout src_layout,
                                                        t4a_cuda_layout dst_layout,
                                                        long long len) {
-  const bool narrow = len <= 0x7fffffffLL;
+  // Both layouts share the source's extents, so the source layout carries the
+  // quotient walk's range proof.
+  const bool narrow = t4a_cuda_decode_fits_narrow(len);
 #define T4A_BODY(T) strided_to_strided_body<T>(dst, src, src_layout, dst_layout, len, narrow)
   T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
 #undef T4A_BODY
@@ -376,17 +387,29 @@ extern "C" __global__ void t4a_cuda_strided_to_strided(void* dst, const void* sr
 extern "C" __global__ void __launch_bounds__(512, 4) t4a_cuda_tiled_transpose(
     void* dst, const void* src, int dtype, long long src_offset, long long batch_stride,
     long long dst_fast_extent, long long src_fast_extent, t4a_cuda_transpose_config config) {
-  // The whole source and destination span must fit a signed 32-bit element
-  // index before the narrow body may be used. The facade proves
-  // `batch_stride == dst_fast_extent * src_fast_extent`, non-negative offsets
-  // and a span inside both allocations, so the last reachable index is the
-  // batch span minus one. This is a launch-wide uniform decision.
-  const long long matrix = dst_fast_extent * src_fast_extent;
-  const long long last_batch = static_cast<long long>(gridDim.z) - 1;
-  const long long last_index = last_batch * batch_stride + matrix - 1;
-  const bool narrow = src_offset >= 0 && batch_stride >= 0 && dst_fast_extent >= 0 &&
-                      src_fast_extent >= 0 && src_offset + last_index <= 0x7fffffffLL &&
-                      last_index <= 0x7fffffffLL;
+  // The narrow body declares every one of its `Index` values as a signed 32-bit
+  // int, so each argument that is narrowed must itself fit that range, not only
+  // the last reachable address: an extent of 2^31 with the other extent one has a
+  // last index of 2^31-1 while its own value is out of range, and the casts below
+  // would then produce a negative bound and skip every store.
+  //
+  // All four arguments are non-negative here, so OR-ing them yields their maximum
+  // and one comparison bounds the whole set; it also runs before the span products
+  // so a hostile argument cannot overflow them. With
+  // `batch_stride == dst_fast_extent * src_fast_extent` (the facade proves it),
+  // non-negative arguments and the total span below 2^31, every intermediate of
+  // `src_offset + batch_base + dst_fast * src_fast_extent + src_fast` and of
+  // `batch_base + dst_fast + src_fast * dst_fast_extent` is a partial sum of
+  // non-negative terms that the total bounds, so the int arithmetic cannot wrap.
+  const long long narrowed = src_offset | batch_stride | dst_fast_extent | src_fast_extent;
+  bool narrow = narrowed >= 0 && narrowed <= 0x7fffffffLL;
+  if (narrow) {
+    // Safe: all four factors are below 2^31, so both products stay below 2^62.
+    const long long matrix = dst_fast_extent * src_fast_extent;
+    const long long last_batch = static_cast<long long>(gridDim.z) - 1;
+    const long long last_index = last_batch * batch_stride + matrix - 1;
+    narrow = last_index <= 0x7fffffffLL && src_offset + last_index <= 0x7fffffffLL;
+  }
   if (narrow) {
 #define T4A_BODY(T)                                                                      \
     tiled_transpose_config<int, T>(dst, src, static_cast<int>(src_offset),               \

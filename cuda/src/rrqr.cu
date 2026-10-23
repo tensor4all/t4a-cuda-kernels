@@ -19,6 +19,13 @@
 // INVARIANT: a lane that owns no rows contributes its zero accumulator and never
 // returns before a shuffle, so every collective runs for the whole plane. The
 // reflector broadcasts x0 from lane 0 before any thread stores over it.
+//
+// Every device helper below reads a layout through a const reference. A layout
+// passed by value is copied into the per-thread stack frame as soon as its
+// `extents`/`strides` arrays are indexed with a runtime axis, and that local
+// traffic was the dominant cost of the flat entries (`extract_r` 10.5 -> 4.3 us
+// per launch on the A100). The kernel entries keep the by-value operand the ABI
+// fixes; only the internal helpers changed.
 
 #include <t4a/abi.cuh>
 
@@ -80,7 +87,8 @@ __device__ __forceinline__ bool plane_any(bool value) {
 
 // Element and batch offsets of the one-axis-shorter operand (axis 0 is the column
 // or step index, axes 1.. are the matrix's axes 2..) for a linear batch index.
-__device__ __forceinline__ long long shorter_batch_offset(long long batch, t4a_cuda_layout layout) {
+__device__ __forceinline__ long long shorter_batch_offset(long long batch,
+                                                         const t4a_cuda_layout& layout) {
   long long offset = 0;
   long long remaining = batch;
   for (int axis = 1; axis < layout.rank; ++axis) {
@@ -93,7 +101,8 @@ __device__ __forceinline__ long long shorter_batch_offset(long long batch, t4a_c
 }
 
 // Batch offset of a full matrix operand (axes 2..) for a linear batch index.
-__device__ __forceinline__ long long matrix_batch_offset(long long batch, t4a_cuda_layout layout) {
+__device__ __forceinline__ long long matrix_batch_offset(long long batch,
+                                                        const t4a_cuda_layout& layout) {
   long long offset = 0;
   long long remaining = batch;
   for (int axis = 2; axis < layout.rank; ++axis) {
@@ -134,8 +143,8 @@ __device__ __forceinline__ t4a_cuda_c64 complex_div_ordinary<t4a_cuda_c64>(t4a_c
 // then the scaled squares) so no intermediate overflows.
 template <typename T, typename F>
 __device__ __forceinline__ void column_norms_body(const void* work_ptr, void* norms_ptr,
-                                                  t4a_cuda_layout work, t4a_cuda_layout norms,
-                                                  long long step) {
+                                                  const t4a_cuda_layout& work,
+                                                  const t4a_cuda_layout& norms, long long step) {
   const long long rows = work.extents[0];
   const long long columns = work.extents[1];
   const long long trailing = columns - step;
@@ -188,8 +197,9 @@ __device__ __forceinline__ void column_norms_body(const void* work_ptr, void* no
 template <typename F>
 __device__ __forceinline__ void select_pivot_body(const void* norms_ptr,
                                                   const void* permutation_ptr, void* pivots_ptr,
-                                                  void* status_ptr, t4a_cuda_layout norms,
-                                                  t4a_cuda_layout permutation, long long step) {
+                                                  void* status_ptr, const t4a_cuda_layout& norms,
+                                                  const t4a_cuda_layout& permutation,
+                                                  long long step) {
   const long long batch = blockIdx.x;
   const long long columns = norms.extents[0];
   const long long lane = threadIdx.x;
@@ -233,8 +243,10 @@ __device__ __forceinline__ void select_pivot_body(const void* norms_ptr,
 // Flat over rows * batches. The row-0 thread also exchanges the permutation entries.
 template <typename T>
 __device__ __forceinline__ void swap_columns_body(void* work_ptr, void* permutation_ptr,
-                                                  const void* pivots_ptr, t4a_cuda_layout work,
-                                                  t4a_cuda_layout permutation, long long step) {
+                                                  const void* pivots_ptr,
+                                                  const t4a_cuda_layout& work,
+                                                  const t4a_cuda_layout& permutation,
+                                                  long long step) {
   const long long rows = work.extents[0];
   const long long batches = 1;
   long long batch_count = batches;
@@ -439,8 +451,8 @@ __device__ __forceinline__ void apply_reflector_complex_body(
 
 template <typename T>
 __device__ __forceinline__ void extract_r_body(const void* work_ptr, void* r_ptr,
-                                               t4a_cuda_layout work, t4a_cuda_layout r,
-                                               long long len) {
+                                               const t4a_cuda_layout& work,
+                                               const t4a_cuda_layout& r, long long len) {
   long long flat;
   if (!t4a_cuda_tail_index(&flat, len)) {
     return;
@@ -463,8 +475,8 @@ __device__ __forceinline__ void extract_r_body(const void* work_ptr, void* r_ptr
 
 template <typename T, typename F>
 __device__ __forceinline__ void prefix_rank_body(const void* r_ptr, void* rank_ptr,
-                                                 void* status_ptr, t4a_cuda_layout r, F rtol,
-                                                 F atol) {
+                                                 void* status_ptr, const t4a_cuda_layout& r,
+                                                 F rtol, F atol) {
   const long long batch = blockIdx.x;
   const long long k = r.extents[0];
   const long long lane = threadIdx.x;

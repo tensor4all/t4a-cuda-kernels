@@ -311,9 +311,42 @@ static_assert(alignof(t4a_cuda_c64) == 8, "t4a_cuda_c64 ABI alignment");
       break;                                     \
   }
 
-// Address of logical element `flat` in `layout`, or the address of the same
-// logical coordinate in a layout that shares `extents_from`'s extents and uses
-// `strides_from`'s strides and offset.
+// Rank-independent metadata access.
+//
+// A kernel takes its layouts and plans by value, so they live in the
+// kernel-parameter (constant) bank. Reading a field with a compile-time subscript,
+// or with a runtime `axis` into the parameter's own array, is cheap. Three shapes
+// are not, and each of them makes the compiler copy a whole 144 B POD into the
+// per-thread stack frame so that every metadata read becomes an `LDL`/`STL`:
+// uncached local traffic per element for a kernel that moves a few bytes of
+// payload.
+//
+//   1. a subscript of a *coordinate vector* in the thread's frame with a runtime
+//      axis (it makes the vector addressable),
+//   2. an addressed by-value POD: a helper with pointer parameters that is handed
+//      `layout.extents`/`layout.strides`, or a by-value `t4a_cuda_layout`
+//      parameter of its own (see `t4a_cuda_logical_count`),
+//   3. an if-select chain over a frame array, which the backend re-recognises as a
+//      dynamic subscript -- for reads and writes.
+//
+// Rank is a classified compile-time loop bound (design
+// cubecl-performance-parity.md §1), so axis walks that touch a coordinate vector
+// are expanded over T4A_CUDA_MAX_RANK with literal indices, and the genuinely
+// runtime axes (a dimension map, a plan entry) are resolved with
+// `t4a_cuda_axis_value` / `t4a_cuda_axis_add` instead of a subscript. Both
+// expansion forms were measured; see
+// docs/worklogs/2026-10-21-local-memory-kernels.md.
+
+// Address of logical element `flat` in a layout. The axis walk is a compact loop
+// whose subscript the compiler lowers to an indexed constant-bank load, which
+// keeps the code of the entries that decode exactly one layout per element
+// compact. Callers whose axis walk also reads a coordinate vector or a second
+// layout pass the fields of this one inline with literal indices instead (see
+// `linalg_address` in linalg_aux.cu): handing `extents`/`strides` to this helper
+// makes their addresses escape, and the escape is what moves the layout into the
+// stack frame. Arbitrary signed strides and offsets are honoured here; a
+// destination is decoded with it unless the facade proves that destination
+// compact.
 __device__ __forceinline__ long long t4a_cuda_decode(long long flat,
                                                      int rank,
                                                      const long long* extents,
@@ -330,6 +363,36 @@ __device__ __forceinline__ long long t4a_cuda_decode(long long flat,
     offset += coordinate * strides[axis];
   }
   return offset;
+}
+
+// `values[axis]` for a runtime `axis`: an unrolled compare keeps every subscript
+// literal, so a by-value POD's array stays in the constant bank and a thread-local
+// array stays in registers. The selection is arithmetic (a 0/1 mask times the
+// value) rather than a branch chain: the backend recognises an if-select chain
+// over a *thread-local* array as a dynamic subscript and demotes the array back
+// into the stack frame, while the masked sum leaves it in registers. An
+// out-of-range axis (`axis >= T4A_CUDA_MAX_RANK`) reads as zero instead of out of
+// bounds. Every slot is read, so callers must initialize the whole array; the
+// masked zero does not make an uninitialized slot defined.
+__device__ __forceinline__ long long t4a_cuda_axis_value(const long long* values, int axis) {
+  long long result = 0;
+#pragma unroll
+  for (int index = 0; index < T4A_CUDA_MAX_RANK; ++index) {
+    result += static_cast<long long>(index == axis) * values[index];
+  }
+  return result;
+}
+
+// `values[axis] += value` for a runtime `axis`, under the same rule: the loop is
+// unrolled with literal subscripts and the selection is arithmetic, because an
+// if-select *write* demotes a thread-local array into the stack frame exactly like
+// an if-select read. `values` must be initialized (a set is a zero-init plus an
+// add) and is read in full, like t4a_cuda_axis_value.
+__device__ __forceinline__ void t4a_cuda_axis_add(long long* values, int axis, long long value) {
+#pragma unroll
+  for (int index = 0; index < T4A_CUDA_MAX_RANK; ++index) {
+    values[index] += static_cast<long long>(index == axis) * value;
+  }
 }
 
 __device__ __forceinline__ bool t4a_cuda_tail_index(long long* index, long long len) {
@@ -355,8 +418,12 @@ __device__ __forceinline__ t4a_cuda_c64 t4a_cuda_zero<t4a_cuda_c64>() {
 }
 
 // Logical element count of a layout: the extent product. Kernels use this, not the
-// caller's allocation length, as their logical bound.
-__device__ __forceinline__ long long t4a_cuda_logical_count(t4a_cuda_layout layout) {
+// caller's allocation length, as their logical bound. The layout is taken by
+// reference: a by-value `t4a_cuda_layout` parameter is a second 144 B copy of the
+// POD, and two of them per entry are enough to put the parameter bank's copy into
+// the per-thread stack frame (measured on `t4a_cuda_qr_apply_phase`: 288 B stack,
+// 384 `LDL`/`STL`).
+__device__ __forceinline__ long long t4a_cuda_logical_count(const t4a_cuda_layout& layout) {
   long long count = 1;
   for (int axis = 0; axis < layout.rank; ++axis) {
     count *= layout.extents[axis];

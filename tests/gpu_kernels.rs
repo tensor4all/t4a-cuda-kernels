@@ -446,6 +446,81 @@ fn tiled_transpose_matches_the_coordinate_map() {
     }
 }
 
+/// The narrow transpose body narrows every launch argument to a signed 32-bit
+/// index, so a shape whose extent or span reaches `INT32_MAX` must take the 64-bit
+/// body instead of truncating a bound. `DType::Bool` is one byte, so the boundary
+/// shape needs a 2 GiB source and a 2 GiB destination (4 GiB of device memory) plus
+/// 2 GiB of host payload; a wider dtype would need 8-16 GiB per buffer. The local
+/// A100 (80 GiB) runs this in a few seconds, and the transfers dominate that.
+///
+/// Both shapes are byte copies (`src_fast_extent = 1`), and each is compared against
+/// the whole source, so a body that writes nothing or writes the wrong index fails
+/// here. The byte past the shape must keep the sentinel.
+///
+/// - `dst_fast_extent = 2^31`: the last element index is `2^31 - 1`, inside the
+///   narrow range, but the extent itself is not. A predicate that tests only the
+///   span accepts this shape, and the body then compares against a negative bound
+///   and skips every store.
+/// - `dst_fast_extent = 2^31 - 1`: the largest shape the narrow body may take.
+#[test]
+fn tiled_transpose_crosses_the_narrow_index_limit() {
+    let session = Session::new("movement");
+    let function = session.function("t4a_cuda_tiled_transpose");
+    let dtype = DType::Bool;
+    // One byte past the wider shape, so the tail guard has something to observe.
+    let len = (1usize << 31) + 1;
+    // A repeating block keeps the payload cheap to build and never equal to the
+    // sentinel, so a missing or misplaced store cannot pass unnoticed.
+    let block: Vec<u8> = (0..4096u32).map(|index| (index % 251) as u8).collect();
+    let mut values = Vec::with_capacity(len);
+    while values.len() < len {
+        values.extend_from_slice(&block);
+    }
+    values.truncate(len);
+    let src = upload(&session, &values);
+
+    for (dst_fast, span) in [
+        (1usize << 31, 1usize << 31),
+        ((1usize << 31) - 1, (1usize << 31) - 1),
+    ] {
+        let src_fast = 1usize;
+        let matrix = dst_fast * src_fast;
+        let dst = sentinel(&session, len);
+        let plan = plan_tiled_transpose(
+            dtype,
+            TransposeConfig::DEFAULT,
+            0,
+            matrix as i64,
+            dst_fast as i64,
+            src_fast as i64,
+            1,
+            len as i64,
+            len as i64,
+        )
+        .unwrap();
+        let mut slots = [
+            Slot::ptr(&dst),
+            Slot::ptr(&src),
+            Slot::i32(dtype.tag()),
+            Slot::i64(0),
+            Slot::i64(matrix as i64),
+            Slot::i64(dst_fast as i64),
+            Slot::i64(src_fast as i64),
+            Slot::config(&CTransposeConfig::from(TransposeConfig::DEFAULT)),
+        ];
+        launch(function, &plan, session.stream(), &mut slots);
+        let got = read_bytes(&session, &dst);
+        // Compare as booleans: `assert_eq!` on 2 GiB slices would try to format them
+        // on failure.
+        let copied = got[..span] == values[..span];
+        assert!(
+            copied,
+            "destination differs from the source at dst_fast_extent={dst_fast}"
+        );
+        assert_eq!(got[span], SENTINEL, "byte past dst_fast_extent={dst_fast}");
+    }
+}
+
 #[test]
 fn float_arithmetic_matches_cpu_references() {
     let session = Session::new("arithmetic");

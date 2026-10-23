@@ -31,41 +31,22 @@ __device__ __forceinline__ long long clamp_window_start(I start, long long dim,
                                                          : max_start;
 }
 
-// One start component: the batch coordinates fill every index axis except the
-// index vector axis, where the component selects. When the index vector axis is
-// absent (`index_vector_dim == rank`), the batch coordinates address the tensor
-// directly.
-template <typename I>
-__device__ __forceinline__ I index_component(const I* indices,
-                                             const long long* batch_coords,
-                                             int batch_rank,
-                                             const t4a_cuda_layout& indices_layout,
-                                             int index_vector_dim,
-                                             int component) {
-  long long offset = indices_layout.offset;
-  if (index_vector_dim == indices_layout.rank) {
-    for (int axis = 0; axis < batch_rank; ++axis) {
-      offset += batch_coords[axis] * indices_layout.strides[axis];
-    }
-  } else {
-    int batch_axis = 0;
-    for (int axis = 0; axis < indices_layout.rank; ++axis) {
-      const long long coordinate =
-          axis == index_vector_dim ? component : batch_coords[batch_axis++];
-      offset += coordinate * indices_layout.strides[axis];
-    }
-  }
-  return indices[offset];
+// Tensor axis carrying batch position `position`: the index vector axis is
+// skipped when the index tensor has one, because the start component varies along
+// it instead of along a batch coordinate.
+__device__ __forceinline__ int index_batch_axis(int position, bool vector_present,
+                                                int index_vector_dim) {
+  return position + ((vector_present && position >= index_vector_dim) ? 1 : 0);
 }
 
-__device__ __forceinline__ void decode_coordinates(long long flat,
-                                                   const t4a_cuda_layout& layout,
-                                                   long long* coordinates) {
-  long long rest = flat;
-  for (int axis = 0; axis < layout.rank; ++axis) {
-    coordinates[axis] = rest % layout.extents[axis];
-    rest /= layout.extents[axis];
-  }
+// One start component. `batch_base` is the index-tensor address of the element at
+// the batch position, already carrying the batch coordinates; `component_stride`
+// is the stride of the index vector axis, or zero when the index tensor has none
+// (then every start component reads the same element, as the baseline does).
+template <typename I>
+__device__ __forceinline__ I index_component(const I* indices, long long batch_base,
+                                             long long component_stride, int component) {
+  return indices[batch_base + static_cast<long long>(component) * component_stride];
 }
 
 template <typename T, typename I>
@@ -84,48 +65,64 @@ __device__ __forceinline__ void gather_body(void* out_ptr,
   const T* operand = static_cast<const T*>(operand_ptr);
   const I* indices = static_cast<const I*>(indices_ptr);
 
-  long long out_coords[T4A_CUDA_MAX_RANK];
-  decode_coordinates(flat, out_layout, out_coords);
-
-  // Window offsets and clamped starts accumulate into the operand coordinates,
-  // matching the baseline's zero-init + add structure.
-  long long operand_coords[T4A_CUDA_MAX_RANK];
-  for (int axis = 0; axis < operand_layout.rank; ++axis) {
-    operand_coords[axis] = 0;
-  }
-
-  long long batch_coords[T4A_CUDA_MAX_RANK];
-  int batch_rank = 0;
-  for (int out_axis = 0; out_axis < out_layout.rank; ++out_axis) {
-    int window_pos = -1;
-    for (int pos = 0; pos < plan.window_rank; ++pos) {
-      if (plan.offset_dims[pos] == out_axis) {
-        window_pos = pos;
-        break;
-      }
-    }
-    if (window_pos >= 0) {
-      operand_coords[plan.window_dims[window_pos]] += out_coords[out_axis];
-    } else {
-      batch_coords[batch_rank++] = out_coords[out_axis];
-    }
-  }
-
-  for (int component = 0; component < plan.start_map_len; ++component) {
-    const I start = index_component(indices, batch_coords, batch_rank, indices_layout,
-                                    plan.index_vector_dim, component);
-    const int operand_axis = static_cast<int>(plan.start_index_map[component]);
-    operand_coords[operand_axis] +=
-        clamp_window_start<I>(start, operand_layout.extents[operand_axis],
-                              plan.slice_sizes[operand_axis]);
-  }
+  // Window offsets and clamped starts fold straight into the operand address and
+  // the batch coordinates fold straight into the index-tensor address, so the
+  // kernel carries no per-axis metadata array: every subscript of a by-value POD
+  // is a loop constant, and the runtime axes (a dimension map or a plan entry) go
+  // through `t4a_cuda_axis_value` (see t4a/abi.cuh). Registers therefore stay
+  // where occupancy wants them.
+  const bool vector_present = plan.index_vector_dim < indices_layout.rank;
+  const long long component_stride =
+      vector_present ? t4a_cuda_axis_value(indices_layout.strides, plan.index_vector_dim) : 0;
 
   long long in_index = operand_layout.offset;
-  for (int axis = 0; axis < operand_layout.rank; ++axis) {
-    in_index += operand_coords[axis] * operand_layout.strides[axis];
+  long long out_index = out_layout.offset;
+  long long indices_base = indices_layout.offset;
+  long long rest = flat;
+  int batch_position = 0;
+#pragma unroll
+  for (int out_axis = 0; out_axis < T4A_CUDA_MAX_RANK; ++out_axis) {
+    if (out_axis < out_layout.rank) {
+      const long long extent = out_layout.extents[out_axis];
+      const long long coordinate = rest % extent;
+      // No axis reads the quotient of the last axis, so it is not formed (a
+      // 64-bit division is a multi-instruction sequence).
+      if (out_axis + 1 < out_layout.rank) {
+        rest /= extent;
+      }
+      out_index += coordinate * out_layout.strides[out_axis];
+      int window_pos = -1;
+#pragma unroll
+      for (int pos = 0; pos < T4A_CUDA_MAX_RANK; ++pos) {
+        if (pos < plan.window_rank && window_pos < 0 && plan.offset_dims[pos] == out_axis) {
+          window_pos = pos;
+        }
+      }
+      if (window_pos >= 0) {
+        const int operand_axis =
+            static_cast<int>(t4a_cuda_axis_value(plan.window_dims, window_pos));
+        in_index += coordinate * t4a_cuda_axis_value(operand_layout.strides, operand_axis);
+      } else {
+        const int tensor_axis = index_batch_axis(batch_position, vector_present,
+                                                 plan.index_vector_dim);
+        indices_base += coordinate * t4a_cuda_axis_value(indices_layout.strides, tensor_axis);
+        ++batch_position;
+      }
+    }
   }
-  const long long out_index = t4a_cuda_decode(flat, out_layout.rank, out_layout.extents,
-                                              out_layout.strides, out_layout.offset);
+
+#pragma unroll
+  for (int component = 0; component < T4A_CUDA_MAX_RANK; ++component) {
+    if (component < plan.start_map_len) {
+      const I start = index_component(indices, indices_base, component_stride, component);
+      const int operand_axis = static_cast<int>(plan.start_index_map[component]);
+      const long long dim = t4a_cuda_axis_value(operand_layout.extents, operand_axis);
+      const long long window = t4a_cuda_axis_value(plan.slice_sizes, operand_axis);
+      in_index += clamp_window_start<I>(start, dim, window) *
+                  t4a_cuda_axis_value(operand_layout.strides, operand_axis);
+    }
+  }
+
   static_cast<T*>(out_ptr)[out_index] = operand[in_index];
 }
 
@@ -139,69 +136,92 @@ __device__ __forceinline__ bool scatter_destination(long long flat,
                                                     const t4a_cuda_layout& updates_layout,
                                                     const t4a_cuda_scatter_plan& plan,
                                                     const I* indices) {
-  long long update_coords[T4A_CUDA_MAX_RANK];
-  decode_coordinates(flat, updates_layout, update_coords);
-
-  long long window_coords[T4A_CUDA_MAX_RANK];
-  long long batch_coords[T4A_CUDA_MAX_RANK];
-  int batch_rank = 0;
-  for (int pos = 0; pos < plan.window_rank; ++pos) {
-    window_coords[pos] = 0;
+  // Clamped starts accumulate in `base`, which is addressed with unrolled literal
+  // subscripts plus an arithmetic mask (see t4a_cuda_axis_add in t4a/abi.cuh) and
+  // therefore stays in registers. Everything else folds into scalars: the update
+  // coordinate is decoded inside the axis walk, the batch coordinates fold into
+  // the index-tensor address, the window offset into one accumulator and the
+  // window shape is derived where it is needed. The live metadata therefore stays
+  // small enough not to cost occupancy.
+  long long base[T4A_CUDA_MAX_RANK];
+#pragma unroll
+  for (int axis = 0; axis < T4A_CUDA_MAX_RANK; ++axis) {
+    base[axis] = 0;
   }
-  for (int axis = 0; axis < updates_layout.rank; ++axis) {
-    int window_pos = -1;
-    for (int pos = 0; pos < plan.window_rank; ++pos) {
-      if (plan.update_window_dims[pos] == axis) {
-        window_pos = pos;
-        break;
+
+  const bool vector_present = plan.index_vector_dim < indices_layout.rank;
+  const long long component_stride =
+      vector_present ? t4a_cuda_axis_value(indices_layout.strides, plan.index_vector_dim) : 0;
+
+  long long window_offset = 0;
+  long long indices_base = indices_layout.offset;
+  long long rest = flat;
+  int batch_position = 0;
+#pragma unroll
+  for (int axis = 0; axis < T4A_CUDA_MAX_RANK; ++axis) {
+    if (axis < updates_layout.rank) {
+      const long long extent = updates_layout.extents[axis];
+      const long long coordinate = rest % extent;
+      rest /= extent;
+      int window_pos = -1;
+#pragma unroll
+      for (int pos = 0; pos < T4A_CUDA_MAX_RANK; ++pos) {
+        if (pos < plan.window_rank && window_pos < 0 && plan.update_window_dims[pos] == axis) {
+          window_pos = pos;
+        }
       }
-    }
-    if (window_pos >= 0) {
-      window_coords[window_pos] = update_coords[axis];
-    } else {
-      batch_coords[batch_rank++] = update_coords[axis];
+      if (window_pos >= 0) {
+        const int operand_axis =
+            static_cast<int>(t4a_cuda_axis_value(plan.window_dims, window_pos));
+        window_offset += coordinate * t4a_cuda_axis_value(out_layout.strides, operand_axis);
+      } else {
+        const int tensor_axis = index_batch_axis(batch_position, vector_present,
+                                                 plan.index_vector_dim);
+        indices_base += coordinate * t4a_cuda_axis_value(indices_layout.strides, tensor_axis);
+        ++batch_position;
+      }
     }
   }
 
   // The window shape comes from the updates extents; every other operand axis is
   // covered by the scattered start alone.
-  long long window_shape[T4A_CUDA_MAX_RANK];
-  for (int axis = 0; axis < out_layout.rank; ++axis) {
-    window_shape[axis] = 1;
-  }
-  for (int pos = 0; pos < plan.window_rank; ++pos) {
-    window_shape[plan.window_dims[pos]] =
-        updates_layout.extents[plan.update_window_dims[pos]];
-  }
-
-  long long base[T4A_CUDA_MAX_RANK];
-  for (int axis = 0; axis < out_layout.rank; ++axis) {
-    base[axis] = 0;
-  }
-  for (int component = 0; component < plan.scatter_map_len; ++component) {
-    const I start = index_component(indices, batch_coords, batch_rank, indices_layout,
-                                    plan.index_vector_dim, component);
-    const int axis = static_cast<int>(plan.scatter_dims[component]);
-    base[axis] = clamp_window_start<I>(start, out_layout.extents[axis], window_shape[axis]);
-  }
-
-  for (int axis = 0; axis < out_layout.rank; ++axis) {
-    if (base[axis] + window_shape[axis] > out_layout.extents[axis]) {
-      return false;
-    }
-  }
-
-  long long offset = out_layout.offset;
-  for (int axis = 0; axis < out_layout.rank; ++axis) {
-    long long coordinate = base[axis];
-    for (int pos = 0; pos < plan.window_rank; ++pos) {
-      if (plan.window_dims[pos] == axis) {
-        coordinate += window_coords[pos];
+#pragma unroll
+  for (int component = 0; component < T4A_CUDA_MAX_RANK; ++component) {
+    if (component < plan.scatter_map_len) {
+      const I start = index_component(indices, indices_base, component_stride, component);
+      const int axis = static_cast<int>(plan.scatter_dims[component]);
+      long long shape = 1;
+#pragma unroll
+      for (int pos = 0; pos < T4A_CUDA_MAX_RANK; ++pos) {
+        if (pos < plan.window_rank && plan.window_dims[pos] == axis) {
+          shape = t4a_cuda_axis_value(updates_layout.extents, plan.update_window_dims[pos]);
+        }
       }
+      t4a_cuda_axis_add(base, axis,
+                        clamp_window_start<I>(
+                            start, t4a_cuda_axis_value(out_layout.extents, axis), shape));
     }
-    offset += coordinate * out_layout.strides[axis];
   }
-  *destination = offset;
+
+  // A window that does not fit the operand skips this update.
+  long long offset = out_layout.offset;
+#pragma unroll
+  for (int axis = 0; axis < T4A_CUDA_MAX_RANK; ++axis) {
+    if (axis < out_layout.rank) {
+      long long shape = 1;
+#pragma unroll
+      for (int pos = 0; pos < T4A_CUDA_MAX_RANK; ++pos) {
+        if (pos < plan.window_rank && plan.window_dims[pos] == axis) {
+          shape = t4a_cuda_axis_value(updates_layout.extents, plan.update_window_dims[pos]);
+        }
+      }
+      if (base[axis] + shape > out_layout.extents[axis]) {
+        return false;
+      }
+      offset += base[axis] * out_layout.strides[axis];
+    }
+  }
+  *destination = offset + window_offset;
   return true;
 }
 

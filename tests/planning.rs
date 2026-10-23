@@ -317,6 +317,19 @@ fn entry_names_are_unique_and_exported_by_the_sources() {
         include_str!("../cuda/src/linalg_aux.cu"),
         include_str!("../cuda/src/rrqr.cu")
     );
+    // A declaration may carry a `__launch_bounds__` register cap between the
+    // return type and the entry name (`t4a_cuda_tiled_transpose` does, to keep its
+    // common tile configuration at the 32-register occupancy point). Drop the
+    // attribute so this check still sees exactly one plain declaration per entry.
+    let sources = {
+        let mut text = sources.to_string();
+        while let Some(start) = text.find("__launch_bounds__(") {
+            let end = start + text[start..].find(')').expect("unterminated launch_bounds") + 1;
+            text.replace_range(start..end, "");
+            text = text.replace("void  ", "void ");
+        }
+        text
+    };
     for (index, entry) in Entry::ALL.iter().enumerate() {
         let name = entry.name();
         assert!(name.starts_with("t4a_cuda_"), "{name}");

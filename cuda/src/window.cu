@@ -29,6 +29,13 @@ __device__ __forceinline__ long long clamp_window_start(I start, long long dim,
                                                          : max_start;
 }
 
+// One thread per output element over a compact destination, which the planner
+// enforces (`require_compact` in `plan_slice`/`plan_dynamic_slice`/`plan_pad`), so
+// the destination is addressed at the flat logical position and never decoded a
+// second time. The axis walk is fully unrolled with literal metadata indices (see
+// the metadata-access note in t4a/abi.cuh): a runtime axis would copy both layouts
+// and both by-value axis-value PODs into the per-thread stack frame and turn every
+// metadata access into local-memory traffic.
 template <typename T>
 __device__ __forceinline__ void slice_body(void* out_ptr,
                                            const void* in_ptr,
@@ -43,17 +50,17 @@ __device__ __forceinline__ void slice_body(void* out_ptr,
   }
   long long in_index = in_layout.offset;
   long long rest = flat;
-  for (int axis = 0; axis < out_layout.rank; ++axis) {
-    const long long extent = out_layout.extents[axis];
-    const long long coordinate = rest % extent;
-    rest /= extent;
-    const long long in_coordinate = starts.values[axis] + coordinate * steps.values[axis];
-    in_index += in_coordinate * in_layout.strides[axis];
+#pragma unroll
+  for (int axis = 0; axis < T4A_CUDA_MAX_RANK; ++axis) {
+    if (axis < out_layout.rank) {
+      const long long extent = out_layout.extents[axis];
+      const long long coordinate = rest % extent;
+      rest /= extent;
+      const long long in_coordinate = starts.values[axis] + coordinate * steps.values[axis];
+      in_index += in_coordinate * in_layout.strides[axis];
+    }
   }
-  const long long out_index =
-      t4a_cuda_decode(flat, out_layout.rank, out_layout.extents, out_layout.strides,
-                      out_layout.offset);
-  static_cast<T*>(out_ptr)[out_index] = static_cast<const T*>(in_ptr)[in_index];
+  static_cast<T*>(out_ptr)[flat] = static_cast<const T*>(in_ptr)[in_index];
 }
 
 template <typename T, typename I>
@@ -70,19 +77,19 @@ __device__ __forceinline__ void dynamic_slice_body(void* out_ptr,
   const I* starts = static_cast<const I*>(starts_ptr);
   long long in_index = in_layout.offset;
   long long rest = flat;
-  for (int axis = 0; axis < out_layout.rank; ++axis) {
-    const long long extent = out_layout.extents[axis];
-    const long long coordinate = rest % extent;
-    rest /= extent;
-    // The window size is the output extent on this axis.
-    const long long clamped =
-        clamp_window_start<I>(starts[axis], in_layout.extents[axis], extent);
-    in_index += (clamped + coordinate) * in_layout.strides[axis];
+#pragma unroll
+  for (int axis = 0; axis < T4A_CUDA_MAX_RANK; ++axis) {
+    if (axis < out_layout.rank) {
+      const long long extent = out_layout.extents[axis];
+      const long long coordinate = rest % extent;
+      rest /= extent;
+      // The window size is the output extent on this axis.
+      const long long clamped =
+          clamp_window_start<I>(starts[axis], in_layout.extents[axis], extent);
+      in_index += (clamped + coordinate) * in_layout.strides[axis];
+    }
   }
-  const long long out_index =
-      t4a_cuda_decode(flat, out_layout.rank, out_layout.extents, out_layout.strides,
-                      out_layout.offset);
-  static_cast<T*>(out_ptr)[out_index] = static_cast<const T*>(in_ptr)[in_index];
+  static_cast<T*>(out_ptr)[flat] = static_cast<const T*>(in_ptr)[in_index];
 }
 
 // Edge padding keeps the baseline's unsigned-magnitude treatment of negative
@@ -103,40 +110,40 @@ __device__ __forceinline__ void pad_body(void* out_ptr,
   bool in_bounds = true;
   long long in_index = in_layout.offset;
   long long rest = flat;
-  for (int axis = 0; axis < out_layout.rank; ++axis) {
-    const long long out_pos = rest % out_layout.extents[axis];
-    rest /= out_layout.extents[axis];
+#pragma unroll
+  for (int axis = 0; axis < T4A_CUDA_MAX_RANK; ++axis) {
+    if (axis < out_layout.rank) {
+      const long long out_pos = rest % out_layout.extents[axis];
+      rest /= out_layout.extents[axis];
 
-    const long long low = edge_low.values[axis];
-    const unsigned long long low_bits = static_cast<unsigned long long>(low);
-    const unsigned long long low_magnitude = low < 0 ? 0ULL - low_bits : low_bits;
-    const unsigned long long spacing =
-        static_cast<unsigned long long>(interior.values[axis] + 1);
-    const unsigned long long position = static_cast<unsigned long long>(out_pos);
+      const long long low = edge_low.values[axis];
+      const unsigned long long low_bits = static_cast<unsigned long long>(low);
+      const unsigned long long low_magnitude = low < 0 ? 0ULL - low_bits : low_bits;
+      const unsigned long long spacing =
+          static_cast<unsigned long long>(interior.values[axis] + 1);
+      const unsigned long long position = static_cast<unsigned long long>(out_pos);
 
-    unsigned long long shifted = 0;
-    if (low < 0) {
-      shifted = position + low_magnitude;
-    } else if (position < low_magnitude) {
-      in_bounds = false;
-    } else {
-      shifted = position - low_magnitude;
-    }
-    if (shifted % spacing != 0) {
-      in_bounds = false;
-    } else {
-      const unsigned long long candidate = shifted / spacing;
-      if (candidate >= static_cast<unsigned long long>(in_layout.extents[axis])) {
+      unsigned long long shifted = 0;
+      if (low < 0) {
+        shifted = position + low_magnitude;
+      } else if (position < low_magnitude) {
         in_bounds = false;
       } else {
-        in_index += static_cast<long long>(candidate) * in_layout.strides[axis];
+        shifted = position - low_magnitude;
+      }
+      if (shifted % spacing != 0) {
+        in_bounds = false;
+      } else {
+        const unsigned long long candidate = shifted / spacing;
+        if (candidate >= static_cast<unsigned long long>(in_layout.extents[axis])) {
+          in_bounds = false;
+        } else {
+          in_index += static_cast<long long>(candidate) * in_layout.strides[axis];
+        }
       }
     }
   }
-  const long long out_index =
-      t4a_cuda_decode(flat, out_layout.rank, out_layout.extents, out_layout.strides,
-                      out_layout.offset);
-  static_cast<T*>(out_ptr)[out_index] =
+  static_cast<T*>(out_ptr)[flat] =
       in_bounds ? static_cast<const T*>(in_ptr)[in_index] : t4a_cuda_zero<T>();
 }
 

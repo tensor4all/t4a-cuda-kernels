@@ -1,11 +1,12 @@
 //! Host-side validation, planning and manifest consistency. Needs no CUDA.
 
 use t4a_cuda_kernels::{
-    bytes, pack_gather_plan, pack_scatter_plan, plan_contiguous_to_view, plan_copy_exact,
-    plan_elementwise, plan_fill_zero, plan_fill_zero_view, plan_materialize_strided,
-    plan_strided_to_strided, plan_tiled_transpose, CAxisValuesAny, CLayout, CTransposeConfig,
-    DType, Entry, Error, GeneralEntry, Launch, Layout, RankVariant, TransposeConfig, WideLayout,
-    ABI_REVISION, DEFAULT_SHARED_BYTES, FLAT_BLOCK, MAX_RANK,
+    bytes, pack_gather_plan, pack_scatter_plan, plan_broadcast_in_dim, plan_concatenate_copy,
+    plan_contiguous_to_view, plan_copy_exact, plan_elementwise, plan_fill_zero,
+    plan_fill_zero_view, plan_materialize_strided, plan_strided_to_strided, plan_tiled_transpose,
+    CAxisValuesAny, CLayout, CTransposeConfig, DType, Entry, Error, GeneralEntry, Launch, Layout,
+    RankVariant, TransposeConfig, WideLayout, ABI_REVISION, DEFAULT_SHARED_BYTES, FLAT_BLOCK,
+    MAX_RANK,
 };
 
 #[test]
@@ -2931,4 +2932,299 @@ fn general_entries_mirror_their_fast_dtype_matrix() {
             assert!(entry.supports(*dtype), "{} {dtype:?}", entry.name());
         }
     }
+}
+
+// --- Revision 10: the remaining families and the inventory proof --------------
+
+/// Pinned row count of `tests/data/tenferro-cuda-inventory.tsv`: the number of
+/// `#[cube(launch_unchecked)]` entries in `tenferro-rs@14bc1ab9`'s CUDA kernel
+/// library. A change here means the pinned inventory moved, not that the mapping
+/// shrank.
+const PINNED_INVENTORY_ROWS: usize = 173;
+
+/// Named vendor routes: operations tenferro serves from a library call rather than a
+/// CubeCL kernel, so they never appear in the kernel inventory but must be
+/// resolvable when a caller maps an operation.
+const VENDOR_ROUTES: [&str; 5] = ["cuBLAS", "cuBLASLt", "cuTENSOR", "cuSOLVER", "cuFFT"];
+
+fn exported_names() -> Vec<&'static str> {
+    Entry::ALL
+        .iter()
+        .map(|entry| entry.name())
+        .chain(GeneralEntry::ALL.iter().map(|entry| entry.name()))
+        .collect()
+}
+
+#[test]
+fn every_pinned_tenferro_cuda_kernel_resolves_to_an_entry() {
+    // The pinned source document is the authority for kind, source file and line.
+    let document = include_str!("../docs/kernel-inventory.md");
+    let mut documented: Vec<(String, String, String, u32)> = Vec::new();
+    let mut source = String::new();
+    for line in document.lines() {
+        if let Some(rest) = line.strip_prefix("## ") {
+            // The section heading is a path; the file name is the stable identity.
+            source = rest.trim().rsplit('/').next().unwrap_or(rest).to_string();
+            continue;
+        }
+        if !line.starts_with("| `") {
+            continue;
+        }
+        let mut parts = line.split('|');
+        let _leading = parts.next();
+        let name = parts.next().unwrap_or_default().trim().trim_matches('`');
+        let kind = parts.next().unwrap_or_default().trim();
+        assert!(!name.is_empty(), "malformed inventory row: {line}");
+        if !matches!(kind, "entry" | "macro_entry") {
+            continue;
+        }
+        let cell = parts.next().unwrap_or_default();
+        let pinned_line: u32 = cell
+            .split("[L")
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_else(|| panic!("{name}: the pinned row has no line number"));
+        assert!(
+            pinned_line > 0,
+            "{name}: the pinned line number must be positive"
+        );
+        documented.push((
+            name.to_string(),
+            kind.to_string(),
+            source.clone(),
+            pinned_line,
+        ));
+    }
+    documented.sort();
+    documented.dedup();
+    assert!(
+        !documented.is_empty(),
+        "docs/kernel-inventory.md was not parsed"
+    );
+
+    let names = exported_names();
+    let inventory = include_str!("data/tenferro-cuda-inventory.tsv");
+    let mut rows = 0;
+    let mut symbols: Vec<String> = Vec::new();
+    for (index, line) in inventory.lines().enumerate() {
+        if line.starts_with('#') || line.is_empty() || line.starts_with("symbol\t") {
+            continue;
+        }
+        let fields: Vec<&str> = line.split('\t').collect();
+        assert_eq!(fields.len(), 6, "line {index}: malformed inventory row");
+        let (symbol, kind, source, line_no, target) =
+            (fields[0], fields[1], fields[2], fields[3], fields[4]);
+        assert!(!fields[5].is_empty(), "{symbol}: the mapping needs a note");
+        assert!(
+            matches!(kind, "entry" | "macro_entry"),
+            "{symbol}: kind {kind} is not a launch, so it cannot be silently dropped"
+        );
+        let parsed_line: u32 = line_no
+            .parse()
+            .unwrap_or_else(|_| panic!("{symbol}: line number malformed"));
+        assert!(parsed_line > 0, "{symbol}: line number must be pinned");
+        let pinned = documented
+            .iter()
+            .find(|(name, ..)| name == symbol)
+            .unwrap_or_else(|| panic!("{symbol}: not in docs/kernel-inventory.md"));
+        assert_eq!(
+            pinned.1, kind,
+            "{symbol}: kind disagrees with the pinned inventory"
+        );
+        assert_eq!(
+            pinned.2, source,
+            "{symbol}: source disagrees with the pinned inventory"
+        );
+        assert_eq!(
+            pinned.3, parsed_line,
+            "{symbol}: line disagrees with the pinned inventory"
+        );
+        if let Some(route) = target.strip_prefix("vendor:") {
+            assert!(
+                VENDOR_ROUTES.contains(&route),
+                "{symbol}: unknown vendor route {route}"
+            );
+        } else {
+            let symbol_name = format!("t4a_cuda_{target}");
+            assert!(
+                names.contains(&symbol_name.as_str()),
+                "{symbol}: target {target} is not an exported entry"
+            );
+        }
+        rows += 1;
+        symbols.push(symbol.to_string());
+    }
+    assert_eq!(
+        rows, PINNED_INVENTORY_ROWS,
+        "the pinned inventory row count changed"
+    );
+    symbols.sort();
+    symbols.dedup();
+    assert_eq!(
+        symbols.len(),
+        PINNED_INVENTORY_ROWS,
+        "the pinned inventory has duplicate symbols"
+    );
+    let documented_names: Vec<String> = documented.iter().map(|row| row.0.clone()).collect();
+    assert_eq!(
+        documented_names, symbols,
+        "docs/kernel-inventory.md and the pinned mapping disagree"
+    );
+
+    // Reverse direction: every fast entry is either launched by the baseline or is
+    // one of the consolidated entries the ABI added for it (`div`: tenferro's
+    // `div_float` is an arm of `t4a_cuda_binary`, so the flat `div` entry is unused).
+    let without_baseline = ["t4a_cuda_div"];
+    for entry in Entry::ALL {
+        let name = entry.name();
+        let target = name.strip_prefix("t4a_cuda_").unwrap();
+        let used = inventory
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .any(|line| line.split('\t').nth(4) == Some(target));
+        assert!(
+            used || without_baseline.contains(&name),
+            "{} has no baseline kernel mapping and is not listed as ABI-introduced",
+            entry.name()
+        );
+    }
+}
+
+#[test]
+fn broadcast_in_dim_plans_the_rank_map() {
+    let out = Layout::compact(&[2, 3]).unwrap();
+    let input = Layout::compact(&[2]).unwrap();
+    // input axis 0 lands on destination axis 0 (extents agree); on axis 1 the input
+    // extent 2 would face destination extent 3, which is refused below.
+    let launch = plan_broadcast_in_dim(DType::F64, &out, 6, &input, 2, &[0]).unwrap();
+    assert_eq!(launch.variant, RankVariant::Fast);
+    // Out-of-range destination axis.
+    assert!(matches!(
+        plan_broadcast_in_dim(DType::F64, &out, 6, &input, 2, &[2]),
+        Err(Error::InvalidAxis)
+    ));
+    // A repeated destination axis (extents agree, so only the duplicate can fail).
+    let input2 = Layout::compact(&[2, 2]).unwrap();
+    assert!(matches!(
+        plan_broadcast_in_dim(DType::F64, &out, 6, &input2, 4, &[0, 0]),
+        Err(Error::DuplicateAxis)
+    ));
+    // An input extent that is neither the destination extent nor one.
+    assert!(matches!(
+        plan_broadcast_in_dim(DType::F64, &out, 6, &input, 2, &[1]),
+        Err(Error::ShapeMismatch)
+    ));
+    let input3 = Layout::compact(&[3]).unwrap();
+    assert!(plan_broadcast_in_dim(DType::F64, &out, 6, &input3, 3, &[1]).is_ok());
+    // The map must name one axis per input axis.
+    assert!(matches!(
+        plan_broadcast_in_dim(DType::F64, &out, 6, &input2, 4, &[0]),
+        Err(Error::RankLength)
+    ));
+    // A scalar input (rank 0) broadcasts to every destination element.
+    let scalar = Layout::compact(&[]).unwrap();
+    assert!(plan_broadcast_in_dim(DType::F64, &out, 6, &scalar, 1, &[]).is_ok());
+    // Rank 9 in the general path, with and without a by-value mirror.
+    let wide_out = WideLayout::compact(vec![2; 9]).unwrap();
+    let wide_in = WideLayout::compact(vec![2; 9]).unwrap();
+    let dims: Vec<i64> = (0..9).collect();
+    let len = wide_out.element_count().unwrap();
+    let launch = plan_broadcast_in_dim(DType::F64, &wide_out, len, &wide_in, len, &dims).unwrap();
+    assert_eq!(launch.variant, RankVariant::General);
+    // An extent product that leaves i64 is refused: the compactness walk or the
+    // element count overflows first, and both are typed errors.
+    let huge = WideLayout::new(vec![1i64 << 40, 1i64 << 40], vec![1, 1i64 << 40], 0).unwrap();
+    let huge_in = WideLayout::compact(vec![1, 1]).unwrap();
+    assert!(matches!(
+        plan_broadcast_in_dim(DType::F64, &huge, 1, &huge_in, 1, &[0, 1]),
+        Err(Error::Overflow) | Err(Error::NotCompact)
+    ));
+}
+
+#[test]
+fn concatenate_copy_plans_the_axis_offset() {
+    let out = Layout::compact(&[2, 5]).unwrap();
+    let input = Layout::compact(&[2, 3]).unwrap();
+    let launch = plan_concatenate_copy(DType::F64, &out, 10, &input, 6, 1, 2).unwrap();
+    assert_eq!(launch.variant, RankVariant::Fast);
+    // The shifted input must fit the destination axis.
+    assert!(matches!(
+        plan_concatenate_copy(DType::F64, &out, 10, &input, 6, 1, 3),
+        Err(Error::ShapeMismatch)
+    ));
+    // A negative offset, an axis outside the rank, and a differing other axis.
+    assert!(matches!(
+        plan_concatenate_copy(DType::F64, &out, 10, &input, 6, 1, -1),
+        Err(Error::NegativeCount)
+    ));
+    assert!(matches!(
+        plan_concatenate_copy(DType::F64, &out, 10, &input, 6, 2, 0),
+        Err(Error::InvalidAxis)
+    ));
+    let other = Layout::compact(&[3, 3]).unwrap();
+    assert!(matches!(
+        plan_concatenate_copy(DType::F64, &out, 10, &other, 9, 1, 0),
+        Err(Error::ShapeMismatch)
+    ));
+    // Rank 16 is general and fits when the shifted axis has room.
+    let wide_out = WideLayout::compact(vec![2; 16]).unwrap();
+    let wide_in = WideLayout::compact(vec![2; 16]).unwrap();
+    let len = wide_in.element_count().unwrap();
+    let out_len = wide_out.element_count().unwrap();
+    let launch =
+        plan_concatenate_copy(DType::F64, &wide_out, out_len, &wide_in, len, 3, 0).unwrap();
+    assert_eq!(launch.variant, RankVariant::General);
+    // Overflow of the shifted end.
+    let edge = wide(&[i64::MAX / 2, 2], &[1, i64::MAX / 2], 0);
+    let edge_in = wide(&[i64::MAX / 2, 2], &[1, i64::MAX / 2], 0);
+    assert!(matches!(
+        plan_concatenate_copy(DType::F64, &edge, 1, &edge_in, 1, 0, 1),
+        Err(Error::Overflow) | Err(Error::ShapeMismatch)
+    ));
+}
+
+#[test]
+fn a_reversed_layout_is_a_strided_movement_plan() {
+    // Reversal: offset' += (extent - 1) * stride, then stride = -stride.
+    let extents = [3i64, 4];
+    let strides = [1i64, 3];
+    let offset = 0i64;
+    let mut reversed_strides = strides;
+    let mut reversed_offset = offset;
+    for axis in 0..extents.len() {
+        reversed_offset += (extents[axis] - 1) * strides[axis];
+        reversed_strides[axis] = -strides[axis];
+    }
+    let compact = Layout::new(&extents, &strides, offset).unwrap();
+    let reversed = Layout::new(&extents, &reversed_strides, reversed_offset).unwrap();
+    let len = compact.element_count().unwrap();
+    assert!(plan_materialize_strided(DType::F64, &reversed, len).is_ok());
+    assert!(plan_contiguous_to_view(DType::F64, &reversed, len).is_ok());
+    // The reversed view visits the compact elements in reverse order per axis.
+    let indices = |layout: &Layout| -> Vec<i64> {
+        let count = layout.element_count().unwrap();
+        (0..count)
+            .map(|flat| {
+                let mut rest = flat;
+                let mut index = layout.offset();
+                for axis in 0..layout.rank() as usize {
+                    let coordinate = rest % layout.extents()[axis];
+                    rest /= layout.extents()[axis];
+                    index += coordinate * layout.strides()[axis];
+                }
+                index
+            })
+            .collect()
+    };
+    let visited: Vec<i64> = indices(&reversed);
+    let forward: Vec<i64> = indices(&compact);
+    assert_eq!(visited.len(), forward.len());
+    let mut sorted = visited.clone();
+    sorted.sort();
+    assert_eq!(
+        sorted, forward,
+        "a reversal is a permutation of the same elements"
+    );
+    assert_ne!(visited, forward);
 }

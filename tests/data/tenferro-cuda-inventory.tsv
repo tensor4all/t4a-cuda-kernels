@@ -1,0 +1,178 @@
+# Pinned CubeCL kernel inventory of tenferro's CUDA library and the ABI target each
+# kernel resolves to. Source: tensor4all/tenferro-rs@14bc1ab933e3c7a9c966e08355670331ab9d993c,
+# crates/tenferro-gpu/src/kernels/**, every `#[cube(launch_unchecked)]` entry, as enumerated in
+# docs/kernel-inventory.md. Columns: symbol, kind, source, line, target, note.
+symbol	kind	source	line	target	note
+abs_complex32	entry	elementwise.rs	496	unary	one unary op tag
+abs_complex64	entry	elementwise.rs	503	unary	one unary op tag
+abs_float	entry	elementwise.rs	488	unary	one unary op tag
+abs_int	entry	elementwise.rs	510	unary	one unary op tag
+add_complex	macro_entry	elementwise.rs	203	add	elementwise add
+add_float	macro_entry	elementwise.rs	203	add	elementwise add
+add_int	entry	elementwise.rs	210	add	wrapping add
+apply_reflector_c32	entry	rank_revealing_qr.rs	499	apply_reflector	reflector application
+apply_reflector_c64	entry	rank_revealing_qr.rs	547	apply_reflector	reflector application
+apply_reflector_real	entry	rank_revealing_qr.rs	453	apply_reflector	reflector application
+axpby_strided_source_complex	macro_entry	elementwise.rs	201	combined_strided	strided axpby
+axpby_strided_source_float	macro_entry	elementwise.rs	200	combined_strided	strided axpby
+broadcast_in_dim_kernel	entry	structural.rs	327	broadcast_in_dim	runtime dimension map
+broadcast_multiply_complex	macro_entry	elementwise.rs	104	combined_strided	strided broadcast multiply
+broadcast_multiply_float	macro_entry	elementwise.rs	103	combined_strided	strided broadcast multiply
+broadcast_multiply_int	entry	elementwise.rs	106	combined_strided	strided broadcast multiply
+clamp_float	entry	elementwise.rs	743	clamp	clamp
+column_norms_c32	entry	rank_revealing_qr.rs	79	column_norms	two-norm per column
+column_norms_c64	entry	rank_revealing_qr.rs	128	column_norms	two-norm per column
+column_norms_real	entry	rank_revealing_qr.rs	32	column_norms	two-norm per column
+compare_float_bool	entry	elementwise.rs	682	compare	ordered comparison
+compare_int_bool	entry	elementwise.rs	704	compare	integer comparison
+complex32_magnitude	entry	kernels.rs	104	unary	ABS on complex
+complex64_magnitude	entry	kernels.rs	111	unary	ABS on complex
+concatenate_copy_kernel	entry	structural.rs	570	concatenate_copy	axis offset
+conj_complex	entry	elementwise.rs	750	unary	CONJ
+contiguous_to_view_kernel	entry	structural.rs	284	contiguous_to_view	strided scatter
+convert_bool_to_complex_raw	entry	structural.rs	391	convert	one of the 42 cast routes
+convert_bool_to_numeric	entry	structural.rs	376	convert	one of the 42 cast routes
+convert_c32_to_f32	entry	structural.rs	462	convert	one of the 42 cast routes
+convert_c32_to_f64	entry	structural.rs	469	convert	one of the 42 cast routes
+convert_c64_to_f32	entry	structural.rs	476	convert	one of the 42 cast routes
+convert_c64_to_f64	entry	structural.rs	483	convert	one of the 42 cast routes
+convert_complex_raw	entry	structural.rs	540	convert	one of the 42 cast routes
+convert_complex_raw_to_bool	entry	structural.rs	406	convert	one of the 42 cast routes
+convert_complex_to_complex	entry	structural.rs	530	convert	one of the 42 cast routes
+convert_complex_to_numeric	entry	structural.rs	399	convert	one of the 42 cast routes
+convert_f32_to_c32_raw	entry	structural.rs	494	convert	one of the 42 cast routes
+convert_f32_to_c64_raw	entry	structural.rs	503	convert	one of the 42 cast routes
+convert_f64_to_c32_raw	entry	structural.rs	512	convert	one of the 42 cast routes
+convert_f64_to_c64_raw	entry	structural.rs	521	convert	one of the 42 cast routes
+convert_float_to_float	entry	structural.rs	351	convert	one of the 42 cast routes
+convert_numeric	entry	structural.rs	358	convert	one of the 42 cast routes
+convert_numeric_to_bool	entry	structural.rs	365	convert	one of the 42 cast routes
+convert_numeric_to_complex_raw	entry	structural.rs	383	convert	one of the 42 cast routes
+copy_bool_kernel	entry	structural.rs	63	copy_exact	bool byte copy
+cos_float	macro_entry	elementwise.rs	456	unary	one unary op tag
+div_complex_parts	entry	elementwise.rs	803	binary	scale-robust complex division
+div_float	macro_entry	elementwise.rs	208	binary	elementwise division
+div_int_checked	entry	elementwise.rs	401	binary	checked integer division
+dynamic_slice_kernel	entry	indexing.rs	193	dynamic_slice	device-resident starts
+embed_diagonal_copy_kernel	entry	diagonal.rs	33	embed_diagonal_copy	diagonal embedding
+erf_float	entry	elementwise.rs	481	unary	one unary op tag
+exp_float	macro_entry	elementwise.rs	453	unary	one unary op tag
+expm1_float	entry	elementwise.rs	467	unary	one unary op tag
+extract_diagonal_kernel	entry	diagonal.rs	5	extract_diagonal	diagonal gather
+extract_invalid_float_index_kernel	entry	indexing.rs	47	extract_invalid_float_index	offending index
+extract_invalid_real_cast	entry	structural.rs	447	extract_invalid_real_cast	offending sample
+extract_r	entry	rank_revealing_qr.rs	609	extract_r	upper triangle extraction
+fill_one_kernel	entry	kernels.rs	72	fill_one	strided one fill
+fill_zero_kernel	entry	structural.rs	27	fill_zero	flat zero fill
+fill_zero_view_kernel	entry	structural.rs	40	fill_zero_view	strided zero fill
+gather_kernel	entry	indexing.rs	263	gather	XLA-style gather
+householder_explicit_v	entry	kernels.rs	118	householder_explicit_v	rank-2 explicit V
+householder_from_factors_assemble	entry	kernels.rs	314	householder_assemble	assembled packed form
+householder_q_columns_identity	entry	kernels.rs	134	identity_shifted	identity columns from a start offset
+init_float_index_validation_flag	entry	indexing.rs	12	init_validation	flag reset
+initialize_permutation	entry	rank_revealing_qr.rs	24	initialize_permutation	identity permutation
+initialize_q	entry	rank_revealing_qr.rs	595	identity_shifted	identity columns from a start offset
+log1p_float	entry	elementwise.rs	474	unary	one unary op tag
+log_float	macro_entry	elementwise.rs	454	unary	one unary op tag
+lu_apply_pivots	entry	kernels.rs	441	lu_apply_pivots	pivot application
+lu_extract_outputs	entry	kernels.rs	344	lu_extract_outputs	P, L, U and parity extraction
+lu_parity	entry	kernels.rs	419	lu_parity	pivot parity
+materialize_strided_comptime_layout_kernel	entry	structural.rs	133	materialize_strided	strided gather with a compiled layout
+materialize_strided_kernel	entry	structural.rs	102	materialize_strided	strided gather
+matrix_adjoint_complex	entry	kernels.rs	92	matrix_adjoint	batched conjugate adjoint
+matrix_adjoint_real	entry	kernels.rs	80	matrix_adjoint	batched adjoint
+maximum_float	entry	elementwise.rs	569	binary	ordered extrema (NaN propagating)
+maximum_int	entry	elementwise.rs	576	binary	ordered extrema (NaN propagating)
+minimum_float	entry	elementwise.rs	585	binary	ordered extrema (NaN propagating)
+minimum_int	entry	elementwise.rs	592	binary	ordered extrema (NaN propagating)
+mul_complex	macro_entry	elementwise.rs	205	mul	elementwise mul
+mul_float	macro_entry	elementwise.rs	205	mul	elementwise mul
+mul_int	entry	elementwise.rs	224	mul	wrapping mul
+neg_complex	macro_entry	elementwise.rs	446	unary	one unary op tag
+neg_float	macro_entry	elementwise.rs	446	unary	one unary op tag
+neg_int	entry	elementwise.rs	447	unary	one unary op tag
+pad_kernel	entry	indexing.rs	215	pad	edge and interior padding
+pow_float	entry	elementwise.rs	601	binary	POW
+pow_int_checked	entry	elementwise.rs	608	binary	checked integer power
+prefix_rank_c32	entry	rank_revealing_qr.rs	676	prefix_rank	numerical rank
+prefix_rank_c64	entry	rank_revealing_qr.rs	720	prefix_rank	numerical rank
+prefix_rank_real	entry	rank_revealing_qr.rs	630	prefix_rank	numerical rank
+qr_apply_phase_complex	entry	kernels.rs	275	qr_apply_phase	in-place phase scaling
+qr_apply_phase_real	entry	kernels.rs	252	qr_apply_phase	in-place phase scaling
+qr_phase_c32	entry	kernels.rs	232	qr_phase	phase vector
+qr_phase_c64	entry	kernels.rs	242	qr_phase	phase vector
+qr_phase_real	entry	kernels.rs	216	qr_phase	phase vector
+reduce_max_float	entry	kernels.rs	1116	reduce	sum/prod/sum_squares/max/min, unit or plane
+reduce_max_float_chunked	entry	kernels.rs	623	reduce_partials	chunked split pass 1
+reduce_max_float_plane	entry	kernels.rs	1187	reduce	sum/prod/sum_squares/max/min, unit or plane
+reduce_max_int	entry	kernels.rs	1151	reduce	sum/prod/sum_squares/max/min, unit or plane
+reduce_max_int_chunked	entry	kernels.rs	747	reduce_partials	chunked split pass 1
+reduce_max_int_plane	entry	kernels.rs	1235	reduce	sum/prod/sum_squares/max/min, unit or plane
+reduce_min_float	entry	kernels.rs	1278	reduce	sum/prod/sum_squares/max/min, unit or plane
+reduce_min_float_chunked	entry	kernels.rs	685	reduce_partials	chunked split pass 1
+reduce_min_float_plane	entry	kernels.rs	1349	reduce	sum/prod/sum_squares/max/min, unit or plane
+reduce_min_int	entry	kernels.rs	1313	reduce	sum/prod/sum_squares/max/min, unit or plane
+reduce_min_int_chunked	entry	kernels.rs	804	reduce_partials	chunked split pass 1
+reduce_min_int_plane	entry	kernels.rs	1397	reduce	sum/prod/sum_squares/max/min, unit or plane
+reduce_prod_complex	macro_entry	kernels.rs	63	reduce	sum/prod/sum_squares/max/min, unit or plane
+reduce_prod_complex_chunked	entry	kernels.rs	394	reduce_partials	chunked split pass 1
+reduce_prod_complex_plane	entry	kernels.rs	945	reduce	sum/prod/sum_squares/max/min, unit or plane
+reduce_prod_float	macro_entry	kernels.rs	62	reduce	sum/prod/sum_squares/max/min, unit or plane
+reduce_prod_float_chunked	entry	kernels.rs	338	reduce_partials	chunked split pass 1
+reduce_prod_float_plane	entry	kernels.rs	903	reduce	sum/prod/sum_squares/max/min, unit or plane
+reduce_prod_int	entry	kernels.rs	140	reduce	sum/prod/sum_squares/max/min, unit or plane
+reduce_prod_int_chunked	entry	kernels.rs	567	reduce_partials	chunked split pass 1
+reduce_prod_int_plane	entry	kernels.rs	1074	reduce	sum/prod/sum_squares/max/min, unit or plane
+reduce_sum_complex	macro_entry	kernels.rs	61	reduce	sum/prod/sum_squares/max/min, unit or plane
+reduce_sum_complex_chunked	entry	kernels.rs	282	reduce_partials	chunked split pass 1
+reduce_sum_complex_plane	entry	kernels.rs	861	reduce	sum/prod/sum_squares/max/min, unit or plane
+reduce_sum_float	macro_entry	kernels.rs	60	reduce	sum/prod/sum_squares/max/min, unit or plane
+reduce_sum_float_chunked	entry	kernels.rs	223	reduce_partials	chunked split pass 1
+reduce_sum_float_plane	entry	kernels.rs	175	reduce	sum/prod/sum_squares/max/min, unit or plane
+reduce_sum_int	entry	kernels.rs	105	reduce	sum/prod/sum_squares/max/min, unit or plane
+reduce_sum_int_chunked	entry	kernels.rs	511	reduce_partials	chunked split pass 1
+reduce_sum_int_plane	entry	kernels.rs	1032	reduce	sum/prod/sum_squares/max/min, unit or plane
+reduce_sum_squares_float	entry	kernels.rs	65	reduce	sum/prod/sum_squares/max/min, unit or plane
+reduce_sum_squares_float_chunked	entry	kernels.rs	450	reduce_partials	chunked split pass 1
+reduce_sum_squares_float_plane	entry	kernels.rs	987	reduce	sum/prod/sum_squares/max/min, unit or plane
+reflector_c32	entry	rank_revealing_qr.rs	335	reflector	Householder reflector
+reflector_c64	entry	rank_revealing_qr.rs	394	reflector	Householder reflector
+reflector_real	entry	rank_revealing_qr.rs	265	reflector	Householder reflector
+rem_float	entry	elementwise.rs	419	binary	fmod
+rem_int_checked	entry	elementwise.rs	428	binary	checked remainder
+reverse_kernel	entry	structural.rs	547	materialize_strided	reversed layout: stride negated and offset rebased
+rsqrt_float	entry	elementwise.rs	460	unary	one unary op tag
+scalar_div_float	macro_entry	elementwise.rs	254	binary	DIV with a scalar rhs
+scalar_div_int_checked	entry	elementwise.rs	332	binary	checked scalar division
+scalar_pow_float	macro_entry	elementwise.rs	255	binary	POW with a scalar lhs
+scalar_pow_int_checked	entry	elementwise.rs	637	binary	checked scalar power
+scalar_real_complex_binary	entry	elementwise.rs	264	binary	mixed real/complex multiply or divide
+scalar_rem_float	macro_entry	elementwise.rs	262	binary	REM
+scalar_rem_int_checked	entry	elementwise.rs	366	binary	checked scalar remainder
+scale_in_place_complex_kernel	entry	structural.rs	91	binary	MUL with a scalar rhs, out aliases lhs
+scale_in_place_float_kernel	entry	structural.rs	73	binary	MUL with a scalar rhs, out aliases lhs
+scatter_complex_kernel	entry	indexing.rs	455	scatter_add	additive scatter
+scatter_copy_kernel	entry	indexing.rs	343	copy_exact	flat copy that initializes the destination for a copy-mode scatter
+scatter_float_kernel	entry	indexing.rs	350	scatter_add	additive scatter
+select_bool_float	entry	elementwise.rs	721	select	predicated select
+select_bool_int	entry	elementwise.rs	732	select	predicated select
+select_pivot	entry	rank_revealing_qr.rs	177	select_pivot	pivot selection
+sign_complex	entry	elementwise.rs	541	unary	one unary op tag
+sign_float	entry	elementwise.rs	523	unary	one unary op tag
+sign_int	entry	elementwise.rs	554	unary	one unary op tag
+sin_float	macro_entry	elementwise.rs	455	unary	one unary op tag
+slice_kernel	entry	indexing.rs	174	slice	static starts and steps
+sqrt_float	macro_entry	elementwise.rs	458	unary	one unary op tag
+strided_to_strided_kernel	entry	structural.rs	299	strided_to_strided	same extents, two stride sets
+sub_complex	macro_entry	elementwise.rs	204	sub	elementwise sub
+sub_float	macro_entry	elementwise.rs	204	sub	elementwise sub
+sub_int	entry	elementwise.rs	217	sub	wrapping sub
+swap_columns	entry	rank_revealing_qr.rs	232	swap_columns	column swap
+tanh_float	macro_entry	elementwise.rs	457	unary	one unary op tag
+tiled_transpose_comptime_layout_kernel	entry	structural.rs	227	tiled_transpose	rank-2 tile config with a compiled layout
+tiled_transpose_kernel	entry	structural.rs	164	tiled_transpose	rank-2 tile config
+tril_kernel	entry	diagonal.rs	61	tril	lower triangle
+triu_kernel	entry	diagonal.rs	75	triu	upper triangle
+upper_trapezoidal_violation	entry	kernels.rs	297	upper_trapezoidal_violation	violation flags
+validate_float_indices_kernel	entry	indexing.rs	22	validate_float_indices	index validation
+validate_real_cast	entry	structural.rs	419	validate_real_cast	sampled range validation

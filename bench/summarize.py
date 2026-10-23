@@ -480,9 +480,11 @@ def pair_case(case, base_kernels, cand_kernels, reps):
                     )
                 )
             elif not present:
-                problems.append(
-                    "%s: neither side submits the declared %s row" % (case, candidate)
-                )
+                # A declared row that neither side submits is not part of this
+                # case (a reduction declares both its split and its single-pass
+                # combine rows; exactly one shape runs). Unmapped kernels are
+                # caught by the two loops above, so this is not a silent skip.
+                continue
         elif not cand_per_rep:
             problems.append("%s: declared helper %s is missing" % (case, candidate))
 

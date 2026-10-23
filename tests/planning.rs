@@ -3228,3 +3228,68 @@ fn a_reversed_layout_is_a_strided_movement_plan() {
     );
     assert_ne!(visited, forward);
 }
+
+// --- Exposed kernel sources ---------------------------------------------------
+
+#[test]
+fn the_exposed_sources_match_the_files() {
+    use std::fs;
+    use t4a_cuda_kernels::source::{compose, module_of, ABI_HEADER, MODULES};
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let header = fs::read_to_string(root.join("cuda/include/t4a/abi.cuh")).expect("header");
+    assert_eq!(ABI_HEADER, header, "the embedded header must be the file");
+
+    let mut files: Vec<String> = fs::read_dir(root.join("cuda/src"))
+        .expect("cuda/src")
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            (path.extension()? == "cu").then(|| path.file_stem()?.to_str().map(str::to_string))?
+        })
+        .collect();
+    files.sort();
+    let mut modules: Vec<String> = MODULES
+        .iter()
+        .map(|module| module.name.to_string())
+        .collect();
+    modules.sort();
+    assert_eq!(
+        modules, files,
+        "every translation unit is exposed exactly once"
+    );
+
+    for module in MODULES {
+        let file = fs::read_to_string(root.join(format!("cuda/src/{}.cu", module.name)))
+            .expect("module source");
+        assert_eq!(module.source, file, "{} differs from its file", module.name);
+        let composed = compose(module);
+        assert!(composed.starts_with(ABI_HEADER));
+        assert!(!composed.contains(t4a_cuda_kernels::source::INCLUDE_LINE));
+        // Everything except the include line is carried over verbatim.
+        for line in module.source.lines() {
+            if line.trim() == t4a_cuda_kernels::source::INCLUDE_LINE {
+                continue;
+            }
+            assert!(composed.contains(line), "{} lost a line", module.name);
+        }
+        assert!(!module.source.is_empty());
+    }
+
+    // Every entry resolves to the module that exports it, and only that one.
+    for entry in Entry::ALL {
+        let module = module_of(entry).unwrap_or_else(|| panic!("{} has no module", entry.name()));
+        let declaration = format!("{}(", entry.name());
+        assert!(module.source.contains(&declaration));
+        let owners: Vec<&str> = MODULES
+            .iter()
+            .filter(|candidate| candidate.source.contains(&declaration))
+            .map(|candidate| candidate.name)
+            .collect();
+        assert_eq!(
+            owners,
+            vec![module.name],
+            "{} is exported twice",
+            entry.name()
+        );
+    }
+}

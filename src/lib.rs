@@ -28,6 +28,105 @@ pub use fusion::{
     MAX_FUSION_PARAMETER_BYTES,
 };
 
+/// The kernel sources a consumer compiles with NVRTC.
+///
+/// The crate is the single source of truth for its CUDA text: a consumer that prepares
+/// artifacts through NVRTC needs the exact header and translation units this ABI
+/// documents, not a copy that can drift. Compose one module as the header followed by
+/// the module's source, and compile it with the ABI's compiler options.
+pub mod source {
+    /// The shared ABI header, included by every translation unit.
+    pub const ABI_HEADER: &str = include_str!("../cuda/include/t4a/abi.cuh");
+
+    /// One translation unit: the module name and its source text.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Module {
+        /// Module name, matching `cuda/src/<name>.cu`.
+        pub name: &'static str,
+        /// The module's source text.
+        pub source: &'static str,
+    }
+
+    /// Every translation unit the entries are exported from.
+    pub const MODULES: &[Module] = &[
+        Module {
+            name: "arithmetic",
+            source: include_str!("../cuda/src/arithmetic.cu"),
+        },
+        Module {
+            name: "convert",
+            source: include_str!("../cuda/src/convert.cu"),
+        },
+        Module {
+            name: "diagonal",
+            source: include_str!("../cuda/src/diagonal.cu"),
+        },
+        Module {
+            name: "elementwise",
+            source: include_str!("../cuda/src/elementwise.cu"),
+        },
+        Module {
+            name: "gather_scatter",
+            source: include_str!("../cuda/src/gather_scatter.cu"),
+        },
+        Module {
+            name: "linalg_aux",
+            source: include_str!("../cuda/src/linalg_aux.cu"),
+        },
+        Module {
+            name: "movement",
+            source: include_str!("../cuda/src/movement.cu"),
+        },
+        Module {
+            name: "reduce",
+            source: include_str!("../cuda/src/reduce.cu"),
+        },
+        Module {
+            name: "rrqr",
+            source: include_str!("../cuda/src/rrqr.cu"),
+        },
+        Module {
+            name: "validation",
+            source: include_str!("../cuda/src/validation.cu"),
+        },
+        Module {
+            name: "window",
+            source: include_str!("../cuda/src/window.cu"),
+        },
+    ];
+
+    /// The module that exports `entry`, from [`crate::Entry::ALL`].
+    pub fn module_of(entry: crate::Entry) -> Option<&'static Module> {
+        let symbol = entry.name();
+        // The declaration may carry a launch-bounds attribute between `void` and the
+        // name, so the symbol alone identifies its module.
+        MODULES
+            .iter()
+            .find(|module| module.source.contains(&format!("{symbol}(")))
+    }
+
+    /// The include line every translation unit starts with.
+    pub const INCLUDE_LINE: &str = "#include <t4a/abi.cuh>";
+
+    /// One module's source preceded by the shared header, ready for NVRTC.
+    ///
+    /// NVRTC is handed in-memory sources, so the header is prepended and the module's
+    /// own include line removed; the composition is otherwise the file text.
+    pub fn compose(module: &Module) -> String {
+        let mut text = String::with_capacity(ABI_HEADER.len() + module.source.len() + 1);
+        text.push_str(ABI_HEADER);
+        text.push('\n');
+        for line in module.source.lines() {
+            if line.trim() == INCLUDE_LINE {
+                continue;
+            }
+            text.push_str(line);
+            text.push('\n');
+        }
+        text
+    }
+}
+
 /// Rank limit of the fixed-array fast path.
 ///
 /// [`Layout`] (the `Copy`, eight-array form), [`CLayout`] and the revision 1-8

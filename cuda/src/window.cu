@@ -147,6 +147,113 @@ __device__ __forceinline__ void pad_body(void* out_ptr,
       in_bounds ? static_cast<const T*>(in_ptr)[in_index] : t4a_cuda_zero<T>();
 }
 
+// --- Revision 9 general path ---------------------------------------------------
+//
+// The same formulas with pointer geometry and a walk bounded by the operand's own
+// runtime rank, so any rank is representable. No per-axis array, no masked select
+// and no unrolled T4A_CUDA_MAX_RANK bound.
+
+template <typename T>
+__device__ __forceinline__ void slice_body_any(void* out_ptr,
+                                               const void* in_ptr,
+                                               const t4a_cuda_layout_any& out_layout,
+                                               const t4a_cuda_layout_any& in_layout,
+                                               const t4a_cuda_axis_values_any& starts,
+                                               const t4a_cuda_axis_values_any& steps,
+                                               long long len) {
+  long long flat;
+  if (!t4a_cuda_tail_index(&flat, len)) {
+    return;
+  }
+  long long in_index = in_layout.offset;
+  long long rest = flat;
+  for (int axis = 0; axis < out_layout.rank; ++axis) {
+    const long long extent = out_layout.extents[axis];
+    const long long coordinate = rest % extent;
+    rest /= extent;
+    const long long in_coordinate =
+        t4a_cuda_axis_value_any(starts.values, axis) +
+        coordinate * t4a_cuda_axis_value_any(steps.values, axis);
+    in_index += in_coordinate * in_layout.strides[axis];
+  }
+  static_cast<T*>(out_ptr)[flat] = static_cast<const T*>(in_ptr)[in_index];
+}
+
+template <typename T, typename I>
+__device__ __forceinline__ void dynamic_slice_body_any(void* out_ptr,
+                                                       const void* in_ptr,
+                                                       const void* starts_ptr,
+                                                       const t4a_cuda_layout_any& out_layout,
+                                                       const t4a_cuda_layout_any& in_layout,
+                                                       long long len) {
+  long long flat;
+  if (!t4a_cuda_tail_index(&flat, len)) {
+    return;
+  }
+  const I* starts = static_cast<const I*>(starts_ptr);
+  long long in_index = in_layout.offset;
+  long long rest = flat;
+  for (int axis = 0; axis < out_layout.rank; ++axis) {
+    const long long extent = out_layout.extents[axis];
+    const long long coordinate = rest % extent;
+    rest /= extent;
+    // The window size is the output extent on this axis.
+    const long long clamped =
+        clamp_window_start<I>(starts[axis], in_layout.extents[axis], extent);
+    in_index += (clamped + coordinate) * in_layout.strides[axis];
+  }
+  static_cast<T*>(out_ptr)[flat] = static_cast<const T*>(in_ptr)[in_index];
+}
+
+template <typename T>
+__device__ __forceinline__ void pad_body_any(void* out_ptr,
+                                             const void* in_ptr,
+                                             const t4a_cuda_layout_any& out_layout,
+                                             const t4a_cuda_layout_any& in_layout,
+                                             const t4a_cuda_axis_values_any& edge_low,
+                                             const t4a_cuda_axis_values_any& interior,
+                                             long long len) {
+  long long flat;
+  if (!t4a_cuda_tail_index(&flat, len)) {
+    return;
+  }
+  bool in_bounds = true;
+  long long in_index = in_layout.offset;
+  long long rest = flat;
+  for (int axis = 0; axis < out_layout.rank; ++axis) {
+    const long long out_pos = rest % out_layout.extents[axis];
+    rest /= out_layout.extents[axis];
+
+    const long long low = t4a_cuda_axis_value_any(edge_low.values, axis);
+    const unsigned long long low_bits = static_cast<unsigned long long>(low);
+    const unsigned long long low_magnitude = low < 0 ? 0ULL - low_bits : low_bits;
+    const unsigned long long spacing = static_cast<unsigned long long>(
+        t4a_cuda_axis_value_any(interior.values, axis) + 1);
+    const unsigned long long position = static_cast<unsigned long long>(out_pos);
+
+    unsigned long long shifted = 0;
+    if (low < 0) {
+      shifted = position + low_magnitude;
+    } else if (position < low_magnitude) {
+      in_bounds = false;
+    } else {
+      shifted = position - low_magnitude;
+    }
+    if (shifted % spacing != 0) {
+      in_bounds = false;
+    } else {
+      const unsigned long long candidate = shifted / spacing;
+      if (candidate >= static_cast<unsigned long long>(in_layout.extents[axis])) {
+        in_bounds = false;
+      } else {
+        in_index += static_cast<long long>(candidate) * in_layout.strides[axis];
+      }
+    }
+  }
+  static_cast<T*>(out_ptr)[flat] =
+      in_bounds ? static_cast<const T*>(in_ptr)[in_index] : t4a_cuda_zero<T>();
+}
+
 }  // namespace
 
 extern "C" __global__ void t4a_cuda_slice(void* out, const void* in, int dtype,
@@ -198,6 +305,62 @@ extern "C" __global__ void t4a_cuda_pad(void* out, const void* in, int dtype,
   // checks; the kernel never reads it.
   (void)edge_high;
 #define T4A_BODY(T) pad_body<T>(out, in, out_layout, in_layout, edge_low, interior, len)
+  T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+}
+
+extern "C" __global__ void t4a_cuda_slice_any(void* out, const void* in, int dtype,
+                                              t4a_cuda_layout_any out_layout,
+                                              t4a_cuda_layout_any in_layout,
+                                              t4a_cuda_axis_values_any starts,
+                                              t4a_cuda_axis_values_any steps, long long len) {
+#define T4A_BODY(T) slice_body_any<T>(out, in, out_layout, in_layout, starts, steps, len)
+  T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+}
+
+extern "C" __global__ void t4a_cuda_dynamic_slice_any(void* out, const void* in,
+                                                      const void* starts, int dtype,
+                                                      int index_dtype,
+                                                      t4a_cuda_layout_any out_layout,
+                                                      t4a_cuda_layout_any in_layout,
+                                                      long long len) {
+  switch (index_dtype) {
+    case T4A_CUDA_F32:
+#define T4A_BODY(T) dynamic_slice_body_any<T, float>(out, in, starts, out_layout, in_layout, len)
+      T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+      break;
+    case T4A_CUDA_F64:
+#define T4A_BODY(T) dynamic_slice_body_any<T, double>(out, in, starts, out_layout, in_layout, len)
+      T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+      break;
+    case T4A_CUDA_I32:
+#define T4A_BODY(T) dynamic_slice_body_any<T, int>(out, in, starts, out_layout, in_layout, len)
+      T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+      break;
+    case T4A_CUDA_I64:
+#define T4A_BODY(T) \
+  dynamic_slice_body_any<T, long long>(out, in, starts, out_layout, in_layout, len)
+      T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+      break;
+    default:
+      break;
+  }
+}
+
+extern "C" __global__ void t4a_cuda_pad_any(void* out, const void* in, int dtype,
+                                            t4a_cuda_layout_any out_layout,
+                                            t4a_cuda_layout_any in_layout,
+                                            t4a_cuda_axis_values_any edge_low,
+                                            t4a_cuda_axis_values_any interior, long long len) {
+  // The general path takes only the two axis-value vectors the body reads;
+  // `edge_high` is a by-value extent input that the facade folds into
+  // `out_layout`.
+#define T4A_BODY(T) pad_body_any<T>(out, in, out_layout, in_layout, edge_low, interior, len)
   T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
 #undef T4A_BODY
 }

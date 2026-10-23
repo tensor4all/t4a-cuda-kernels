@@ -583,3 +583,443 @@ extern "C" __global__ void t4a_cuda_lu_apply_pivots(void* out, const void* input
   T4A_CUDA_NUMERIC_DTYPE_SWITCH(dtype, T4A_LU_APPLY_PIVOTS_CASE);
 }
 #undef T4A_LU_APPLY_PIVOTS_CASE
+
+// --- Revision 9 general path -----------------------------------------------
+// Pointer geometry and runtime-bounded walks. The bodies and exports above
+// are unchanged.
+
+
+__device__ __forceinline__ long long batch_linear_index_any(long long flat,
+                                                       const t4a_cuda_layout_any& layout) {
+  long long batch = 0;
+  long long stride = 1;
+  for (int axis = 0; axis < layout.rank; ++axis) {
+    const long long extent = layout.extents[axis];
+    const long long coordinate = flat % extent;
+    flat /= extent;
+    if (axis >= 2) {
+      batch += coordinate * stride;
+      stride *= extent;
+    }
+  }
+  return batch;
+}
+
+__device__ __forceinline__ long long batch_axis_offset_any(long long flat,
+                                                       const t4a_cuda_layout_any& out_layout,
+                                                       const t4a_cuda_layout_any& target_layout) {
+  long long remaining = flat / (out_layout.extents[0] * out_layout.extents[1]);
+  long long offset = 0;
+  for (int axis = 2; axis < out_layout.rank; ++axis) {
+    const long long extent = out_layout.extents[axis];
+    const long long coordinate = remaining % extent;
+    remaining /= extent;
+    offset += coordinate * target_layout.strides[axis];
+  }
+  return offset;
+}
+
+template <typename T>
+__device__ __forceinline__ void fill_one_body_any(void* out, t4a_cuda_layout_any layout, long long len) {
+  long long flat;
+  if (!t4a_cuda_tail_index(&flat, len)) {
+    return;
+  }
+  const long long index =
+      t4a_cuda_decode_any(flat, layout.rank, layout.extents, layout.strides, layout.offset);
+  static_cast<T*>(out)[index] = t4a_cuda_one<T>();
+}
+
+template <typename T>
+__device__ __forceinline__ void matrix_adjoint_body_any(void* out, const void* v,
+                                                    t4a_cuda_layout_any out_layout,
+                                                    t4a_cuda_layout_any v_layout, long long len) {
+  long long flat;
+  if (!t4a_cuda_tail_index(&flat, len)) {
+    return;
+  }
+  long long out_index = out_layout.offset;
+  long long v_index = v_layout.offset;
+  for (int axis = 0; axis < out_layout.rank; ++axis) {
+    const long long extent = out_layout.extents[axis];
+    const long long coordinate = flat % extent;
+    flat /= extent;
+    out_index += coordinate * out_layout.strides[axis];
+    if (axis == 0) {
+      v_index += coordinate * v_layout.strides[1];
+    } else if (axis == 1) {
+      v_index += coordinate * v_layout.strides[0];
+    } else {
+      v_index += coordinate * v_layout.strides[axis];
+    }
+  }
+  static_cast<T*>(out)[out_index] = t4a_cuda_conj<T>(static_cast<const T*>(v)[v_index]);
+}
+
+template <typename T>
+__device__ __forceinline__ void explicit_v_body_any(void* out, const void* packed,
+                                                t4a_cuda_layout_any out_layout,
+                                                t4a_cuda_layout_any packed_layout, long long len) {
+  long long flat;
+  if (!t4a_cuda_tail_index(&flat, len)) {
+    return;
+  }
+  const long long row = flat % out_layout.extents[0];
+  const long long col = (flat / out_layout.extents[0]) % out_layout.extents[1];
+  const long long out_index =
+      out_layout.offset + row * out_layout.strides[0] + col * out_layout.strides[1];
+  T value;
+  if (row < col) {
+    value = t4a_cuda_zero<T>();
+  } else if (row == col) {
+    value = t4a_cuda_one<T>();
+  } else {
+    value = static_cast<const T*>(packed)[packed_layout.offset +
+                                           row * packed_layout.strides[0] +
+                                           col * packed_layout.strides[1]];
+  }
+  static_cast<T*>(out)[out_index] = value;
+}
+
+template <typename T>
+__device__ __forceinline__ void identity_shifted_body_any(void* out, t4a_cuda_layout_any layout,
+                                                      long long len, long long start) {
+  long long flat;
+  if (!t4a_cuda_tail_index(&flat, len)) {
+    return;
+  }
+  const long long row = flat % layout.extents[0];
+  const long long col = (flat / layout.extents[0]) % layout.extents[1];
+  const long long index =
+      t4a_cuda_decode_any(flat, layout.rank, layout.extents, layout.strides, layout.offset);
+  static_cast<T*>(out)[index] = row == start + col ? t4a_cuda_one<T>() : t4a_cuda_zero<T>();
+}
+
+template <typename T>
+__device__ __forceinline__ void qr_phase_body_any(void* phase, const void* r,
+                                              t4a_cuda_layout_any phase_layout,
+                                              t4a_cuda_layout_any r_layout, long long len) {
+  long long flat;
+  if (!t4a_cuda_tail_index(&flat, len)) {
+    return;
+  }
+  const long long index = flat % phase_layout.extents[0];
+  long long remaining = flat / phase_layout.extents[0];
+  long long phase_index = phase_layout.offset + index * phase_layout.strides[0];
+  long long r_index =
+      r_layout.offset + index * r_layout.strides[0] + index * r_layout.strides[1];
+  for (int axis = 1; axis < phase_layout.rank; ++axis) {
+    const long long extent = phase_layout.extents[axis];
+    const long long coordinate = remaining % extent;
+    remaining /= extent;
+    phase_index += coordinate * phase_layout.strides[axis];
+    r_index += coordinate * r_layout.strides[axis + 1];
+  }
+  static_cast<T*>(phase)[phase_index] = positive_phase(static_cast<const T*>(r)[r_index]);
+}
+
+template <typename T>
+__device__ __forceinline__ void qr_apply_phase_body_any(void* q, void* r, const void* phase,
+                                                    t4a_cuda_layout_any q_layout,
+                                                    t4a_cuda_layout_any r_layout,
+                                                    t4a_cuda_layout_any phase_layout,
+                                                    long long q_start) {
+  const long long q_count = t4a_cuda_logical_count_any(q_layout);
+  const long long r_count = t4a_cuda_logical_count_any(r_layout);
+  long long flat;
+  if (!t4a_cuda_tail_index(&flat, larger(q_count, r_count))) {
+    return;
+  }
+  if (flat < q_count) {
+    const long long column = (flat / q_layout.extents[0]) % q_layout.extents[1];
+    const long long index = q_start + column;
+    if (index < phase_layout.extents[0]) {
+      long long remaining = flat / (q_layout.extents[0] * q_layout.extents[1]);
+      const long long q_index = t4a_cuda_decode_any(flat, q_layout.rank, q_layout.extents,
+                                                   q_layout.strides, q_layout.offset);
+      long long phase_index = phase_layout.offset + index * phase_layout.strides[0];
+      for (int axis = 2; axis < q_layout.rank; ++axis) {
+        const long long extent = q_layout.extents[axis];
+        const long long coordinate = remaining % extent;
+        remaining /= extent;
+        phase_index += coordinate * phase_layout.strides[axis - 1];
+      }
+      T* q_ptr = static_cast<T*>(q);
+      q_ptr[q_index] = t4a_cuda_mul<T>(q_ptr[q_index], static_cast<const T*>(phase)[phase_index]);
+    }
+  }
+  if (flat < r_count) {
+    const long long index = flat % r_layout.extents[0];
+    long long remaining = flat / (r_layout.extents[0] * r_layout.extents[1]);
+    const long long r_index = t4a_cuda_decode_any(flat, r_layout.rank, r_layout.extents,
+                                                 r_layout.strides, r_layout.offset);
+    long long phase_index = phase_layout.offset + index * phase_layout.strides[0];
+    for (int axis = 2; axis < r_layout.rank; ++axis) {
+      const long long extent = r_layout.extents[axis];
+      const long long coordinate = remaining % extent;
+      remaining /= extent;
+      phase_index += coordinate * phase_layout.strides[axis - 1];
+    }
+    T* r_ptr = static_cast<T*>(r);
+    r_ptr[r_index] = t4a_cuda_mul<T>(r_ptr[r_index],
+                                    t4a_cuda_conj<T>(static_cast<const T*>(phase)[phase_index]));
+  }
+}
+
+template <typename T>
+__device__ __forceinline__ void violation_body_any(void* violation, const void* input,
+                                                t4a_cuda_layout_any violation_layout,
+                                                t4a_cuda_layout_any input_layout, long long len) {
+  long long flat;
+  if (!t4a_cuda_tail_index(&flat, len)) {
+    return;
+  }
+  const long long row = flat % violation_layout.extents[0];
+  const long long col = (flat / violation_layout.extents[0]) % violation_layout.extents[1];
+  const long long violation_index =
+      t4a_cuda_decode_any(flat, violation_layout.rank, violation_layout.extents,
+                      violation_layout.strides, violation_layout.offset);
+  const long long input_index = t4a_cuda_decode_any(flat, input_layout.rank, input_layout.extents,
+                                                input_layout.strides, input_layout.offset);
+  const T value = static_cast<const T*>(input)[input_index];
+  static_cast<int*>(violation)[violation_index] = row > col && nonzero<T>(value) ? 1 : 0;
+}
+
+template <typename T>
+__device__ __forceinline__ void assemble_body_any(void* packed_out, void* coeff_out,
+                                               const void* packed_q, const void* coeff_q,
+                                               const void* folded_r, t4a_cuda_layout_any out_layout,
+                                               long long out_len, t4a_cuda_layout_any q_layout,
+                                               t4a_cuda_layout_any r_layout, long long coeff_out_len,
+                                               long long factor_width) {
+  long long flat;
+  if (!t4a_cuda_tail_index(&flat, larger(out_len, coeff_out_len))) {
+    return;
+  }
+  if (flat < out_len) {
+    const long long row = flat % out_layout.extents[0];
+    const long long col = (flat / out_layout.extents[0]) % out_layout.extents[1];
+    const long long out_index =
+        out_layout.offset + row * out_layout.strides[0] + col * out_layout.strides[1];
+    T value;
+    if (row < factor_width && row <= col) {
+      value = static_cast<const T*>(folded_r)[r_layout.offset + row * r_layout.strides[0] +
+                                              col * r_layout.strides[1]];
+    } else if (col < factor_width && row > col) {
+      value = static_cast<const T*>(packed_q)[q_layout.offset + row * q_layout.strides[0] +
+                                              col * q_layout.strides[1]];
+    } else {
+      value = t4a_cuda_zero<T>();
+    }
+    static_cast<T*>(packed_out)[out_index] = value;
+  }
+  if (flat < coeff_out_len) {
+    static_cast<T*>(coeff_out)[flat] = flat < factor_width
+                                           ? static_cast<const T*>(coeff_q)[flat]
+                                           : t4a_cuda_zero<T>();
+  }
+}
+
+template <typename T>
+__device__ __forceinline__ void lu_extract_body_any(void* p_out, void* l_out, void* u_out,
+                                                 void* parity_out, const void* work,
+                                                 const void* pivots, t4a_cuda_layout_any p_layout,
+                                                 long long p_len, t4a_cuda_layout_any l_layout,
+                                                 long long l_len, t4a_cuda_layout_any u_layout,
+                                                 long long u_len, t4a_cuda_layout_any work_layout,
+                                                 long long k, long long batches) {
+  long long pos;
+  if (!t4a_cuda_tail_index(&pos, larger(larger(p_len, l_len), larger(u_len, batches)))) {
+    return;
+  }
+  const int* pivot_values = static_cast<const int*>(pivots);
+  if (pos < p_len) {
+    const long long row = pos % p_layout.extents[0];
+    const long long col = (pos / p_layout.extents[0]) % p_layout.extents[1];
+    const long long batch = batch_linear_index_any(pos, p_layout);
+    long long final_row = col;
+    for (long long step = 0; step < k; ++step) {
+      const long long pivot = static_cast<long long>(pivot_values[step + batch * k]) - 1;
+      if (final_row == step) {
+        final_row = pivot;
+      } else if (final_row == pivot) {
+        final_row = step;
+      }
+    }
+    const long long index = t4a_cuda_decode_any(pos, p_layout.rank, p_layout.extents,
+                                                 p_layout.strides, p_layout.offset);
+    static_cast<T*>(p_out)[index] = final_row == row ? t4a_cuda_one<T>() : t4a_cuda_zero<T>();
+  }
+  if (pos < l_len) {
+    const long long row = pos % l_layout.extents[0];
+    const long long col = (pos / l_layout.extents[0]) % l_layout.extents[1];
+    const long long index = t4a_cuda_decode_any(pos, l_layout.rank, l_layout.extents,
+                                                 l_layout.strides, l_layout.offset);
+    T value;
+    if (row < col) {
+      value = t4a_cuda_zero<T>();
+    } else if (row == col) {
+      value = t4a_cuda_one<T>();
+    } else {
+      value = static_cast<const T*>(work)[work_layout.offset + row * work_layout.strides[0] +
+                                          col * work_layout.strides[1] +
+                                          batch_axis_offset_any(pos, l_layout, work_layout)];
+    }
+    static_cast<T*>(l_out)[index] = value;
+  }
+  if (pos < u_len) {
+    const long long row = pos % u_layout.extents[0];
+    const long long col = (pos / u_layout.extents[0]) % u_layout.extents[1];
+    const long long index = t4a_cuda_decode_any(pos, u_layout.rank, u_layout.extents,
+                                                 u_layout.strides, u_layout.offset);
+    static_cast<T*>(u_out)[index] =
+        row <= col ? static_cast<const T*>(work)[work_layout.offset +
+                                                 row * work_layout.strides[0] +
+                                                 col * work_layout.strides[1] +
+                                                 batch_axis_offset_any(pos, u_layout, work_layout)]
+                   : t4a_cuda_zero<T>();
+  }
+  if (pos < batches) {
+    T sign = t4a_cuda_one<T>();
+    for (long long step = 0; step < k; ++step) {
+      const long long pivot = static_cast<long long>(pivot_values[step + pos * k]) - 1;
+      if (pivot != step) {
+        sign = t4a_cuda_neg<T>(sign);
+      }
+    }
+    static_cast<T*>(parity_out)[pos] = sign;
+  }
+}
+
+template <typename T>
+__device__ __forceinline__ void lu_apply_pivots_body_any(void* out, const void* input,
+                                                     const void* pivots, t4a_cuda_layout_any out_layout,
+                                                     t4a_cuda_layout_any in_layout, long long k,
+                                                     bool inverse, long long len) {
+  long long pos;
+  if (!t4a_cuda_tail_index(&pos, len)) {
+    return;
+  }
+  const long long row = pos % out_layout.extents[0];
+  const long long col = (pos / out_layout.extents[0]) % out_layout.extents[1];
+  const long long batch = batch_linear_index_any(pos, out_layout);
+  const int* pivot_values = static_cast<const int*>(pivots);
+  long long source_row = row;
+  if (inverse) {
+    for (long long step = 0; step < k; ++step) {
+      const long long pivot = static_cast<long long>(pivot_values[step + batch * k]) - 1;
+      if (source_row == step) {
+        source_row = pivot;
+      } else if (source_row == pivot) {
+        source_row = step;
+      }
+    }
+  } else {
+    for (long long step = k; step > 0; --step) {
+      const long long index = step - 1;
+      const long long pivot = static_cast<long long>(pivot_values[index + batch * k]) - 1;
+      if (source_row == index) {
+        source_row = pivot;
+      } else if (source_row == pivot) {
+        source_row = index;
+      }
+    }
+  }
+  const long long out_index = t4a_cuda_decode_any(pos, out_layout.rank, out_layout.extents,
+                                                 out_layout.strides, out_layout.offset);
+  const long long in_index = in_layout.offset + source_row * in_layout.strides[0] +
+                             col * in_layout.strides[1] +
+                             batch_axis_offset_any(pos, out_layout, in_layout);
+  static_cast<T*>(out)[out_index] = static_cast<const T*>(input)[in_index];
+}
+
+#define T4A_FILL_ONE_ANY_CASE(T) fill_one_body_any<T>(out, out_layout, t4a_cuda_logical_count_any(out_layout))
+extern "C" __global__ void t4a_cuda_fill_one_any(void* out, int dtype, t4a_cuda_layout_any out_layout) {
+  T4A_CUDA_DTYPE_SWITCH(dtype, T4A_FILL_ONE_ANY_CASE);
+}
+
+#define T4A_MATRIX_ADJOINT_ANY_CASE(T) \
+  matrix_adjoint_body_any<T>(out, v, out_layout, v_layout, t4a_cuda_logical_count_any(out_layout))
+extern "C" __global__ void t4a_cuda_matrix_adjoint_any(void* out, const void* v, int dtype,
+                                                   t4a_cuda_layout_any out_layout,
+                                                   t4a_cuda_layout_any v_layout) {
+  T4A_CUDA_NUMERIC_DTYPE_SWITCH(dtype, T4A_MATRIX_ADJOINT_ANY_CASE);
+}
+
+#define T4A_EXPLICIT_V_ANY_CASE(T) \
+  explicit_v_body_any<T>(out, packed, out_layout, packed_layout, t4a_cuda_logical_count_any(out_layout))
+extern "C" __global__ void t4a_cuda_householder_explicit_v_any(void* out, const void* packed,
+                                                           int dtype,
+                                                           t4a_cuda_layout_any out_layout,
+                                                           t4a_cuda_layout_any packed_layout) {
+  T4A_CUDA_NUMERIC_DTYPE_SWITCH(dtype, T4A_EXPLICIT_V_ANY_CASE);
+}
+
+#define T4A_IDENTITY_SHIFTED_ANY_CASE(T) \
+  identity_shifted_body_any<T>(out, out_layout, t4a_cuda_logical_count_any(out_layout), start)
+extern "C" __global__ void t4a_cuda_identity_shifted_any(void* out, int dtype,
+                                                     t4a_cuda_layout_any out_layout,
+                                                     long long start) {
+  T4A_CUDA_NUMERIC_DTYPE_SWITCH(dtype, T4A_IDENTITY_SHIFTED_ANY_CASE);
+}
+
+#define T4A_QR_PHASE_ANY_CASE(T) \
+  qr_phase_body_any<T>(phase, r, phase_layout, r_layout, t4a_cuda_logical_count_any(phase_layout))
+extern "C" __global__ void t4a_cuda_qr_phase_any(void* phase, const void* r, int dtype,
+                                             t4a_cuda_layout_any phase_layout,
+                                             t4a_cuda_layout_any r_layout) {
+  T4A_CUDA_ALGEBRA_DTYPE_SWITCH(dtype, T4A_QR_PHASE_ANY_CASE);
+}
+
+#define T4A_QR_APPLY_PHASE_ANY_CASE(T) \
+  qr_apply_phase_body_any<T>(q, r, phase, q_layout, r_layout, phase_layout, q_start)
+extern "C" __global__ void t4a_cuda_qr_apply_phase_any(void* q, void* r, const void* phase, int dtype,
+                                                   t4a_cuda_layout_any q_layout,
+                                                   t4a_cuda_layout_any r_layout,
+                                                   t4a_cuda_layout_any phase_layout,
+                                                   long long q_start) {
+  T4A_CUDA_ALGEBRA_DTYPE_SWITCH(dtype, T4A_QR_APPLY_PHASE_ANY_CASE);
+}
+
+#define T4A_VIOLATION_ANY_CASE(T) \
+  violation_body_any<T>(violation, input, violation_layout, input_layout, \
+                    t4a_cuda_logical_count_any(violation_layout))
+extern "C" __global__ void t4a_cuda_upper_trapezoidal_violation_any(
+    void* violation, const void* input, int dtype, t4a_cuda_layout_any violation_layout,
+    t4a_cuda_layout_any input_layout) {
+  T4A_CUDA_DTYPE_SWITCH(dtype, T4A_VIOLATION_ANY_CASE);
+}
+
+#define T4A_ASSEMBLE_ANY_CASE(T) \
+  assemble_body_any<T>(packed_out, coeff_out, packed_q, coeff_q, folded_r, packed_out_layout, \
+                   t4a_cuda_logical_count_any(packed_out_layout), packed_q_layout, folded_r_layout, \
+                   coeff_out_len, factor_width)
+extern "C" __global__ void t4a_cuda_householder_assemble_any(
+    void* packed_out, void* coeff_out, const void* packed_q, const void* coeff_q,
+    const void* folded_r, int dtype, t4a_cuda_layout_any packed_out_layout,
+    t4a_cuda_layout_any packed_q_layout, t4a_cuda_layout_any folded_r_layout, long long coeff_out_len,
+    long long factor_width) {
+  T4A_CUDA_NUMERIC_DTYPE_SWITCH(dtype, T4A_ASSEMBLE_ANY_CASE);
+}
+
+#define T4A_LU_EXTRACT_ANY_CASE(T) \
+  lu_extract_body_any<T>(p_out, l_out, u_out, parity_out, work, pivots, p_layout, \
+                     t4a_cuda_logical_count_any(p_layout), l_layout, t4a_cuda_logical_count_any(l_layout), u_layout, \
+                     t4a_cuda_logical_count_any(u_layout), work_layout, k, batches)
+extern "C" __global__ void t4a_cuda_lu_extract_outputs_any(
+    void* p_out, void* l_out, void* u_out, void* parity_out, const void* work, const void* pivots,
+    int dtype, t4a_cuda_layout_any p_layout, t4a_cuda_layout_any l_layout, t4a_cuda_layout_any u_layout,
+    t4a_cuda_layout_any work_layout, long long k, long long batches) {
+  T4A_CUDA_ALGEBRA_DTYPE_SWITCH(dtype, T4A_LU_EXTRACT_ANY_CASE);
+}
+
+#define T4A_LU_APPLY_PIVOTS_ANY_CASE(T) \
+  lu_apply_pivots_body_any<T>(out, input, pivots, out_layout, in_layout, k, inverse != 0, \
+                          t4a_cuda_logical_count_any(out_layout))
+extern "C" __global__ void t4a_cuda_lu_apply_pivots_any(void* out, const void* input,
+                                                    const void* pivots, int dtype,
+                                                    t4a_cuda_layout_any out_layout,
+                                                    t4a_cuda_layout_any in_layout, long long k,
+                                                    int inverse) {
+  T4A_CUDA_NUMERIC_DTYPE_SWITCH(dtype, T4A_LU_APPLY_PIVOTS_ANY_CASE);
+}

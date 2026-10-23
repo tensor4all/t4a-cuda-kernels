@@ -143,6 +143,65 @@ __device__ __forceinline__ void strided_to_strided_body(void* dst,
   }
 }
 
+// --- Revision 9 general path ---------------------------------------------------
+//
+// These bodies take the pointer-geometry layout and walk the operand's own
+// runtime rank, so any rank is representable. They keep no per-axis array and no
+// masked select, and they do not use the fast path's narrow quotient walk, which
+// is an optimisation for the ranks that dominate, not a contract.
+
+template <typename T>
+__device__ __forceinline__ void fill_zero_view_body_any(void* out,
+                                                        const t4a_cuda_layout_any& layout,
+                                                        long long len) {
+  long long flat;
+  if (t4a_cuda_tail_index(&flat, len)) {
+    const long long index = t4a_cuda_decode_any(flat, layout.rank, layout.extents,
+                                                layout.strides, layout.offset);
+    static_cast<T*>(out)[index] = t4a_cuda_zero<T>();
+  }
+}
+
+template <typename T>
+__device__ __forceinline__ void materialize_strided_body_any(void* dst,
+                                                             const void* src,
+                                                             const t4a_cuda_layout_any& layout,
+                                                             long long len) {
+  long long flat;
+  if (t4a_cuda_tail_index(&flat, len)) {
+    const long long index = t4a_cuda_decode_any(flat, layout.rank, layout.extents,
+                                                layout.strides, layout.offset);
+    static_cast<T*>(dst)[flat] = static_cast<const T*>(src)[index];
+  }
+}
+
+template <typename T>
+__device__ __forceinline__ void contiguous_to_view_body_any(
+    void* dst, const void* src, const t4a_cuda_layout_any& layout, long long len) {
+  long long flat;
+  if (t4a_cuda_tail_index(&flat, len)) {
+    const long long index = t4a_cuda_decode_any(flat, layout.rank, layout.extents,
+                                                layout.strides, layout.offset);
+    static_cast<T*>(dst)[index] = static_cast<const T*>(src)[flat];
+  }
+}
+
+template <typename T>
+__device__ __forceinline__ void strided_to_strided_body_any(
+    void* dst, const void* src, const t4a_cuda_layout_any& src_layout,
+    const t4a_cuda_layout_any& dst_layout, long long len) {
+  long long flat;
+  if (t4a_cuda_tail_index(&flat, len)) {
+    // Both layouts share the source's extents; only the strides and offsets
+    // differ.
+    const long long src_index = t4a_cuda_decode_any(flat, src_layout.rank, src_layout.extents,
+                                                    src_layout.strides, src_layout.offset);
+    const long long dst_index = t4a_cuda_decode_any(flat, src_layout.rank, src_layout.extents,
+                                                    dst_layout.strides, dst_layout.offset);
+    static_cast<T*>(dst)[dst_index] = static_cast<const T*>(src)[src_index];
+  }
+}
+
 // Shared-memory tiled transpose of a compact row-major (M, N) matrix per batch
 // into a compact destination at offset zero: dst[b*S + i + j*M] =
 // src[src_offset + b*S + i*N + j], S = M*N. The destination tiles advance
@@ -423,4 +482,40 @@ extern "C" __global__ void __launch_bounds__(512, 4) t4a_cuda_tiled_transpose(
     tiled_transpose_wide(dst, src, dtype, src_offset, batch_stride, dst_fast_extent,
                          src_fast_extent, config);
   }
+}
+
+extern "C" __global__ void t4a_cuda_fill_zero_view_any(void* out, int dtype,
+                                                       t4a_cuda_layout_any layout,
+                                                       long long len) {
+#define T4A_BODY(T) fill_zero_view_body_any<T>(out, layout, len)
+  T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+}
+
+extern "C" __global__ void t4a_cuda_materialize_strided_any(void* dst, const void* src,
+                                                            int dtype,
+                                                            t4a_cuda_layout_any src_layout,
+                                                            long long len) {
+#define T4A_BODY(T) materialize_strided_body_any<T>(dst, src, src_layout, len)
+  T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+}
+
+extern "C" __global__ void t4a_cuda_contiguous_to_view_any(void* dst, const void* src,
+                                                           int dtype,
+                                                           t4a_cuda_layout_any dst_layout,
+                                                           long long len) {
+#define T4A_BODY(T) contiguous_to_view_body_any<T>(dst, src, dst_layout, len)
+  T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+}
+
+extern "C" __global__ void t4a_cuda_strided_to_strided_any(void* dst, const void* src,
+                                                           int dtype,
+                                                           t4a_cuda_layout_any src_layout,
+                                                           t4a_cuda_layout_any dst_layout,
+                                                           long long len) {
+#define T4A_BODY(T) strided_to_strided_body_any<T>(dst, src, src_layout, dst_layout, len)
+  T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
 }

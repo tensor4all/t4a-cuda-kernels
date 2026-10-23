@@ -16,10 +16,11 @@
 #endif
 
 #define T4A_CUDA_MAX_RANK 8
-#define T4A_CUDA_ABI_REVISION 8
+#define T4A_CUDA_ABI_REVISION 9
 
 static_assert(sizeof(int) == 4, "the C ABI requires 32-bit int");
 static_assert(sizeof(long long) == 8, "the C ABI requires 64-bit long long");
+
 
 typedef enum {
   T4A_CUDA_F32 = 0,
@@ -104,6 +105,77 @@ typedef struct {
   long long update_window_dims[T4A_CUDA_MAX_RANK];
   long long scatter_dims[T4A_CUDA_MAX_RANK];
 } t4a_cuda_scatter_plan;
+
+// General-path geometry (revision 9). The field names, sizes and alignments
+// match their by-value counterparts, but the arrays live in caller-owned device
+// memory, so any rank is representable. A zero-length array may be NULL: it is
+// never dereferenced and no pointer arithmetic is performed on it. See
+// docs/abi/c-kernel-abi.md "Dynamic rank".
+typedef struct {
+  int rank;                   // 0..=INT32_MAX
+  int reserved;               // must be 0
+  long long offset;
+  const long long* extents;   // rank values, device memory
+  const long long* strides;   // rank values, device memory
+} t4a_cuda_layout_any;
+
+typedef struct {
+  int rank;                   // must equal the operation rank
+  int reserved;               // must be 0
+  const long long* values;    // rank values, device memory
+} t4a_cuda_axis_values_any;
+
+typedef struct {
+  int operand_rank;
+  int out_rank;
+  int index_vector_dim;
+  int window_rank;
+  int start_map_len;
+  int reserved;               // must be 0
+  const long long* window_dims;      // window_rank values
+  const long long* offset_dims;      // window_rank values
+  const long long* start_index_map;  // start_map_len values
+  const long long* slice_sizes;      // operand_rank values
+} t4a_cuda_gather_plan_any;
+
+typedef struct {
+  int operand_rank;
+  int updates_rank;
+  int index_vector_dim;
+  int window_rank;
+  int scatter_map_len;
+  int reserved;               // must be 0
+  const long long* window_dims;        // window_rank values
+  const long long* update_window_dims; // window_rank values
+  const long long* scatter_dims;       // scatter_map_len values
+} t4a_cuda_scatter_plan_any;
+
+// Revision 9 mirrors. The Rust facade asserts the same numbers; a change is an ABI
+// revision. Sizes and alignments compile everywhere, field offsets only where
+// `__builtin_offsetof` exists (not under NVRTC).
+static_assert(sizeof(void*) == 8, "the C ABI requires 64-bit pointers");
+static_assert(sizeof(t4a_cuda_layout_any) == 32, "t4a_cuda_layout_any size");
+static_assert(alignof(t4a_cuda_layout_any) == 8, "t4a_cuda_layout_any alignment");
+static_assert(sizeof(t4a_cuda_axis_values_any) == 16, "t4a_cuda_axis_values_any size");
+static_assert(alignof(t4a_cuda_axis_values_any) == 8, "t4a_cuda_axis_values_any alignment");
+static_assert(sizeof(t4a_cuda_gather_plan_any) == 56, "t4a_cuda_gather_plan_any size");
+static_assert(alignof(t4a_cuda_gather_plan_any) == 8, "t4a_cuda_gather_plan_any alignment");
+static_assert(sizeof(t4a_cuda_scatter_plan_any) == 48, "t4a_cuda_scatter_plan_any size");
+static_assert(alignof(t4a_cuda_scatter_plan_any) == 8, "t4a_cuda_scatter_plan_any alignment");
+#if !defined(__CUDACC_RTC__)
+static_assert(__builtin_offsetof(t4a_cuda_layout_any, offset) == 8, "layout_any.offset");
+static_assert(__builtin_offsetof(t4a_cuda_layout_any, extents) == 16, "layout_any.extents");
+static_assert(__builtin_offsetof(t4a_cuda_layout_any, strides) == 24, "layout_any.strides");
+static_assert(__builtin_offsetof(t4a_cuda_axis_values_any, values) == 8,
+              "axis_values_any.values");
+static_assert(__builtin_offsetof(t4a_cuda_gather_plan_any, window_dims) == 24,
+              "gather_plan_any.window_dims");
+static_assert(__builtin_offsetof(t4a_cuda_gather_plan_any, slice_sizes) == 48,
+              "gather_plan_any.slice_sizes");
+static_assert(__builtin_offsetof(t4a_cuda_scatter_plan_any, scatter_dims) == 40,
+              "scatter_plan_any.scatter_dims");
+#endif
+
 
 // Operation tags of the elementwise entries (revision 6). The tags are stable
 // and append-only; an unsupported (tag, dtype) pair is the caller's error and
@@ -363,6 +435,54 @@ __device__ __forceinline__ long long t4a_cuda_decode(long long flat,
     offset += coordinate * strides[axis];
   }
   return offset;
+}
+
+// --- Revision 9 general-path geometry helpers ---------------------------------
+//
+// Additive: the revision 1-8 helpers above are unchanged, so their entries keep
+// the compiled shapes the resource table measured. A general-path walk is bounded
+// by the operand's own runtime rank and reads its geometry from device memory with
+// ordinary loads. No revision 9 body keeps a per-axis array, uses a masked
+// eight-slot select or is bounded by T4A_CUDA_MAX_RANK.
+
+__device__ __forceinline__ long long t4a_cuda_decode_any(long long flat,
+                                                         int rank,
+                                                         const long long* extents,
+                                                         const long long* strides,
+                                                         long long offset) {
+  for (int axis = 0; axis < rank; ++axis) {
+    const long long extent = extents[axis];
+    const long long coordinate = flat % extent;
+    flat /= extent;
+    offset += coordinate * strides[axis];
+  }
+  return offset;
+}
+
+// `values[axis]` with a runtime axis: a direct load, not a masked eight-slot read,
+// because a general-path array has exactly `rank` slots.
+__device__ __forceinline__ long long t4a_cuda_axis_value_any(const long long* values,
+                                                             int axis) {
+  return values[axis];
+}
+
+__device__ __forceinline__ long long t4a_cuda_logical_count_any(
+    const t4a_cuda_layout_any& layout) {
+  long long count = 1;
+  for (int axis = 0; axis < layout.rank; ++axis) {
+    count *= layout.extents[axis];
+  }
+  return count;
+}
+
+// Coordinate of one logical axis of a compact layout for flat index `flat`,
+// computed on demand so a general body needs no per-axis coordinate array.
+__device__ __forceinline__ long long t4a_cuda_compact_coordinate_any(
+    long long flat, const t4a_cuda_layout_any& layout, int axis) {
+  for (int index = 0; index < axis; ++index) {
+    flat /= layout.extents[index];
+  }
+  return flat % layout.extents[axis];
 }
 
 // `values[axis]` for a runtime `axis`: an unrolled compare keeps every subscript

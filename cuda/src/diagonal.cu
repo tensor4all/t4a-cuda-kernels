@@ -111,6 +111,74 @@ __device__ __forceinline__ void embed_diagonal_copy_body(void* out_ptr,
   static_cast<T*>(out_ptr)[out_index] = static_cast<const T*>(in_ptr)[flat];
 }
 
+// --- Revision 9 general path ---------------------------------------------------
+//
+// The same formulas with pointer geometry and a walk bounded by the operand's own
+// runtime rank. Unlike the fast bodies above these keep no per-axis coordinate
+// array: each output coordinate is recomputed on demand, so the general path's
+// state is O(1) whatever the rank.
+
+// Output position of the diagonal: `axis_a - (axis_b < axis_a)`, derived by the
+// facade, not passed.
+__device__ __forceinline__ int diagonal_output_axis(int axis_a, int axis_b) {
+  return axis_a - (axis_b < axis_a ? 1 : 0);
+}
+
+template <typename T>
+__device__ __forceinline__ void extract_diagonal_body_any(
+    void* out_ptr, const void* in_ptr, const t4a_cuda_layout_any& out_layout,
+    const t4a_cuda_layout_any& in_layout, int axis_a, int axis_b, long long len) {
+  long long flat;
+  if (!t4a_cuda_tail_index(&flat, len)) {
+    return;
+  }
+  const int diag_axis = diagonal_output_axis(axis_a, axis_b);
+  const long long diagonal = t4a_cuda_compact_coordinate_any(flat, out_layout, diag_axis);
+
+  long long in_index = in_layout.offset;
+  int out_axis = 0;
+  for (int axis = 0; axis < in_layout.rank; ++axis) {
+    long long coordinate;
+    if (axis == axis_a || axis == axis_b) {
+      coordinate = diagonal;
+    } else {
+      if (out_axis == diag_axis) {
+        ++out_axis;
+      }
+      coordinate = t4a_cuda_compact_coordinate_any(flat, out_layout, out_axis);
+      ++out_axis;
+    }
+    in_index += coordinate * in_layout.strides[axis];
+  }
+  // The destination is compact (`require_compact` in `plan_extract_diagonal`).
+  static_cast<T*>(out_ptr)[flat] = static_cast<const T*>(in_ptr)[in_index];
+}
+
+template <typename T>
+__device__ __forceinline__ void embed_diagonal_copy_body_any(
+    void* out_ptr, const void* in_ptr, const t4a_cuda_layout_any& out_layout,
+    const t4a_cuda_layout_any& in_layout, int axis_a, int axis_b, long long len) {
+  long long flat;
+  if (!t4a_cuda_tail_index(&flat, len)) {
+    return;
+  }
+  const long long diagonal = t4a_cuda_compact_coordinate_any(flat, in_layout, axis_a);
+
+  long long out_index = out_layout.offset;
+  int in_axis = 0;
+  for (int out_axis = 0; out_axis < out_layout.rank; ++out_axis) {
+    const bool inserted = out_axis == axis_b;
+    const long long coordinate =
+        inserted ? diagonal : t4a_cuda_compact_coordinate_any(flat, in_layout, in_axis);
+    if (!inserted) {
+      ++in_axis;
+    }
+    out_index += coordinate * out_layout.strides[out_axis];
+  }
+  // The source is compact (`require_compact` in `plan_embed_diagonal_copy`).
+  static_cast<T*>(out_ptr)[out_index] = static_cast<const T*>(in_ptr)[flat];
+}
+
 // Both operands are compact over the same extents; axes 0 and 1 carry the
 // triangle and every higher axis batches it. Comparisons are overflow-free:
 // the baseline's `col - k` is undefined for extreme `k`.
@@ -166,6 +234,24 @@ extern "C" __global__ void t4a_cuda_tril(void* out, const void* in, int dtype, l
 extern "C" __global__ void t4a_cuda_triu(void* out, const void* in, int dtype, long long k,
                                          long long rows, long long cols, long long len) {
 #define T4A_BODY(T) triangular_body<T>(out, in, k, rows, cols, len, false)
+  T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+}
+
+extern "C" __global__ void t4a_cuda_extract_diagonal_any(
+    void* out, const void* in, int dtype, t4a_cuda_layout_any out_layout,
+    t4a_cuda_layout_any in_layout, int axis_a, int axis_b, long long len) {
+#define T4A_BODY(T) \
+  extract_diagonal_body_any<T>(out, in, out_layout, in_layout, axis_a, axis_b, len)
+  T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+}
+
+extern "C" __global__ void t4a_cuda_embed_diagonal_copy_any(
+    void* out, const void* in, int dtype, t4a_cuda_layout_any out_layout,
+    t4a_cuda_layout_any in_layout, int axis_a, int axis_b, long long len) {
+#define T4A_BODY(T) \
+  embed_diagonal_copy_body_any<T>(out, in, out_layout, in_layout, axis_a, axis_b, len)
   T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
 #undef T4A_BODY
 }

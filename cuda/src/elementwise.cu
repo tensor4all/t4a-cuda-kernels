@@ -567,6 +567,46 @@ __device__ __forceinline__ void combined_strided_body(void* out, const void* a, 
   static_cast<T*>(out)[out_index] = result;
 }
 
+// --- Revision 9 general path ---------------------------------------------------
+//
+// The same formula with pointer geometry and a walk bounded by the destination's
+// runtime rank; the fast body above is unchanged.
+
+template <typename T>
+__device__ __forceinline__ void combined_strided_body_any(
+    void* out, const void* a, const void* b, const void* coefficients, int op,
+    const t4a_cuda_layout_any& out_layout, const t4a_cuda_layout_any& a_layout,
+    const t4a_cuda_layout_any& b_layout, long long len) {
+  long long flat;
+  if (!t4a_cuda_tail_index(&flat, len)) {
+    return;
+  }
+  // The three layouts share the destination extents, so one coordinate walk
+  // serves all three addresses.
+  long long out_index = out_layout.offset;
+  long long a_index = a_layout.offset;
+  long long b_index = b_layout.offset;
+  for (int axis = 0; axis < out_layout.rank; ++axis) {
+    const long long extent = out_layout.extents[axis];
+    const long long coordinate = flat % extent;
+    flat /= extent;
+    out_index += coordinate * out_layout.strides[axis];
+    a_index += coordinate * a_layout.strides[axis];
+    b_index += coordinate * b_layout.strides[axis];
+  }
+  const T a_value = static_cast<const T*>(a)[a_index];
+  const T b_value = static_cast<const T*>(b)[b_index];
+  T result;
+  if (op == T4A_CUDA_STRIDED_MUL) {
+    result = t4a_cuda_mul<T>(a_value, b_value);
+  } else {
+    const T* coefficient = static_cast<const T*>(coefficients);
+    result = t4a_cuda_add<T>(t4a_cuda_mul<T>(coefficient[0], a_value),
+                             t4a_cuda_mul<T>(coefficient[1], b_value));
+  }
+  static_cast<T*>(out)[out_index] = result;
+}
+
 }  // namespace
 
 extern "C" __global__ void t4a_cuda_combined_strided(
@@ -595,6 +635,42 @@ extern "C" __global__ void t4a_cuda_combined_strided(
     case T4A_CUDA_C64:
       combined_strided_body<t4a_cuda_c64>(out, a, b, coefficients, op, out_layout, a_layout,
                                           b_layout, len);
+      break;
+    default:
+      break;
+  }
+}
+
+extern "C" __global__ void t4a_cuda_combined_strided_any(
+    void* out, const void* a, const void* b, const void* coefficients,
+    t4a_cuda_layout_any out_layout, t4a_cuda_layout_any a_layout,
+    t4a_cuda_layout_any b_layout, int dtype, int op, long long len) {
+  // The same six dtypes as the fast entry: Bool is not a strided-combination
+  // element type.
+  switch (dtype) {
+    case T4A_CUDA_F32:
+      combined_strided_body_any<float>(out, a, b, coefficients, op, out_layout, a_layout,
+                                       b_layout, len);
+      break;
+    case T4A_CUDA_F64:
+      combined_strided_body_any<double>(out, a, b, coefficients, op, out_layout, a_layout,
+                                        b_layout, len);
+      break;
+    case T4A_CUDA_I32:
+      combined_strided_body_any<int>(out, a, b, coefficients, op, out_layout, a_layout,
+                                     b_layout, len);
+      break;
+    case T4A_CUDA_I64:
+      combined_strided_body_any<long long>(out, a, b, coefficients, op, out_layout, a_layout,
+                                           b_layout, len);
+      break;
+    case T4A_CUDA_C32:
+      combined_strided_body_any<t4a_cuda_c32>(out, a, b, coefficients, op, out_layout,
+                                              a_layout, b_layout, len);
+      break;
+    case T4A_CUDA_C64:
+      combined_strided_body_any<t4a_cuda_c64>(out, a, b, coefficients, op, out_layout,
+                                              a_layout, b_layout, len);
       break;
     default:
       break;

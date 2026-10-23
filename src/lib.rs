@@ -28,10 +28,15 @@ pub use fusion::{
     MAX_FUSION_PARAMETER_BYTES,
 };
 
-/// Maximum supported tensor rank. Deeper layouts need a later ABI revision.
+/// Rank limit of the fixed-array fast path.
+///
+/// [`Layout`] (the `Copy`, eight-array form), [`CLayout`] and the revision 1-8
+/// symbols are bounded by it. The general path has no such ceiling: [`LayoutRef`]/
+/// [`WideLayout`] accept any rank and the `_any` symbols carry the geometry in
+/// device memory, selected through [`RankVariant`].
 pub const MAX_RANK: usize = 8;
 /// Version of the C ABI described by this crate.
-pub const ABI_REVISION: u32 = 8;
+pub const ABI_REVISION: u32 = 9;
 /// Threads per block for the flat (element-wise) entries.
 pub const FLAT_BLOCK: u32 = 256;
 /// Lanes per block for the plane-reduction entries: one 32-lane plane per block.
@@ -341,29 +346,6 @@ impl Layout {
     /// prove injectivity, as the consumer planners already do.
     pub fn rejects_broadcast_axis(&self) -> bool {
         (0..self.rank as usize).all(|axis| self.extents[axis] <= 1 || self.strides[axis] != 0)
-    }
-
-    /// Check the layout against a caller allocation of `len` elements.
-    ///
-    /// `element_size` is checked as well: device address arithmetic is
-    /// `base + index * element_size` bytes, so an element offset that does not
-    /// fit in a 64-bit byte offset is rejected rather than left to overflow.
-    fn check_span(&self, len: i64, element_size: usize) -> Result<(), Error> {
-        if len < 0 {
-            return Err(Error::NegativeCount);
-        }
-        // An empty layout addresses nothing, so no span can be violated.
-        if self.element_count()? == 0 {
-            return Ok(());
-        }
-        let min = self.min_reachable_offset()?;
-        let max = self.max_reachable_offset()?;
-        if min < 0 || max >= len {
-            return Err(Error::OffsetOutOfSpan);
-        }
-        max.checked_mul(i64::try_from(element_size).map_err(|_| Error::Overflow)?)
-            .ok_or(Error::Overflow)?;
-        Ok(())
     }
 }
 
@@ -700,12 +682,54 @@ impl Entry {
     }
 }
 
+/// Which rank policy a plan selected.
+///
+/// Every entry that walks a runtime rank has a fast symbol (rank at most
+/// [`MAX_RANK`], the revision 1-8 implementation) and a general symbol whose name
+/// ends in `_any` (general path, geometry in device memory). The variant is chosen
+/// from every participating rank and map length, never from the host storage type,
+/// and the consumer's artifact or prepared-plan key must include the symbol name so
+/// the two cannot share a cached module.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RankVariant {
+    /// The fast symbol; every participating rank is at most [`MAX_RANK`].
+    Fast,
+    /// The general symbol; some participating rank or map length exceeds
+    /// [`MAX_RANK`].
+    General,
+}
+
+impl RankVariant {
+    /// Variant for one rank.
+    pub fn of(rank: usize) -> RankVariant {
+        if rank <= MAX_RANK {
+            RankVariant::Fast
+        } else {
+            RankVariant::General
+        }
+    }
+
+    /// Variant for a plan: general when any layout rank or map length exceeds
+    /// [`MAX_RANK`].
+    pub fn select(layouts: &[LayoutRef<'_>], lengths: &[usize]) -> RankVariant {
+        let rank = layouts
+            .iter()
+            .map(|layout| layout.extents().len())
+            .chain(lengths.iter().copied())
+            .max()
+            .unwrap_or(0);
+        RankVariant::of(rank)
+    }
+}
+
 /// Planned launch geometry for one kernel invocation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Launch {
     pub grid: [u32; 3],
     pub block: [u32; 3],
     pub shared_bytes: u32,
+    /// Rank policy of the symbol this plan selects.
+    pub variant: RankVariant,
 }
 
 impl Launch {
@@ -714,11 +738,596 @@ impl Launch {
         grid: [0, 0, 0],
         block: [FLAT_BLOCK, 1, 1],
         shared_bytes: 0,
+        variant: RankVariant::Fast,
     };
 
     /// No work: at least one grid dimension is zero, so the caller skips it.
     pub fn is_empty(&self) -> bool {
         self.grid.contains(&0)
+    }
+
+    /// Report the rank policy selected for this plan.
+    ///
+    /// The variant is chosen from every participating layout rank and map length,
+    /// so a plan whose output rank is 8 but whose operand rank is 9 selects
+    /// [`RankVariant::General`].
+    pub fn with_variant(mut self, layouts: &[LayoutRef<'_>], lengths: &[usize]) -> Launch {
+        self.variant = RankVariant::select(layouts, lengths);
+        self
+    }
+}
+
+/// Borrowed view of a logical layout, of any rank.
+///
+/// This is the general-path input: [`Layout`] is the `Copy`, 8-array fast-path
+/// type, while a plan that must serve rank 9 or deeper takes a `LayoutRef`, which
+/// borrows the caller's extents and strides and has no rank ceiling. `&Layout` and
+/// `&WideLayout` both convert into it, so the `plan_*` functions take
+/// `impl Into<LayoutRef<'_>>` and existing `&Layout` call sites keep compiling.
+///
+/// Axis 0 is the fastest-varying logical axis, exactly as for [`Layout`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LayoutRef<'a> {
+    extents: &'a [i64],
+    strides: &'a [i64],
+    offset: i64,
+}
+
+impl<'a> LayoutRef<'a> {
+    /// Borrow `extents` and `strides` as a layout of any rank.
+    ///
+    /// The `_any` ABI carries the rank as an `int`, so a rank above `i32::MAX` is
+    /// refused; the extent product and address arithmetic are checked by the
+    /// planners that use them.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::RankLength`] when the two slices differ in length,
+    /// [`Error::NegativeExtent`] for a negative extent and [`Error::Overflow`] for
+    /// a rank above `i32::MAX`.
+    pub fn new(
+        extents: &'a [i64],
+        strides: &'a [i64],
+        offset: i64,
+    ) -> Result<LayoutRef<'a>, Error> {
+        if extents.len() != strides.len() {
+            return Err(Error::RankLength);
+        }
+        if extents.iter().any(|&extent| extent < 0) {
+            return Err(Error::NegativeExtent);
+        }
+        if extents.len() > i32::MAX as usize {
+            return Err(Error::Overflow);
+        }
+        Ok(LayoutRef {
+            extents,
+            strides,
+            offset,
+        })
+    }
+
+    /// Rank of the layout.
+    pub fn rank(&self) -> u32 {
+        self.extents.len() as u32
+    }
+
+    /// Element offset of coordinate zero.
+    pub fn offset(&self) -> i64 {
+        self.offset
+    }
+
+    /// Extents, axis 0 first.
+    pub fn extents(&self) -> &'a [i64] {
+        self.extents
+    }
+
+    /// Signed strides in elements, axis 0 first.
+    pub fn strides(&self) -> &'a [i64] {
+        self.strides
+    }
+
+    /// Product of the extents; one for a rank-0 layout.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Overflow`] when the product leaves `i64`.
+    pub fn element_count(&self) -> Result<i64, Error> {
+        self.extents.iter().try_fold(1i64, |acc, &extent| {
+            acc.checked_mul(extent).ok_or(Error::Overflow)
+        })
+    }
+
+    /// Smallest element index the layout can address.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Overflow`] when an address leaves `i64`.
+    pub fn min_reachable_offset(&self) -> Result<i64, Error> {
+        self.reachable_offset(false)
+    }
+
+    /// Largest element index the layout can address.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Overflow`] when an address leaves `i64`.
+    pub fn max_reachable_offset(&self) -> Result<i64, Error> {
+        self.reachable_offset(true)
+    }
+
+    fn reachable_offset(&self, maximum: bool) -> Result<i64, Error> {
+        let mut total = self.offset;
+        for axis in 0..self.extents.len() {
+            let step = self.extents[axis]
+                .checked_sub(1)
+                .ok_or(Error::Overflow)?
+                .checked_mul(self.strides[axis])
+                .ok_or(Error::Overflow)?;
+            let step = if maximum { step.max(0) } else { step.min(0) };
+            total = total.checked_add(step).ok_or(Error::Overflow)?;
+        }
+        Ok(total)
+    }
+
+    /// Whether the layout is the compact form of its extents with offset zero.
+    pub fn is_compact(&self) -> bool {
+        if self.offset != 0 {
+            return false;
+        }
+        let mut stride: i64 = 1;
+        for axis in 0..self.extents.len() {
+            if self.strides[axis] != stride {
+                return false;
+            }
+            match stride.checked_mul(self.extents[axis]) {
+                Some(next) => stride = next,
+                None => return false,
+            }
+        }
+        true
+    }
+
+    /// Necessary condition for an injective layout: no broadcast axis with more
+    /// than one element.
+    pub fn rejects_broadcast_axis(&self) -> bool {
+        (0..self.extents.len()).all(|axis| self.extents[axis] <= 1 || self.strides[axis] != 0)
+    }
+
+    fn check_span(&self, len: i64, element_size: usize) -> Result<(), Error> {
+        if len < 0 {
+            return Err(Error::NegativeCount);
+        }
+        // An empty layout addresses nothing, so no span can be violated.
+        if self.element_count()? == 0 {
+            return Ok(());
+        }
+        let min = self.min_reachable_offset()?;
+        let max = self.max_reachable_offset()?;
+        if min < 0 || max >= len {
+            return Err(Error::OffsetOutOfSpan);
+        }
+        max.checked_mul(i64::try_from(element_size).map_err(|_| Error::Overflow)?)
+            .ok_or(Error::Overflow)?;
+        Ok(())
+    }
+
+    /// Geometry array for the `_any` ABI: the extents, then the strides.
+    ///
+    /// The result is what [`CLayoutAny::new`] points at; it must be uploaded to
+    /// device memory and kept unchanged until the launch completes.
+    pub fn pack(&self) -> Vec<i64> {
+        let mut packed = Vec::with_capacity(self.extents.len() * 2);
+        packed.extend_from_slice(self.extents);
+        packed.extend_from_slice(self.strides);
+        packed
+    }
+
+    /// Rank policy this layout selects.
+    pub fn variant(&self) -> RankVariant {
+        RankVariant::of(self.extents.len())
+    }
+}
+
+impl Layout {
+    /// Borrow this fast-path layout as a general-path [`LayoutRef`].
+    pub fn as_ref(&self) -> LayoutRef<'_> {
+        LayoutRef {
+            extents: self.extents(),
+            strides: self.strides(),
+            offset: self.offset(),
+        }
+    }
+}
+
+impl<'a> From<&'a Layout> for LayoutRef<'a> {
+    fn from(layout: &'a Layout) -> LayoutRef<'a> {
+        LayoutRef {
+            extents: layout.extents(),
+            strides: layout.strides(),
+            offset: layout.offset(),
+        }
+    }
+}
+
+/// Owned layout of any rank, for callers that do not already hold slices.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WideLayout {
+    extents: Vec<i64>,
+    strides: Vec<i64>,
+    offset: i64,
+}
+
+impl WideLayout {
+    /// Build a layout of any rank.
+    ///
+    /// # Errors
+    ///
+    /// As [`LayoutRef::new`].
+    pub fn new(extents: Vec<i64>, strides: Vec<i64>, offset: i64) -> Result<WideLayout, Error> {
+        LayoutRef::new(&extents, &strides, offset)?;
+        Ok(WideLayout {
+            extents,
+            strides,
+            offset,
+        })
+    }
+
+    /// Compact row-major layout over `extents`, with axis 0 fastest.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Overflow`] when the extent product leaves `i64`.
+    pub fn compact(extents: Vec<i64>) -> Result<WideLayout, Error> {
+        let mut strides = Vec::with_capacity(extents.len());
+        let mut stride: i64 = 1;
+        for &extent in &extents {
+            strides.push(stride);
+            stride = stride.checked_mul(extent).ok_or(Error::Overflow)?;
+        }
+        WideLayout::new(extents, strides, 0)
+    }
+
+    /// Borrow this layout as a [`LayoutRef`].
+    pub fn as_ref(&self) -> LayoutRef<'_> {
+        LayoutRef {
+            extents: &self.extents,
+            strides: &self.strides,
+            offset: self.offset,
+        }
+    }
+
+    /// Rank of the layout.
+    pub fn rank(&self) -> u32 {
+        self.extents.len() as u32
+    }
+
+    /// Element offset of coordinate zero.
+    pub fn offset(&self) -> i64 {
+        self.offset
+    }
+
+    /// Extents, axis 0 first.
+    pub fn extents(&self) -> &[i64] {
+        &self.extents
+    }
+
+    /// Signed strides in elements, axis 0 first.
+    pub fn strides(&self) -> &[i64] {
+        &self.strides
+    }
+
+    /// Product of the extents; one for a rank-0 layout.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Overflow`] when the product leaves `i64`.
+    pub fn element_count(&self) -> Result<i64, Error> {
+        self.as_ref().element_count()
+    }
+
+    /// Whether the layout is the compact form of its extents with offset zero.
+    pub fn is_compact(&self) -> bool {
+        self.as_ref().is_compact()
+    }
+
+    /// Smallest element index the layout can address.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Overflow`] when an address leaves `i64`.
+    pub fn min_reachable_offset(&self) -> Result<i64, Error> {
+        self.as_ref().min_reachable_offset()
+    }
+
+    /// Largest element index the layout can address.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Overflow`] when an address leaves `i64`.
+    pub fn max_reachable_offset(&self) -> Result<i64, Error> {
+        self.as_ref().max_reachable_offset()
+    }
+}
+
+impl<'a> From<&'a WideLayout> for LayoutRef<'a> {
+    fn from(layout: &'a WideLayout) -> LayoutRef<'a> {
+        layout.as_ref()
+    }
+}
+
+/// Geometry array of a gather plan for the `_any` ABI: the window operand axes,
+/// the window output axes, the start-component operand axes, then the window
+/// extents (`operand_rank` values).
+pub fn pack_gather_plan(plan: &GatherPlan) -> Vec<i64> {
+    let mut packed = Vec::with_capacity(
+        plan.window_dims.len() * 2 + plan.start_index_map.len() + plan.slice_sizes.len(),
+    );
+    packed.extend(plan.window_dims.iter().map(|&axis| i64::from(axis)));
+    packed.extend(plan.offset_dims.iter().map(|&axis| i64::from(axis)));
+    packed.extend(plan.start_index_map.iter().map(|&axis| i64::from(axis)));
+    packed.extend_from_slice(&plan.slice_sizes);
+    packed
+}
+
+/// Geometry array of a scatter plan for the `_any` ABI: the window operand axes,
+/// the updates axes, then the start-component operand axes.
+pub fn pack_scatter_plan(plan: &ScatterPlan) -> Vec<i64> {
+    let mut packed = Vec::with_capacity(plan.window_dims.len() * 2 + plan.scatter_dims.len());
+    packed.extend(plan.window_dims.iter().map(|&axis| i64::from(axis)));
+    packed.extend(plan.update_window_dims.iter().map(|&axis| i64::from(axis)));
+    packed.extend(plan.scatter_dims.iter().map(|&axis| i64::from(axis)));
+    packed
+}
+
+/// C ABI mirror of [`LayoutRef`] for the `_any` entries: the arrays live in
+/// caller-owned device memory.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CLayoutAny {
+    pub rank: i32,
+    pub reserved: i32,
+    pub offset: i64,
+    pub extents: *const i64,
+    pub strides: *const i64,
+}
+
+impl CLayoutAny {
+    /// Build the launch argument from a layout and the device pointers of its
+    /// geometry ([`LayoutRef::pack`] order: extents, then strides).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Overflow`] when the rank does not fit the ABI's `int`.
+    pub fn new(
+        layout: LayoutRef<'_>,
+        extents: *const i64,
+        strides: *const i64,
+    ) -> Result<CLayoutAny, Error> {
+        let rank = i32::try_from(layout.rank()).map_err(|_| Error::Overflow)?;
+        Ok(CLayoutAny {
+            rank,
+            reserved: 0,
+            offset: layout.offset(),
+            extents,
+            strides,
+        })
+    }
+}
+
+/// C ABI mirror of a per-axis value vector for the `_any` entries.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CAxisValuesAny {
+    pub rank: i32,
+    pub reserved: i32,
+    pub values: *const i64,
+}
+
+impl CAxisValuesAny {
+    /// Build the launch argument from a value count and the device pointer of the
+    /// values.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Overflow`] when the length does not fit the ABI's `int`.
+    pub fn new(len: usize, values: *const i64) -> Result<CAxisValuesAny, Error> {
+        let rank = i32::try_from(len).map_err(|_| Error::Overflow)?;
+        Ok(CAxisValuesAny {
+            rank,
+            reserved: 0,
+            values,
+        })
+    }
+}
+
+/// C ABI mirror of [`GatherPlan`] for the `_any` entries.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CGatherPlanAny {
+    pub operand_rank: i32,
+    pub out_rank: i32,
+    pub index_vector_dim: i32,
+    pub window_rank: i32,
+    pub start_map_len: i32,
+    pub reserved: i32,
+    pub window_dims: *const i64,
+    pub offset_dims: *const i64,
+    pub start_index_map: *const i64,
+    pub slice_sizes: *const i64,
+}
+
+impl CGatherPlanAny {
+    /// Build the launch argument from the plan's derived ranks and the device
+    /// pointers of [`pack_gather_plan`]'s four arrays.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Overflow`] when a length does not fit the ABI's `int`.
+    pub fn new(
+        operand_rank: u32,
+        out_rank: u32,
+        plan: &GatherPlan,
+        window_dims: *const i64,
+        offset_dims: *const i64,
+        start_index_map: *const i64,
+        slice_sizes: *const i64,
+    ) -> Result<CGatherPlanAny, Error> {
+        let narrow = |value: usize| i32::try_from(value).map_err(|_| Error::Overflow);
+        Ok(CGatherPlanAny {
+            operand_rank: narrow(operand_rank as usize)?,
+            out_rank: narrow(out_rank as usize)?,
+            index_vector_dim: narrow(plan.index_vector_dim as usize)?,
+            window_rank: narrow(plan.window_dims.len())?,
+            start_map_len: narrow(plan.start_index_map.len())?,
+            reserved: 0,
+            window_dims,
+            offset_dims,
+            start_index_map,
+            slice_sizes,
+        })
+    }
+}
+
+/// C ABI mirror of [`ScatterPlan`] for the `_any` entries.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CScatterPlanAny {
+    pub operand_rank: i32,
+    pub updates_rank: i32,
+    pub index_vector_dim: i32,
+    pub window_rank: i32,
+    pub scatter_map_len: i32,
+    pub reserved: i32,
+    pub window_dims: *const i64,
+    pub update_window_dims: *const i64,
+    pub scatter_dims: *const i64,
+}
+
+impl CScatterPlanAny {
+    /// Build the launch argument from the plan's derived ranks and the device
+    /// pointers of [`pack_scatter_plan`]'s three arrays.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Overflow`] when a length does not fit the ABI's `int`.
+    pub fn new(
+        operand_rank: u32,
+        updates_rank: u32,
+        plan: &ScatterPlan,
+        window_dims: *const i64,
+        update_window_dims: *const i64,
+        scatter_dims: *const i64,
+    ) -> Result<CScatterPlanAny, Error> {
+        let narrow = |value: usize| i32::try_from(value).map_err(|_| Error::Overflow);
+        Ok(CScatterPlanAny {
+            operand_rank: narrow(operand_rank as usize)?,
+            updates_rank: narrow(updates_rank as usize)?,
+            index_vector_dim: narrow(plan.index_vector_dim as usize)?,
+            window_rank: narrow(plan.window_dims.len())?,
+            scatter_map_len: narrow(plan.scatter_dims.len())?,
+            reserved: 0,
+            window_dims,
+            update_window_dims,
+            scatter_dims,
+        })
+    }
+}
+
+// The C header asserts the same numbers; a change here is an ABI revision.
+const _: () = {
+    assert!(core::mem::size_of::<CLayoutAny>() == 32);
+    assert!(core::mem::align_of::<CLayoutAny>() == 8);
+    assert!(core::mem::offset_of!(CLayoutAny, offset) == 8);
+    assert!(core::mem::offset_of!(CLayoutAny, extents) == 16);
+    assert!(core::mem::offset_of!(CLayoutAny, strides) == 24);
+    assert!(core::mem::size_of::<CAxisValuesAny>() == 16);
+    assert!(core::mem::offset_of!(CAxisValuesAny, values) == 8);
+    assert!(core::mem::size_of::<CGatherPlanAny>() == 56);
+    assert!(core::mem::offset_of!(CGatherPlanAny, window_dims) == 24);
+    assert!(core::mem::offset_of!(CGatherPlanAny, slice_sizes) == 48);
+    assert!(core::mem::size_of::<CScatterPlanAny>() == 48);
+    assert!(core::mem::offset_of!(CScatterPlanAny, scatter_dims) == 40);
+};
+
+/// One general-path (`_any`) symbol and the fast entry it mirrors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GeneralEntry {
+    name: &'static str,
+    fast: Entry,
+}
+
+impl GeneralEntry {
+    /// Every general-path symbol, in `Entry::ALL` order.
+    pub const ALL: [GeneralEntry; 31] = [
+        GeneralEntry::new("t4a_cuda_fill_zero_view_any", Entry::FillZeroView),
+        GeneralEntry::new(
+            "t4a_cuda_materialize_strided_any",
+            Entry::MaterializeStrided,
+        ),
+        GeneralEntry::new("t4a_cuda_contiguous_to_view_any", Entry::ContiguousToView),
+        GeneralEntry::new("t4a_cuda_strided_to_strided_any", Entry::StridedToStrided),
+        GeneralEntry::new("t4a_cuda_extract_diagonal_any", Entry::ExtractDiagonal),
+        GeneralEntry::new("t4a_cuda_embed_diagonal_copy_any", Entry::EmbedDiagonalCopy),
+        GeneralEntry::new("t4a_cuda_slice_any", Entry::Slice),
+        GeneralEntry::new("t4a_cuda_dynamic_slice_any", Entry::DynamicSlice),
+        GeneralEntry::new("t4a_cuda_pad_any", Entry::Pad),
+        GeneralEntry::new("t4a_cuda_reduce_any", Entry::Reduce),
+        GeneralEntry::new("t4a_cuda_reduce_partials_any", Entry::ReducePartials),
+        GeneralEntry::new("t4a_cuda_gather_any", Entry::Gather),
+        GeneralEntry::new("t4a_cuda_scatter_add_any", Entry::ScatterAdd),
+        GeneralEntry::new("t4a_cuda_combined_strided_any", Entry::CombinedStrided),
+        GeneralEntry::new("t4a_cuda_fill_one_any", Entry::FillOne),
+        GeneralEntry::new("t4a_cuda_matrix_adjoint_any", Entry::MatrixAdjoint),
+        GeneralEntry::new(
+            "t4a_cuda_householder_explicit_v_any",
+            Entry::HouseholderExplicitV,
+        ),
+        GeneralEntry::new("t4a_cuda_identity_shifted_any", Entry::IdentityShifted),
+        GeneralEntry::new("t4a_cuda_qr_phase_any", Entry::QrPhase),
+        GeneralEntry::new("t4a_cuda_qr_apply_phase_any", Entry::QrApplyPhase),
+        GeneralEntry::new(
+            "t4a_cuda_upper_trapezoidal_violation_any",
+            Entry::UpperTrapezoidalViolation,
+        ),
+        GeneralEntry::new(
+            "t4a_cuda_householder_assemble_any",
+            Entry::HouseholderAssemble,
+        ),
+        GeneralEntry::new("t4a_cuda_lu_extract_outputs_any", Entry::LuExtractOutputs),
+        GeneralEntry::new("t4a_cuda_lu_apply_pivots_any", Entry::LuApplyPivots),
+        GeneralEntry::new("t4a_cuda_column_norms_any", Entry::ColumnNorms),
+        GeneralEntry::new("t4a_cuda_select_pivot_any", Entry::SelectPivot),
+        GeneralEntry::new("t4a_cuda_swap_columns_any", Entry::SwapColumns),
+        GeneralEntry::new("t4a_cuda_reflector_any", Entry::Reflector),
+        GeneralEntry::new("t4a_cuda_apply_reflector_any", Entry::ApplyReflector),
+        GeneralEntry::new("t4a_cuda_extract_r_any", Entry::ExtractR),
+        GeneralEntry::new("t4a_cuda_prefix_rank_any", Entry::PrefixRank),
+    ];
+
+    const fn new(name: &'static str, fast: Entry) -> GeneralEntry {
+        GeneralEntry { name, fast }
+    }
+
+    /// Exported symbol name.
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+
+    /// The fast entry this symbol mirrors; both accept the same dtypes.
+    pub fn fast(&self) -> Entry {
+        self.fast
+    }
+
+    /// Whether this symbol supports `dtype`, which follows its fast entry.
+    pub fn supports(&self, dtype: DType) -> bool {
+        self.fast.supports(dtype)
+    }
+}
+
+impl Entry {
+    /// The general-path symbol that mirrors this entry, when it has one.
+    pub fn general(&self) -> Option<&'static GeneralEntry> {
+        GeneralEntry::ALL.iter().find(|entry| entry.fast == *self)
     }
 }
 
@@ -745,6 +1354,7 @@ fn flat_launch(len: i64) -> Result<Launch, Error> {
         grid: [blocks as u32, 1, 1],
         block: [FLAT_BLOCK, 1, 1],
         shared_bytes: 0,
+        variant: RankVariant::Fast,
     })
 }
 
@@ -766,12 +1376,18 @@ pub fn plan_fill_zero(dtype: DType, len: i64) -> Result<Launch, Error> {
 ///
 /// `dst_len` is the caller's destination allocation length in elements; the
 /// layout's reachable span must fit inside it.
-pub fn plan_fill_zero_view(dtype: DType, dst: &Layout, dst_len: i64) -> Result<Launch, Error> {
+pub fn plan_fill_zero_view<'a>(
+    dtype: DType,
+    dst: impl Into<LayoutRef<'a>>,
+    dst_len: i64,
+) -> Result<Launch, Error> {
+    let dst = dst.into();
+
     check_dtype(Entry::FillZeroView, dtype)?;
     let len = dst.element_count()?;
     require_destination(dst)?;
     dst.check_span(dst_len, dtype.size())?;
-    flat_launch(len)
+    Ok(flat_launch(len)?.with_variant(&[dst], &[]))
 }
 
 /// Plan [`Entry::CopyExact`].
@@ -781,31 +1397,46 @@ pub fn plan_copy_exact(dtype: DType, len: i64) -> Result<Launch, Error> {
 
 /// Plan [`Entry::MaterializeStrided`]: gather `src.element_count()` strided
 /// elements into a compact destination of the same length.
-pub fn plan_materialize_strided(dtype: DType, src: &Layout, src_len: i64) -> Result<Launch, Error> {
+pub fn plan_materialize_strided<'a>(
+    dtype: DType,
+    src: impl Into<LayoutRef<'a>>,
+    src_len: i64,
+) -> Result<Launch, Error> {
+    let src = src.into();
+
     check_dtype(Entry::MaterializeStrided, dtype)?;
     let len = src.element_count()?;
     src.check_span(src_len, dtype.size())?;
-    flat_launch(len)
+    Ok(flat_launch(len)?.with_variant(&[src], &[]))
 }
 
 /// Plan [`Entry::ContiguousToView`]: scatter a compact source of
 /// `dst.element_count()` elements into `dst`.
-pub fn plan_contiguous_to_view(dtype: DType, dst: &Layout, dst_len: i64) -> Result<Launch, Error> {
+pub fn plan_contiguous_to_view<'a>(
+    dtype: DType,
+    dst: impl Into<LayoutRef<'a>>,
+    dst_len: i64,
+) -> Result<Launch, Error> {
+    let dst = dst.into();
+
     check_dtype(Entry::ContiguousToView, dtype)?;
     let len = dst.element_count()?;
     require_destination(dst)?;
     dst.check_span(dst_len, dtype.size())?;
-    flat_launch(len)
+    Ok(flat_launch(len)?.with_variant(&[dst], &[]))
 }
 
 /// Plan [`Entry::StridedToStrided`]: both layouts share the source's extents.
-pub fn plan_strided_to_strided(
+pub fn plan_strided_to_strided<'a>(
     dtype: DType,
-    src: &Layout,
+    src: impl Into<LayoutRef<'a>>,
     src_len: i64,
-    dst: &Layout,
+    dst: impl Into<LayoutRef<'a>>,
     dst_len: i64,
 ) -> Result<Launch, Error> {
+    let src = src.into();
+    let dst = dst.into();
+
     check_dtype(Entry::StridedToStrided, dtype)?;
     if src.extents() != dst.extents() {
         return Err(Error::CountMismatch);
@@ -814,7 +1445,7 @@ pub fn plan_strided_to_strided(
     require_destination(dst)?;
     src.check_span(src_len, dtype.size())?;
     dst.check_span(dst_len, dtype.size())?;
-    flat_launch(len)
+    Ok(flat_launch(len)?.with_variant(&[src, dst], &[]))
 }
 
 /// Plan [`Entry::TiledTranspose`] over `batches` compact `(M, N)` matrices.
@@ -864,6 +1495,7 @@ pub fn plan_tiled_transpose(
             1,
         ],
         shared_bytes: u32::try_from(shared_bytes).map_err(|_| Error::Overflow)?,
+        variant: RankVariant::Fast,
     };
     if launch.grid.contains(&0) {
         return Ok(Launch {
@@ -1171,16 +1803,20 @@ pub fn plan_clamp(dtype: DType, len: i64) -> Result<Launch, Error> {
 /// strides; `out` must be a destination. `out_len`, `a_len` and `b_len` are the
 /// caller's allocation lengths in elements.
 #[allow(clippy::too_many_arguments)]
-pub fn plan_combined_strided(
+pub fn plan_combined_strided<'a>(
     op: StridedOp,
     dtype: DType,
-    out: &Layout,
+    out: impl Into<LayoutRef<'a>>,
     out_len: i64,
-    a: &Layout,
+    a: impl Into<LayoutRef<'a>>,
     a_len: i64,
-    b: &Layout,
+    b: impl Into<LayoutRef<'a>>,
     b_len: i64,
 ) -> Result<Launch, Error> {
+    let out = out.into();
+    let a = a.into();
+    let b = b.into();
+
     if !op.accepts(dtype) {
         return Err(Error::UnsupportedOp);
     }
@@ -1191,12 +1827,14 @@ pub fn plan_combined_strided(
     out.check_span(out_len, dtype.size())?;
     a.check_span(a_len, dtype.size())?;
     b.check_span(b_len, dtype.size())?;
-    flat_launch(out.element_count()?)
+    Ok(flat_launch(out.element_count()?)?.with_variant(&[out, a, b], &[]))
 }
 
 // --- revision 7: linalg auxiliaries -----------------------------------------
 
-fn require_matrix(layout: &Layout) -> Result<(), Error> {
+fn require_matrix<'a>(layout: impl Into<LayoutRef<'a>>) -> Result<(), Error> {
+    let layout = layout.into();
+
     if layout.rank() >= 2 {
         Ok(())
     } else {
@@ -1204,7 +1842,9 @@ fn require_matrix(layout: &Layout) -> Result<(), Error> {
     }
 }
 
-fn batch_extents(layout: &Layout) -> &[i64] {
+fn batch_extents<'a>(layout: impl Into<LayoutRef<'a>>) -> &'a [i64] {
+    let layout = layout.into();
+
     &layout.extents()[2..]
 }
 
@@ -1217,22 +1857,31 @@ fn extent_product(extents: &[i64]) -> Result<i64, Error> {
 }
 
 /// Plan [`Entry::FillOne`]: one at every logical position of `out`.
-pub fn plan_fill_one(dtype: DType, out: &Layout, out_len: i64) -> Result<Launch, Error> {
+pub fn plan_fill_one<'a>(
+    dtype: DType,
+    out: impl Into<LayoutRef<'a>>,
+    out_len: i64,
+) -> Result<Launch, Error> {
+    let out = out.into();
+
     check_dtype(Entry::FillOne, dtype)?;
     require_destination(out)?;
     let len = out.element_count()?;
     out.check_span(out_len, dtype.size())?;
-    flat_launch(len)
+    Ok(flat_launch(len)?.with_variant(&[out], &[]))
 }
 
 /// Plan [`Entry::MatrixAdjoint`]: conjugate transpose of the first two axes.
-pub fn plan_matrix_adjoint(
+pub fn plan_matrix_adjoint<'a>(
     dtype: DType,
-    out: &Layout,
+    out: impl Into<LayoutRef<'a>>,
     out_len: i64,
-    v: &Layout,
+    v: impl Into<LayoutRef<'a>>,
     v_len: i64,
 ) -> Result<Launch, Error> {
+    let out = out.into();
+    let v = v.into();
+
     check_dtype(Entry::MatrixAdjoint, dtype)?;
     require_destination(out)?;
     require_matrix(out)?;
@@ -1246,18 +1895,21 @@ pub fn plan_matrix_adjoint(
     let len = out.element_count()?;
     out.check_span(out_len, dtype.size())?;
     v.check_span(v_len, dtype.size())?;
-    flat_launch(len)
+    Ok(flat_launch(len)?.with_variant(&[out, v], &[]))
 }
 
 /// Plan [`Entry::HouseholderExplicitV`]: rank-2 explicit vector from the packed
 /// strict-lower part. The output may be narrower than the packed matrix.
-pub fn plan_householder_explicit_v(
+pub fn plan_householder_explicit_v<'a>(
     dtype: DType,
-    out: &Layout,
+    out: impl Into<LayoutRef<'a>>,
     out_len: i64,
-    packed: &Layout,
+    packed: impl Into<LayoutRef<'a>>,
     packed_len: i64,
 ) -> Result<Launch, Error> {
+    let out = out.into();
+    let packed = packed.into();
+
     check_dtype(Entry::HouseholderExplicitV, dtype)?;
     require_destination(out)?;
     if out.rank() != 2 || packed.rank() != 2 {
@@ -1269,16 +1921,18 @@ pub fn plan_householder_explicit_v(
     let len = out.element_count()?;
     out.check_span(out_len, dtype.size())?;
     packed.check_span(packed_len, dtype.size())?;
-    flat_launch(len)
+    Ok(flat_launch(len)?.with_variant(&[out, packed], &[]))
 }
 
 /// Plan [`Entry::IdentityShifted`]: `out(i, j, ..) = (i == start + j)`.
-pub fn plan_identity_shifted(
+pub fn plan_identity_shifted<'a>(
     dtype: DType,
-    out: &Layout,
+    out: impl Into<LayoutRef<'a>>,
     out_len: i64,
     start: i64,
 ) -> Result<Launch, Error> {
+    let out = out.into();
+
     check_dtype(Entry::IdentityShifted, dtype)?;
     require_destination(out)?;
     require_matrix(out)?;
@@ -1288,17 +1942,20 @@ pub fn plan_identity_shifted(
     start.checked_add(out.extents()[1]).ok_or(Error::Overflow)?;
     let len = out.element_count()?;
     out.check_span(out_len, dtype.size())?;
-    flat_launch(len)
+    Ok(flat_launch(len)?.with_variant(&[out], &[]))
 }
 
 /// Plan [`Entry::QrPhase`]: one phase entry per R diagonal of each batch.
-pub fn plan_qr_phase(
+pub fn plan_qr_phase<'a>(
     dtype: DType,
-    phase: &Layout,
+    phase: impl Into<LayoutRef<'a>>,
     phase_len: i64,
-    r: &Layout,
+    r: impl Into<LayoutRef<'a>>,
     r_len: i64,
 ) -> Result<Launch, Error> {
+    let phase = phase.into();
+    let r = r.into();
+
     check_dtype(Entry::QrPhase, dtype)?;
     require_matrix(r)?;
     if phase.rank() + 1 != r.rank() || phase.extents()[1..] != r.extents()[2..] {
@@ -1312,21 +1969,25 @@ pub fn plan_qr_phase(
     let len = phase.element_count()?;
     phase.check_span(phase_len, dtype.size())?;
     r.check_span(r_len, dtype.size())?;
-    flat_launch(len)
+    Ok(flat_launch(len)?.with_variant(&[phase, r], &[]))
 }
 
 /// Plan [`Entry::QrApplyPhase`]: scale Q's trailing columns and R's rows in place.
 #[allow(clippy::too_many_arguments)]
-pub fn plan_qr_apply_phase(
+pub fn plan_qr_apply_phase<'a>(
     dtype: DType,
-    q: &Layout,
+    q: impl Into<LayoutRef<'a>>,
     q_len: i64,
-    r: &Layout,
+    r: impl Into<LayoutRef<'a>>,
     r_len: i64,
-    phase: &Layout,
+    phase: impl Into<LayoutRef<'a>>,
     phase_len: i64,
     q_start: i64,
 ) -> Result<Launch, Error> {
+    let q = q.into();
+    let r = r.into();
+    let phase = phase.into();
+
     check_dtype(Entry::QrApplyPhase, dtype)?;
     require_matrix(q)?;
     require_matrix(r)?;
@@ -1350,18 +2011,21 @@ pub fn plan_qr_apply_phase(
     q.check_span(q_len, dtype.size())?;
     r.check_span(r_len, dtype.size())?;
     phase.check_span(phase_len, dtype.size())?;
-    flat_launch(domain)
+    Ok(flat_launch(domain)?.with_variant(&[q, r, phase], &[]))
 }
 
 /// Plan [`Entry::UpperTrapezoidalViolation`]: `i32` violation matrix of the
 /// strictly-lower part of `input`.
-pub fn plan_upper_trapezoidal_violation(
+pub fn plan_upper_trapezoidal_violation<'a>(
     dtype: DType,
-    violation: &Layout,
+    violation: impl Into<LayoutRef<'a>>,
     violation_len: i64,
-    input: &Layout,
+    input: impl Into<LayoutRef<'a>>,
     input_len: i64,
 ) -> Result<Launch, Error> {
+    let violation = violation.into();
+    let input = input.into();
+
     check_dtype(Entry::UpperTrapezoidalViolation, dtype)?;
     require_destination(violation)?;
     require_matrix(violation)?;
@@ -1372,24 +2036,28 @@ pub fn plan_upper_trapezoidal_violation(
     let len = violation.element_count()?;
     violation.check_span(violation_len, DType::I32.size())?;
     input.check_span(input_len, dtype.size())?;
-    flat_launch(len)
+    Ok(flat_launch(len)?.with_variant(&[violation, input], &[]))
 }
 
 /// Plan [`Entry::HouseholderAssemble`]: rank-2 factor assembly from `folded_r` and
 /// `packed_q`, with flat coefficient arrays.
 #[allow(clippy::too_many_arguments)]
-pub fn plan_householder_assemble(
+pub fn plan_householder_assemble<'a>(
     dtype: DType,
-    packed_out: &Layout,
+    packed_out: impl Into<LayoutRef<'a>>,
     packed_out_len: i64,
     coeff_out_len: i64,
-    packed_q: &Layout,
+    packed_q: impl Into<LayoutRef<'a>>,
     packed_q_len: i64,
-    folded_r: &Layout,
+    folded_r: impl Into<LayoutRef<'a>>,
     folded_r_len: i64,
     coeff_q_len: i64,
     factor_width: i64,
 ) -> Result<Launch, Error> {
+    let packed_out = packed_out.into();
+    let packed_q = packed_q.into();
+    let folded_r = folded_r.into();
+
     check_dtype(Entry::HouseholderAssemble, dtype)?;
     require_destination(packed_out)?;
     if packed_out.rank() != 2 || packed_q.rank() != 2 || folded_r.rank() != 2 {
@@ -1416,27 +2084,32 @@ pub fn plan_householder_assemble(
     packed_out.check_span(packed_out_len, dtype.size())?;
     packed_q.check_span(packed_q_len, dtype.size())?;
     folded_r.check_span(folded_r_len, dtype.size())?;
-    flat_launch(domain)
+    Ok(flat_launch(domain)?.with_variant(&[packed_out, packed_q, folded_r], &[]))
 }
 
 /// Plan [`Entry::LuExtractOutputs`]: P, L, U and the permutation parity of a packed
 /// LU factorisation, with `k` one-based pivots per batch.
 #[allow(clippy::too_many_arguments)]
-pub fn plan_lu_extract_outputs(
+pub fn plan_lu_extract_outputs<'a>(
     dtype: DType,
-    p: &Layout,
+    p: impl Into<LayoutRef<'a>>,
     p_len: i64,
-    l: &Layout,
+    l: impl Into<LayoutRef<'a>>,
     l_len: i64,
-    u: &Layout,
+    u: impl Into<LayoutRef<'a>>,
     u_len: i64,
-    work: &Layout,
+    work: impl Into<LayoutRef<'a>>,
     work_len: i64,
     pivots_len: i64,
     k: i64,
     batches: i64,
     parity_len: i64,
 ) -> Result<Launch, Error> {
+    let p = p.into();
+    let l = l.into();
+    let u = u.into();
+    let work = work.into();
+
     check_dtype(Entry::LuExtractOutputs, dtype)?;
     require_matrix(work)?;
     if p.rank() != work.rank() || l.rank() != work.rank() || u.rank() != work.rank() {
@@ -1491,7 +2164,7 @@ pub fn plan_lu_extract_outputs(
     l.check_span(l_len, dtype.size())?;
     u.check_span(u_len, dtype.size())?;
     work.check_span(work_len, dtype.size())?;
-    flat_launch(domain)
+    Ok(flat_launch(domain)?.with_variant(&[p, l, u, work], &[]))
 }
 
 /// Plan [`Entry::LuParity`]: one parity value per batch from the pivots alone.
@@ -1517,15 +2190,18 @@ pub fn plan_lu_parity(
 /// Plan [`Entry::LuApplyPivots`]: permute the rows of `input` into `out`.
 /// `pivots_len` is the caller's pivot-array length in `int32_t` elements.
 #[allow(clippy::too_many_arguments)]
-pub fn plan_lu_apply_pivots(
+pub fn plan_lu_apply_pivots<'a>(
     dtype: DType,
-    out: &Layout,
+    out: impl Into<LayoutRef<'a>>,
     out_len: i64,
-    input: &Layout,
+    input: impl Into<LayoutRef<'a>>,
     input_len: i64,
     pivots_len: i64,
     k: i64,
 ) -> Result<Launch, Error> {
+    let out = out.into();
+    let input = input.into();
+
     check_dtype(Entry::LuApplyPivots, dtype)?;
     require_destination(out)?;
     require_matrix(out)?;
@@ -1549,7 +2225,7 @@ pub fn plan_lu_apply_pivots(
     let len = out.element_count()?;
     out.check_span(out_len, dtype.size())?;
     input.check_span(input_len, dtype.size())?;
-    flat_launch(len)
+    Ok(flat_launch(len)?.with_variant(&[out, input], &[]))
 }
 
 // --- revision 8: rank-revealing QR primitives -------------------------------
@@ -1579,12 +2255,19 @@ fn plane_launch(tasks: i64) -> Result<Launch, Error> {
         grid: [tasks as u32, 1, 1],
         block: [PLANE_BLOCK, 1, 1],
         shared_bytes: 0,
+        variant: RankVariant::Fast,
     })
 }
 
 /// The one-axis-shorter operand rule: same batch axes as the matrix, with axis 0
 /// carrying the column or step index.
-fn require_shorter(shorter: &Layout, matrix: &Layout) -> Result<(), Error> {
+fn require_shorter<'a>(
+    shorter: impl Into<LayoutRef<'a>>,
+    matrix: impl Into<LayoutRef<'a>>,
+) -> Result<(), Error> {
+    let shorter = shorter.into();
+    let matrix = matrix.into();
+
     require_matrix(matrix)?;
     if shorter.rank() + 1 != matrix.rank() {
         return Err(Error::ShapeMismatch);
@@ -1605,14 +2288,17 @@ pub fn plan_initialize_permutation(n: i64, len: i64) -> Result<Launch, Error> {
 
 /// Plan [`Entry::ColumnNorms`]: one plane per (batch, trailing column). `step` is
 /// the elimination step, so columns `step..n` are measured from rows `step..m`.
-pub fn plan_column_norms(
+pub fn plan_column_norms<'a>(
     dtype: DType,
-    work: &Layout,
+    work: impl Into<LayoutRef<'a>>,
     work_len: i64,
-    norms: &Layout,
+    norms: impl Into<LayoutRef<'a>>,
     norms_len: i64,
     step: i64,
 ) -> Result<Launch, Error> {
+    let work = work.into();
+    let norms = norms.into();
+
     check_dtype(Entry::ColumnNorms, dtype)?;
     require_shorter(norms, work)?;
     let rows = work.extents()[0];
@@ -1633,22 +2319,28 @@ pub fn plan_column_norms(
     work.check_span(work_len, dtype.size())?;
     norms.check_span(norms_len, component_dtype(dtype).size())?;
     let batches = extent_product(batch_extents(work))?;
-    plane_launch(batches.checked_mul(cols - step).ok_or(Error::Overflow)?)
+    Ok(
+        plane_launch(batches.checked_mul(cols - step).ok_or(Error::Overflow)?)?
+            .with_variant(&[work, norms], &[]),
+    )
 }
 
 /// Plan [`Entry::SelectPivot`]: one plane per batch, choosing the pivot column from
 /// the norms and the permutation.
 #[allow(clippy::too_many_arguments)]
-pub fn plan_select_pivot(
+pub fn plan_select_pivot<'a>(
     dtype: DType,
-    norms: &Layout,
+    norms: impl Into<LayoutRef<'a>>,
     norms_len: i64,
-    permutation: &Layout,
+    permutation: impl Into<LayoutRef<'a>>,
     permutation_len: i64,
     pivots_len: i64,
     status_len: i64,
     step: i64,
 ) -> Result<Launch, Error> {
+    let norms = norms.into();
+    let permutation = permutation.into();
+
     check_dtype(Entry::SelectPivot, dtype)?;
     if norms.rank() == 0 || permutation.rank() != norms.rank() {
         return Err(Error::ShapeMismatch);
@@ -1666,22 +2358,25 @@ pub fn plan_select_pivot(
     }
     norms.check_span(norms_len, dtype.size())?;
     permutation.check_span(permutation_len, DType::I64.size())?;
-    plane_launch(batches)
+    Ok(plane_launch(batches)?.with_variant(&[norms, permutation], &[]))
 }
 
 /// Plan [`Entry::SwapColumns`]: exchange column `step` with the chosen pivot column
 /// and the matching permutation entries. `pivots_len` is the caller's pivot-array
 /// length in `int64_t` elements.
 #[allow(clippy::too_many_arguments)]
-pub fn plan_swap_columns(
+pub fn plan_swap_columns<'a>(
     dtype: DType,
-    work: &Layout,
+    work: impl Into<LayoutRef<'a>>,
     work_len: i64,
-    permutation: &Layout,
+    permutation: impl Into<LayoutRef<'a>>,
     permutation_len: i64,
     pivots_len: i64,
     step: i64,
 ) -> Result<Launch, Error> {
+    let work = work.into();
+    let permutation = permutation.into();
+
     check_dtype(Entry::SwapColumns, dtype)?;
     require_shorter(permutation, work)?;
     let cols = work.extents()[1];
@@ -1700,18 +2395,24 @@ pub fn plan_swap_columns(
     if pivots_len < batches {
         return Err(Error::ShapeMismatch);
     }
-    flat_launch(rows.checked_mul(batches).ok_or(Error::Overflow)?)
+    Ok(
+        flat_launch(rows.checked_mul(batches).ok_or(Error::Overflow)?)?
+            .with_variant(&[work, permutation], &[]),
+    )
 }
 
 /// Plan [`Entry::Reflector`]: build the Householder reflector for column `step`.
-pub fn plan_reflector(
+pub fn plan_reflector<'a>(
     dtype: DType,
-    work: &Layout,
+    work: impl Into<LayoutRef<'a>>,
     work_len: i64,
-    coeff: &Layout,
+    coeff: impl Into<LayoutRef<'a>>,
     coeff_len: i64,
     step: i64,
 ) -> Result<Launch, Error> {
+    let work = work.into();
+    let coeff = coeff.into();
+
     check_dtype(Entry::Reflector, dtype)?;
     require_shorter(coeff, work)?;
     let rows = work.extents()[0];
@@ -1724,24 +2425,28 @@ pub fn plan_reflector(
     require_destination(coeff)?;
     work.check_span(work_len, dtype.size())?;
     coeff.check_span(coeff_len, dtype.size())?;
-    plane_launch(extent_product(batch_extents(work))?)
+    Ok(plane_launch(extent_product(batch_extents(work))?)?.with_variant(&[work, coeff], &[]))
 }
 
 /// Plan [`Entry::ApplyReflector`]: apply the stored reflector to columns
 /// `first_column..first_column + column_count` of `target`.
 #[allow(clippy::too_many_arguments)]
-pub fn plan_apply_reflector(
+pub fn plan_apply_reflector<'a>(
     dtype: DType,
-    packed: &Layout,
+    packed: impl Into<LayoutRef<'a>>,
     packed_len: i64,
-    target: &Layout,
+    target: impl Into<LayoutRef<'a>>,
     target_len: i64,
-    coeff: &Layout,
+    coeff: impl Into<LayoutRef<'a>>,
     coeff_len: i64,
     step: i64,
     first_column: i64,
     column_count: i64,
 ) -> Result<Launch, Error> {
+    let packed = packed.into();
+    let target = target.into();
+    let coeff = coeff.into();
+
     check_dtype(Entry::ApplyReflector, dtype)?;
     require_destination(target)?;
     require_matrix(packed)?;
@@ -1774,17 +2479,23 @@ pub fn plan_apply_reflector(
     target.check_span(target_len, dtype.size())?;
     coeff.check_span(coeff_len, dtype.size())?;
     let batches = extent_product(batch_extents(packed))?;
-    plane_launch(batches.checked_mul(column_count).ok_or(Error::Overflow)?)
+    Ok(
+        plane_launch(batches.checked_mul(column_count).ok_or(Error::Overflow)?)?
+            .with_variant(&[packed, target, coeff], &[]),
+    )
 }
 
 /// Plan [`Entry::ExtractR`]: copy the upper triangle of `work` into `r`.
-pub fn plan_extract_r(
+pub fn plan_extract_r<'a>(
     dtype: DType,
-    work: &Layout,
+    work: impl Into<LayoutRef<'a>>,
     work_len: i64,
-    r: &Layout,
+    r: impl Into<LayoutRef<'a>>,
     r_len: i64,
 ) -> Result<Launch, Error> {
+    let work = work.into();
+    let r = r.into();
+
     check_dtype(Entry::ExtractR, dtype)?;
     require_destination(r)?;
     require_matrix(work)?;
@@ -1801,19 +2512,21 @@ pub fn plan_extract_r(
     let len = r.element_count()?;
     r.check_span(r_len, dtype.size())?;
     work.check_span(work_len, dtype.size())?;
-    flat_launch(len)
+    Ok(flat_launch(len)?.with_variant(&[work, r], &[]))
 }
 
 /// Plan [`Entry::PrefixRank`]: the leading diagonal prefix above the tolerance.
-pub fn plan_prefix_rank(
+pub fn plan_prefix_rank<'a>(
     dtype: DType,
-    r: &Layout,
+    r: impl Into<LayoutRef<'a>>,
     r_len: i64,
     rank_len: i64,
     status_len: i64,
     rtol: f64,
     atol: f64,
 ) -> Result<Launch, Error> {
+    let r = r.into();
+
     check_dtype(Entry::PrefixRank, dtype)?;
     require_matrix(r)?;
     let rows = r.extents()[0];
@@ -1827,7 +2540,7 @@ pub fn plan_prefix_rank(
     }
     r.check_span(r_len, dtype.size())?;
     let _ = (rtol, atol);
-    plane_launch(batches)
+    Ok(plane_launch(batches)?.with_variant(&[r], &[]))
 }
 
 /// XLA-style gather dimension maps. All vectors are validated by
@@ -1890,7 +2603,12 @@ fn require_index_dtype(index_dtype: DType) -> Result<(), Error> {
 
 /// Index vector size: the vector axis extent, or 1 when the vector axis is
 /// absent (a scalar start per batch), matching the baseline.
-fn index_vector_size(indices: &Layout, index_vector_dim: u32) -> Result<i64, Error> {
+fn index_vector_size<'a>(
+    indices: impl Into<LayoutRef<'a>>,
+    index_vector_dim: u32,
+) -> Result<i64, Error> {
+    let indices = indices.into();
+
     if index_vector_dim == indices.rank() {
         return Ok(1);
     }
@@ -1901,7 +2619,9 @@ fn index_vector_size(indices: &Layout, index_vector_dim: u32) -> Result<i64, Err
 }
 
 /// Index batch extents: the index extents without the vector axis, in order.
-fn index_batch_extents(indices: &Layout, index_vector_dim: u32) -> Vec<i64> {
+fn index_batch_extents<'a>(indices: impl Into<LayoutRef<'a>>, index_vector_dim: u32) -> Vec<i64> {
+    let indices = indices.into();
+
     indices
         .extents()
         .iter()
@@ -1914,17 +2634,21 @@ fn index_batch_extents(indices: &Layout, index_vector_dim: u32) -> Vec<i64> {
 /// Plan [`Entry::Gather`]. Returns the launch and the output element count the
 /// kernel expects; the derived output extents must equal `out_layout`'s.
 #[allow(clippy::too_many_arguments)]
-pub fn plan_gather(
+pub fn plan_gather<'a>(
     dtype: DType,
     index_dtype: DType,
-    out_layout: &Layout,
+    out_layout: impl Into<LayoutRef<'a>>,
     out_len: i64,
-    operand_layout: &Layout,
+    operand_layout: impl Into<LayoutRef<'a>>,
     operand_len: i64,
-    indices_layout: &Layout,
+    indices_layout: impl Into<LayoutRef<'a>>,
     indices_len: i64,
     plan: &GatherPlan,
 ) -> Result<(Launch, i64), Error> {
+    let out_layout = out_layout.into();
+    let operand_layout = operand_layout.into();
+    let indices_layout = indices_layout.into();
+
     check_dtype(Entry::Gather, dtype)?;
     require_index_dtype(index_dtype)?;
     require_compact(indices_layout)?;
@@ -1997,23 +2721,37 @@ pub fn plan_gather(
     indices_layout.check_span(indices_len, index_dtype.size())?;
     out_layout.check_span(out_len, dtype.size())?;
     let output_len = out_layout.element_count()?;
-    Ok((flat_launch(output_len)?, output_len))
+    Ok((
+        flat_launch(output_len)?.with_variant(
+            &[out_layout, operand_layout, indices_layout],
+            &[
+                plan.window_dims.len(),
+                plan.start_index_map.len(),
+                plan.slice_sizes.len(),
+            ],
+        ),
+        output_len,
+    ))
 }
 
 /// Plan [`Entry::ScatterAdd`]. The destination already holds the operand copy;
 /// its extents are the operand extents.
 #[allow(clippy::too_many_arguments)]
-pub fn plan_scatter_add(
+pub fn plan_scatter_add<'a>(
     dtype: DType,
     index_dtype: DType,
-    out_layout: &Layout,
+    out_layout: impl Into<LayoutRef<'a>>,
     out_len: i64,
-    indices_layout: &Layout,
+    indices_layout: impl Into<LayoutRef<'a>>,
     indices_len: i64,
-    updates_layout: &Layout,
+    updates_layout: impl Into<LayoutRef<'a>>,
     updates_len: i64,
     plan: &ScatterPlan,
 ) -> Result<Launch, Error> {
+    let out_layout = out_layout.into();
+    let indices_layout = indices_layout.into();
+    let updates_layout = updates_layout.into();
+
     check_dtype(Entry::ScatterAdd, dtype)?;
     require_index_dtype(index_dtype)?;
     require_compact(indices_layout)?;
@@ -2047,9 +2785,17 @@ pub fn plan_scatter_add(
     indices_layout.check_span(indices_len, index_dtype.size())?;
     updates_layout.check_span(updates_len, dtype.size())?;
     if out_layout.element_count()? == 0 {
-        return Ok(Launch::EMPTY);
+        return Ok(Launch::EMPTY.with_variant(
+            &[out_layout, indices_layout, updates_layout],
+            &[plan.window_dims.len(), plan.scatter_dims.len()],
+        ));
     }
-    flat_launch(update_len)
+    flat_launch(update_len).map(|launch| {
+        launch.with_variant(
+            &[out_layout, indices_layout, updates_layout],
+            &[plan.window_dims.len(), plan.scatter_dims.len()],
+        )
+    })
 }
 
 /// Supported warp-plane widths. Every NVIDIA target has 32; 8 and 16 are
@@ -2189,15 +2935,18 @@ fn check_plane_width(plane_width: u32) -> Result<(), Error> {
 }
 
 /// Validate the common reduction metadata and return `(reduce_len, output_len)`.
-fn reduce_problem(
+fn reduce_problem<'a>(
     dtype: DType,
     op: ReduceOp,
-    out_layout: &Layout,
+    out_layout: impl Into<LayoutRef<'a>>,
     out_len: i64,
-    in_layout: &Layout,
+    in_layout: impl Into<LayoutRef<'a>>,
     in_len: i64,
     axis: u32,
 ) -> Result<(i64, i64), Error> {
+    let out_layout = out_layout.into();
+    let in_layout = in_layout.into();
+
     if !op.supports(dtype) {
         return Err(Error::UnsupportedDType);
     }
@@ -2256,12 +3005,14 @@ fn launch_for(
                     grid: [0, 0, 0],
                     block,
                     shared_bytes: 0,
+                    variant: RankVariant::Fast,
                 });
             }
             Ok(Launch {
                 grid: [blocks, 1, 1],
                 block,
                 shared_bytes: 0,
+                variant: RankVariant::Fast,
             })
         }
         ReduceStrategy::Plane => {
@@ -2273,6 +3024,7 @@ fn launch_for(
                 grid: [blocks, 1, 1],
                 block,
                 shared_bytes: 0,
+                variant: RankVariant::Fast,
             })
         }
     }
@@ -2297,37 +3049,44 @@ fn check_strategy(
 /// Plan [`Entry::Reduce`] with an explicit strategy. This is also how the
 /// combine pass of a split reduction is planned (it is never split again).
 #[allow(clippy::too_many_arguments)]
-pub fn plan_reduce(
+pub fn plan_reduce<'a>(
     dtype: DType,
     op: ReduceOp,
     strategy: ReduceStrategy,
-    out_layout: &Layout,
+    out_layout: impl Into<LayoutRef<'a>>,
     out_len: i64,
-    in_layout: &Layout,
+    in_layout: impl Into<LayoutRef<'a>>,
     in_len: i64,
     axis: u32,
     plane_width: u32,
 ) -> Result<Launch, Error> {
+    let out_layout = out_layout.into();
+    let in_layout = in_layout.into();
+
     check_plane_width(plane_width)?;
     let (reduce_len, output_len) =
         reduce_problem(dtype, op, out_layout, out_len, in_layout, in_len, axis)?;
     check_strategy(strategy, reduce_len, plane_width)?;
     launch_for(strategy, output_len, plane_width)
+        .map(|launch| launch.with_variant(&[out_layout, in_layout], &[]))
 }
 
 /// Plan [`Entry::ReducePartials`], pass 1 of a split reduction.
 #[allow(clippy::too_many_arguments)]
-pub fn plan_reduce_partials(
+pub fn plan_reduce_partials<'a>(
     dtype: DType,
     op: ReduceOp,
-    partials_layout: &Layout,
+    partials_layout: impl Into<LayoutRef<'a>>,
     partials_len: i64,
-    in_layout: &Layout,
+    in_layout: impl Into<LayoutRef<'a>>,
     in_len: i64,
     axis: u32,
     split: Split,
     plane_width: u32,
 ) -> Result<Launch, Error> {
+    let partials_layout = partials_layout.into();
+    let in_layout = in_layout.into();
+
     check_plane_width(plane_width)?;
     if !op.supports(dtype) {
         return Err(Error::UnsupportedDType);
@@ -2392,22 +3151,26 @@ pub fn plan_reduce_partials(
         grid: [blocks, 1, 1],
         block: [plane_width, 1, 1],
         shared_bytes: 0,
+        variant: RankVariant::select(&[partials_layout, in_layout], &[]),
     })
 }
 
 /// Plan a whole reduction with the baseline's Auto policy: unit or plane for a
 /// short axis, otherwise pass 1 partials plus a non-recursive combine pass.
 #[allow(clippy::too_many_arguments)]
-pub fn plan_reduction(
+pub fn plan_reduction<'a>(
     dtype: DType,
     op: ReduceOp,
-    out_layout: &Layout,
+    out_layout: impl Into<LayoutRef<'a>>,
     out_len: i64,
-    in_layout: &Layout,
+    in_layout: impl Into<LayoutRef<'a>>,
     in_len: i64,
     axis: u32,
     plane_width: u32,
 ) -> Result<ReductionPlan, Error> {
+    let out_layout = out_layout.into();
+    let in_layout = in_layout.into();
+
     check_plane_width(plane_width)?;
     let (reduce_len, _) = reduce_problem(dtype, op, out_layout, out_len, in_layout, in_len, axis)?;
     let strategy = strategy_for(reduce_len, plane_width);
@@ -2428,7 +3191,7 @@ pub fn plan_reduction(
         }),
         Some(split) => {
             let partials_layout = partials_layout_for(in_layout, axis, split.splits)?;
-            let partials_len = partials_layout.element_count()?;
+            let partials_len = partials_layout.as_ref().element_count()?;
             let pass1 = plan_reduce_partials(
                 dtype,
                 op,
@@ -2471,18 +3234,28 @@ pub fn plan_reduction(
 ///
 /// [`ReductionPlan::Split`] carries the two passes but not this layout, so a caller
 /// sizing the pass-1 workspace calls this with the same `splits` the plan reports.
-pub fn reduction_partials_layout(
-    in_layout: &Layout,
+pub fn reduction_partials_layout<'a>(
+    in_layout: impl Into<LayoutRef<'a>>,
     axis: u32,
     splits: i64,
-) -> Result<Layout, Error> {
+) -> Result<WideLayout, Error> {
+    let in_layout = in_layout.into();
+
     partials_layout_for(in_layout, axis, splits)
 }
 
-fn partials_layout_for(in_layout: &Layout, axis: u32, splits: i64) -> Result<Layout, Error> {
+fn partials_layout_for<'a>(
+    in_layout: impl Into<LayoutRef<'a>>,
+    axis: u32,
+    splits: i64,
+) -> Result<WideLayout, Error> {
+    let in_layout = in_layout.into();
+
+    // A general path must be able to plan its split partials layout, so this
+    // returns the unranked owned form rather than the 8-array fast-path type.
     let mut extents = in_layout.extents().to_vec();
     extents[axis as usize] = splits;
-    Layout::compact(&extents)
+    WideLayout::compact(extents)
 }
 
 /// Diagonal output axis for extraction: the caller derives it from the two input
@@ -2496,11 +3269,13 @@ fn diagonal_output_axis(axis_a: u32, axis_b: u32) -> u32 {
 }
 
 /// Expected output extents of [`Entry::ExtractDiagonal`].
-fn extract_diagonal_extents(
-    in_layout: &Layout,
+fn extract_diagonal_extents<'a>(
+    in_layout: impl Into<LayoutRef<'a>>,
     axis_a: u32,
     axis_b: u32,
 ) -> Result<Vec<i64>, Error> {
+    let in_layout = in_layout.into();
+
     let mut extents: Vec<i64> = in_layout
         .extents()
         .iter()
@@ -2515,14 +3290,22 @@ fn extract_diagonal_extents(
 }
 
 /// Expected output extents of [`Entry::EmbedDiagonalCopy`].
-fn embed_diagonal_extents(in_layout: &Layout, axis_a: u32, axis_b: u32) -> Vec<i64> {
+fn embed_diagonal_extents<'a>(
+    in_layout: impl Into<LayoutRef<'a>>,
+    axis_a: u32,
+    axis_b: u32,
+) -> Vec<i64> {
+    let in_layout = in_layout.into();
+
     let mut extents = in_layout.extents().to_vec();
     let diagonal = in_layout.extents()[axis_a as usize];
     extents.insert(axis_b as usize, diagonal);
     extents
 }
 
-fn require_compact(layout: &Layout) -> Result<(), Error> {
+fn require_compact<'a>(layout: impl Into<LayoutRef<'a>>) -> Result<(), Error> {
+    let layout = layout.into();
+
     if layout.is_compact() {
         Ok(())
     } else {
@@ -2538,7 +3321,12 @@ fn require_axis(axis: u32, rank: u32) -> Result<(), Error> {
     }
 }
 
-fn expected_out_extents(out_layout: &Layout, expected: &[i64]) -> Result<(), Error> {
+fn expected_out_extents<'a>(
+    out_layout: impl Into<LayoutRef<'a>>,
+    expected: &[i64],
+) -> Result<(), Error> {
+    let out_layout = out_layout.into();
+
     if out_layout.extents() == expected {
         Ok(())
     } else {
@@ -2549,15 +3337,18 @@ fn expected_out_extents(out_layout: &Layout, expected: &[i64]) -> Result<(), Err
 /// Plan [`Entry::ExtractDiagonal`]. The output layout must be the compact
 /// `in` without `axis_b` and with the diagonal length at
 /// `axis_a - (axis_b < axis_a)`.
-pub fn plan_extract_diagonal(
+pub fn plan_extract_diagonal<'a>(
     dtype: DType,
-    in_layout: &Layout,
+    in_layout: impl Into<LayoutRef<'a>>,
     in_len: i64,
-    out_layout: &Layout,
+    out_layout: impl Into<LayoutRef<'a>>,
     out_len: i64,
     axis_a: u32,
     axis_b: u32,
 ) -> Result<Launch, Error> {
+    let in_layout = in_layout.into();
+    let out_layout = out_layout.into();
+
     check_dtype(Entry::ExtractDiagonal, dtype)?;
     require_axis(axis_a, in_layout.rank())?;
     require_axis(axis_b, in_layout.rank())?;
@@ -2570,21 +3361,24 @@ pub fn plan_extract_diagonal(
     let len = out_layout.element_count()?;
     in_layout.check_span(in_len, dtype.size())?;
     out_layout.check_span(out_len, dtype.size())?;
-    flat_launch(len)
+    Ok(flat_launch(len)?.with_variant(&[in_layout, out_layout], &[]))
 }
 
 /// Plan [`Entry::EmbedDiagonalCopy`]. The input must be compact and the output
 /// must be zero-filled before the launch, because only diagonal positions are
 /// written; `axis_b` is an insertion position in `[0, in.rank]`.
-pub fn plan_embed_diagonal_copy(
+pub fn plan_embed_diagonal_copy<'a>(
     dtype: DType,
-    in_layout: &Layout,
+    in_layout: impl Into<LayoutRef<'a>>,
     in_len: i64,
-    out_layout: &Layout,
+    out_layout: impl Into<LayoutRef<'a>>,
     out_len: i64,
     axis_a: u32,
     axis_b: u32,
 ) -> Result<Launch, Error> {
+    let in_layout = in_layout.into();
+    let out_layout = out_layout.into();
+
     check_dtype(Entry::EmbedDiagonalCopy, dtype)?;
     require_axis(axis_a, in_layout.rank())?;
     if axis_b > in_layout.rank() {
@@ -2597,7 +3391,7 @@ pub fn plan_embed_diagonal_copy(
     let len = in_layout.element_count()?;
     in_layout.check_span(in_len, dtype.size())?;
     out_layout.check_span(out_len, dtype.size())?;
-    flat_launch(len)
+    Ok(flat_launch(len)?.with_variant(&[in_layout, out_layout], &[]))
 }
 
 fn plan_triangular(
@@ -2640,15 +3434,18 @@ pub fn plan_triu(dtype: DType, rows: i64, cols: i64, len: i64) -> Result<Launch,
 /// and `out.extents[a]` is the slice length: at most the reachable count
 /// `(in - start).div_ceil(step)`. A shorter length is the caller's explicit
 /// slice limit, which the baseline expresses with its `limit` argument.
-pub fn plan_slice(
+pub fn plan_slice<'a>(
     dtype: DType,
-    out_layout: &Layout,
+    out_layout: impl Into<LayoutRef<'a>>,
     out_len: i64,
-    in_layout: &Layout,
+    in_layout: impl Into<LayoutRef<'a>>,
     in_len: i64,
     starts: &[i64],
     steps: &[i64],
 ) -> Result<Launch, Error> {
+    let out_layout = out_layout.into();
+    let in_layout = in_layout.into();
+
     check_dtype(Entry::Slice, dtype)?;
     require_compact(out_layout)?;
     let rank = in_layout.rank() as usize;
@@ -2674,21 +3471,24 @@ pub fn plan_slice(
     let len = out_layout.element_count()?;
     in_layout.check_span(in_len, dtype.size())?;
     out_layout.check_span(out_len, dtype.size())?;
-    flat_launch(len)
+    Ok(flat_launch(len)?.with_variant(&[out_layout, in_layout], &[]))
 }
 
 /// Plan [`Entry::DynamicSlice`]. `starts` is a device-resident vector of
 /// `starts_rank == in.rank` index values; the window sizes are the output
 /// extents, which must not exceed the input extents.
-pub fn plan_dynamic_slice(
+pub fn plan_dynamic_slice<'a>(
     dtype: DType,
     index_dtype: DType,
-    out_layout: &Layout,
+    out_layout: impl Into<LayoutRef<'a>>,
     out_len: i64,
-    in_layout: &Layout,
+    in_layout: impl Into<LayoutRef<'a>>,
     in_len: i64,
     starts_rank: u32,
 ) -> Result<Launch, Error> {
+    let out_layout = out_layout.into();
+    let in_layout = in_layout.into();
+
     check_dtype(Entry::DynamicSlice, dtype)?;
     if !matches!(
         index_dtype,
@@ -2709,22 +3509,25 @@ pub fn plan_dynamic_slice(
     let len = out_layout.element_count()?;
     in_layout.check_span(in_len, dtype.size())?;
     out_layout.check_span(out_len, dtype.size())?;
-    flat_launch(len)
+    Ok(flat_launch(len)?.with_variant(&[out_layout, in_layout], &[]))
 }
 
 /// Plan [`Entry::Pad`]. Interior padding must be non-negative and the output
 /// extents must equal the padded extents derived from the input.
 #[allow(clippy::too_many_arguments)]
-pub fn plan_pad(
+pub fn plan_pad<'a>(
     dtype: DType,
-    out_layout: &Layout,
+    out_layout: impl Into<LayoutRef<'a>>,
     out_len: i64,
-    in_layout: &Layout,
+    in_layout: impl Into<LayoutRef<'a>>,
     in_len: i64,
     edge_low: &[i64],
     edge_high: &[i64],
     interior: &[i64],
 ) -> Result<Launch, Error> {
+    let out_layout = out_layout.into();
+    let in_layout = in_layout.into();
+
     check_dtype(Entry::Pad, dtype)?;
     require_compact(out_layout)?;
     let rank = in_layout.rank() as usize;
@@ -2761,7 +3564,7 @@ pub fn plan_pad(
     let len = out_layout.element_count()?;
     in_layout.check_span(in_len, dtype.size())?;
     out_layout.check_span(out_len, dtype.size())?;
-    flat_launch(len)
+    Ok(flat_launch(len)?.with_variant(&[out_layout, in_layout], &[]))
 }
 
 /// One thread in one block, for the validation status entries.
@@ -2775,6 +3578,7 @@ fn single_thread_launch() -> Launch {
         grid: [1, 1, 1],
         block: [1, 1, 1],
         shared_bytes: 0,
+        variant: RankVariant::Fast,
     }
 }
 
@@ -2834,7 +3638,9 @@ fn div_ceil_u32(extent: i64, tile: u32) -> Result<u32, Error> {
     u32::try_from(blocks).map_err(|_| Error::LaunchLimit)
 }
 
-fn require_destination(layout: &Layout) -> Result<(), Error> {
+fn require_destination<'a>(layout: impl Into<LayoutRef<'a>>) -> Result<(), Error> {
+    let layout = layout.into();
+
     if layout.rejects_broadcast_axis() {
         Ok(())
     } else {
@@ -2879,6 +3685,22 @@ impl CLayout {
 impl From<&Layout> for CLayout {
     fn from(layout: &Layout) -> CLayout {
         CLayout::new(layout)
+    }
+}
+
+impl CLayout {
+    /// Build the by-value mirror from a general-path layout.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::RankOutOfRange`] when the rank exceeds [`MAX_RANK`]: the by-value
+    /// struct is the fast path's parameter type, so a deeper layout has no mirror.
+    pub fn from_wide(layout: &WideLayout) -> Result<CLayout, Error> {
+        if layout.extents().len() > MAX_RANK {
+            return Err(Error::RankOutOfRange);
+        }
+        let fast = Layout::new(layout.extents(), layout.strides(), layout.offset())?;
+        Ok(CLayout::new(&fast))
     }
 }
 

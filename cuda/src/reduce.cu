@@ -252,6 +252,139 @@ __device__ __forceinline__ void partials_body(const void* in_ptr,
   }
 }
 
+// --- Revision 9 general path ---------------------------------------------------
+//
+// The same three algorithms with pointer geometry and a walk bounded by the
+// operand's own runtime rank. The fast bodies above are unchanged; these keep the
+// same fold objects, so the accumulation order per output is identical.
+
+__device__ __forceinline__ void t4a_cuda_reduce_offsets_any(
+    const t4a_cuda_layout_any& out_layout, const t4a_cuda_layout_any& in_layout,
+    long long output_index, long long* in_base, long long* out_offset) {
+  long long rest = output_index;
+  long long base = in_layout.offset;
+  long long offset = out_layout.offset;
+  for (int dim = 0; dim < out_layout.rank; ++dim) {
+    const long long extent = out_layout.extents[dim];
+    const long long coordinate = rest % extent;
+    rest /= extent;
+    base += coordinate * in_layout.strides[dim];
+    offset += coordinate * out_layout.strides[dim];
+  }
+  *in_base = base;
+  *out_offset = offset;
+}
+
+template <typename Fold, typename T>
+__device__ __forceinline__ void unit_reduce_body_any(const void* in_ptr,
+                                                     void* out_ptr,
+                                                     const t4a_cuda_layout_any& out_layout,
+                                                     const t4a_cuda_layout_any& in_layout,
+                                                     int axis,
+                                                     long long output_len,
+                                                     Fold fold) {
+  const long long output_index =
+      static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (output_index >= output_len) {
+    return;
+  }
+  const T* in = static_cast<const T*>(in_ptr);
+  T* out = static_cast<T*>(out_ptr);
+  long long in_base;
+  long long out_offset;
+  t4a_cuda_reduce_offsets_any(out_layout, in_layout, output_index, &in_base, &out_offset);
+
+  const long long axis_stride = in_layout.strides[axis];
+  const long long axis_len = in_layout.extents[axis];
+  T acc = fold.seed(in[in_base]);
+  for (long long index = 1; index < axis_len; ++index) {
+    acc = fold(acc, in[in_base + index * axis_stride]);
+  }
+  out[out_offset] = acc;
+}
+
+template <typename Fold, typename T>
+__device__ __forceinline__ void plane_reduce_body_any(const void* in_ptr,
+                                                      void* out_ptr,
+                                                      const t4a_cuda_layout_any& out_layout,
+                                                      const t4a_cuda_layout_any& in_layout,
+                                                      int axis,
+                                                      long long output_len,
+                                                      Fold fold) {
+  const long long output_index = blockIdx.x;
+  if (output_index >= output_len) {
+    return;
+  }
+  const T* in = static_cast<const T*>(in_ptr);
+  T* out = static_cast<T*>(out_ptr);
+  long long in_base;
+  long long out_offset;
+  t4a_cuda_reduce_offsets_any(out_layout, in_layout, output_index, &in_base, &out_offset);
+
+  const int plane_width = static_cast<int>(blockDim.x);
+  const long long axis_stride = in_layout.strides[axis];
+  const long long axis_len = in_layout.extents[axis];
+  long long reduce_index = threadIdx.x;
+  T acc = fold.seed(in[in_base + reduce_index * axis_stride]);
+  for (reduce_index += plane_width; reduce_index < axis_len; reduce_index += plane_width) {
+    acc = fold(acc, in[in_base + reduce_index * axis_stride]);
+  }
+  const T reduced = t4a_cuda_plane_fold(acc, plane_width, fold);
+  if (threadIdx.x == 0) {
+    out[out_offset] = reduced;
+  }
+}
+
+template <typename Fold, typename T>
+__device__ __forceinline__ void partials_body_any(const void* in_ptr,
+                                                  void* partials_ptr,
+                                                  const t4a_cuda_layout_any& partials_layout,
+                                                  const t4a_cuda_layout_any& in_layout,
+                                                  int axis,
+                                                  long long output_len,
+                                                  long long splits,
+                                                  long long chunk_len,
+                                                  Fold fold) {
+  const long long cube = blockIdx.x;
+  const long long output_index = cube / splits;
+  const long long split = cube % splits;
+  if (output_index >= output_len) {
+    return;
+  }
+  const T* in = static_cast<const T*>(in_ptr);
+  T* partials = static_cast<T*>(partials_ptr);
+
+  long long in_base = in_layout.offset;
+  long long partial_offset = partials_layout.offset;
+  long long rest = output_index;
+  for (int dim = 0; dim < partials_layout.rank; ++dim) {
+    if (dim == axis) {
+      partial_offset += split * partials_layout.strides[dim];
+    } else {
+      const long long extent = partials_layout.extents[dim];
+      const long long coordinate = rest % extent;
+      rest /= extent;
+      in_base += coordinate * in_layout.strides[dim];
+      partial_offset += coordinate * partials_layout.strides[dim];
+    }
+  }
+
+  const int plane_width = static_cast<int>(blockDim.x);
+  const long long axis_stride = in_layout.strides[axis];
+  const long long axis_len = in_layout.extents[axis];
+  const long long start = split * chunk_len;
+  const long long end = split + 1 == splits ? axis_len : start + chunk_len;
+  long long reduce_index = start + threadIdx.x;
+  T acc = fold.seed(in[in_base + reduce_index * axis_stride]);
+  for (reduce_index += plane_width; reduce_index < end; reduce_index += plane_width) {
+    acc = fold(acc, in[in_base + reduce_index * axis_stride]);
+  }
+  const T reduced = t4a_cuda_plane_fold(acc, plane_width, fold);
+  if (threadIdx.x == 0) {
+    partials[partial_offset] = reduced;
+  }
+}
+
 }  // namespace
 
 extern "C" __global__ void t4a_cuda_reduce(void* out, const void* in, int dtype, int op,
@@ -341,4 +474,92 @@ extern "C" __global__ void t4a_cuda_reduce_partials(void* partials, const void* 
       break;
   }
 #undef T4A_PARTIALS_DISPATCH
+}
+
+extern "C" __global__ void t4a_cuda_reduce_any(void* out, const void* in, int dtype, int op,
+                                               int strategy, t4a_cuda_layout_any out_layout,
+                                               t4a_cuda_layout_any in_layout, int axis,
+                                               long long output_len) {
+  const bool plane = strategy == T4A_CUDA_REDUCE_PLANE;
+#define T4A_REDUCE_ANY_DISPATCH(FOLD, TYPE)                                              \
+  do {                                                                                   \
+    if (plane) {                                                                         \
+      plane_reduce_body_any<FOLD, TYPE>(in, out, out_layout, in_layout, axis, output_len, \
+                                        FOLD());                                          \
+    } else {                                                                             \
+      unit_reduce_body_any<FOLD, TYPE>(in, out, out_layout, in_layout, axis, output_len,  \
+                                       FOLD());                                          \
+    }                                                                                    \
+  } while (0)
+
+  switch (op) {
+    case T4A_CUDA_REDUCE_SUM:
+#define T4A_BODY(T) T4A_REDUCE_ANY_DISPATCH(SumFold, T)
+      T4A_CUDA_NUMERIC_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+      break;
+    case T4A_CUDA_REDUCE_PROD:
+#define T4A_BODY(T) T4A_REDUCE_ANY_DISPATCH(ProdFold, T)
+      T4A_CUDA_NUMERIC_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+      break;
+    case T4A_CUDA_REDUCE_SUM_SQUARES:
+#define T4A_BODY(T) T4A_REDUCE_ANY_DISPATCH(SumSquaresFold, T)
+      T4A_CUDA_FLOAT_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+      break;
+    case T4A_CUDA_REDUCE_MAX:
+#define T4A_BODY(T) T4A_REDUCE_ANY_DISPATCH(MaxFold, T)
+      T4A_CUDA_ORDERED_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+      break;
+    case T4A_CUDA_REDUCE_MIN:
+#define T4A_BODY(T) T4A_REDUCE_ANY_DISPATCH(MinFold, T)
+      T4A_CUDA_ORDERED_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+      break;
+    default:
+      break;
+  }
+#undef T4A_REDUCE_ANY_DISPATCH
+}
+
+extern "C" __global__ void t4a_cuda_reduce_partials_any(
+    void* partials, const void* in, int dtype, int op, t4a_cuda_layout_any partials_layout,
+    t4a_cuda_layout_any in_layout, int axis, long long output_len, long long splits,
+    long long chunk_len) {
+#define T4A_PARTIALS_ANY_DISPATCH(FOLD, TYPE)                                             \
+  partials_body_any<FOLD, TYPE>(in, partials, partials_layout, in_layout, axis,           \
+                                output_len, splits, chunk_len, FOLD())
+
+  switch (op) {
+    case T4A_CUDA_REDUCE_SUM:
+#define T4A_BODY(T) T4A_PARTIALS_ANY_DISPATCH(SumFold, T)
+      T4A_CUDA_NUMERIC_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+      break;
+    case T4A_CUDA_REDUCE_PROD:
+#define T4A_BODY(T) T4A_PARTIALS_ANY_DISPATCH(ProdFold, T)
+      T4A_CUDA_NUMERIC_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+      break;
+    case T4A_CUDA_REDUCE_SUM_SQUARES:
+#define T4A_BODY(T) T4A_PARTIALS_ANY_DISPATCH(SumSquaresFold, T)
+      T4A_CUDA_FLOAT_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+      break;
+    case T4A_CUDA_REDUCE_MAX:
+#define T4A_BODY(T) T4A_PARTIALS_ANY_DISPATCH(MaxFold, T)
+      T4A_CUDA_ORDERED_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+      break;
+    case T4A_CUDA_REDUCE_MIN:
+#define T4A_BODY(T) T4A_PARTIALS_ANY_DISPATCH(MinFold, T)
+      T4A_CUDA_ORDERED_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+      break;
+    default:
+      break;
+  }
+#undef T4A_PARTIALS_ANY_DISPATCH
 }

@@ -1,10 +1,11 @@
 //! Host-side validation, planning and manifest consistency. Needs no CUDA.
 
 use t4a_cuda_kernels::{
-    bytes, plan_contiguous_to_view, plan_copy_exact, plan_elementwise, plan_fill_zero,
-    plan_fill_zero_view, plan_materialize_strided, plan_strided_to_strided, plan_tiled_transpose,
-    CLayout, CTransposeConfig, DType, Entry, Error, Launch, Layout, TransposeConfig, ABI_REVISION,
-    DEFAULT_SHARED_BYTES, FLAT_BLOCK, MAX_RANK,
+    bytes, pack_gather_plan, pack_scatter_plan, plan_contiguous_to_view, plan_copy_exact,
+    plan_elementwise, plan_fill_zero, plan_fill_zero_view, plan_materialize_strided,
+    plan_strided_to_strided, plan_tiled_transpose, CAxisValuesAny, CLayout, CTransposeConfig,
+    DType, Entry, Error, GeneralEntry, Launch, Layout, RankVariant, TransposeConfig, WideLayout,
+    ABI_REVISION, DEFAULT_SHARED_BYTES, FLAT_BLOCK, MAX_RANK,
 };
 
 #[test]
@@ -343,10 +344,41 @@ fn entry_names_are_unique_and_exported_by_the_sources() {
         let declaration = format!("extern \"C\" __global__ void {name}(");
         assert!(sources.contains(&declaration), "{name} is not exported");
     }
+    // Revision 9 adds one general-path twin per rank-walking entry; it is a
+    // separate symbol, so `Entry::ALL` plus `GeneralEntry::ALL` must still be
+    // exactly the exported set.
+    for (index, entry) in GeneralEntry::ALL.iter().enumerate() {
+        let name = entry.name();
+        assert!(name.starts_with("t4a_cuda_"), "{name}");
+        assert!(name.ends_with("_any"), "{name}");
+        assert!(
+            GeneralEntry::ALL
+                .iter()
+                .skip(index + 1)
+                .all(|other| other.name() != name),
+            "duplicate {name}"
+        );
+        let declaration = format!("extern \"C\" __global__ void {name}(");
+        assert!(sources.contains(&declaration), "{name} is not exported");
+        // The twin mirrors a fast entry and inherits its dtype matrix.
+        assert_eq!(
+            entry.supports(DType::F32),
+            entry.fast().supports(DType::F32)
+        );
+        assert!(entry.supports(entry.fast().supported_dtypes()[0]));
+        assert!(Entry::ALL.iter().all(|fast| fast.name() != name));
+    }
+    for entry in Entry::ALL {
+        if entry.general().is_some() {
+            continue;
+        }
+        // A flat entry walks no rank, so it must not have a twin.
+        assert!(!sources.contains(&format!("void {}_any(", entry.name())));
+    }
     // Nothing else is exported: the source declares exactly these entries.
     assert_eq!(
         sources.matches("extern \"C\" __global__ void ").count(),
-        Entry::ALL.len()
+        Entry::ALL.len() + GeneralEntry::ALL.len()
     );
 }
 
@@ -2711,4 +2743,192 @@ fn prefix_rank_bounds_the_diagonal_domain() {
         plan_prefix_rank(DType::I64, &r, 24, 2, 2, 1e-12, 0.0),
         Err(Error::UnsupportedDType)
     );
+}
+
+// --- Revision 9: dynamic rank -------------------------------------------------
+
+fn wide(extents: &[i64], strides: &[i64], offset: i64) -> WideLayout {
+    WideLayout::new(extents.to_vec(), strides.to_vec(), offset).unwrap()
+}
+
+fn compact_wide(extents: &[i64]) -> WideLayout {
+    WideLayout::compact(extents.to_vec()).unwrap()
+}
+
+#[test]
+fn general_path_accepts_rank_nine_and_sixteen() {
+    for rank in [9usize, 16] {
+        let extents: Vec<i64> = (0..rank).map(|axis| 2 + axis as i64 % 3).collect();
+        let layout = compact_wide(&extents);
+        let len = layout.element_count().unwrap();
+
+        let launch = plan_fill_zero_view(DType::F64, &layout, len).unwrap();
+        assert_eq!(launch.variant, RankVariant::General);
+        let launch = plan_materialize_strided(DType::F64, &layout, len).unwrap();
+        assert_eq!(launch.variant, RankVariant::General);
+        let launch = plan_contiguous_to_view(DType::F64, &layout, len).unwrap();
+        assert_eq!(launch.variant, RankVariant::General);
+        let launch = plan_strided_to_strided(DType::F64, &layout, len, &layout, len).unwrap();
+        assert_eq!(launch.variant, RankVariant::General);
+
+        // Windowing: the output is the first half of every axis.
+        let out: Vec<i64> = extents.iter().map(|extent| extent / 2).collect();
+        let out_layout = compact_wide(&out);
+        let out_len = out_layout.element_count().unwrap();
+        let starts = vec![0i64; rank];
+        let steps = vec![1i64; rank];
+        let launch = plan_slice(
+            DType::F64,
+            &out_layout,
+            out_len,
+            &layout,
+            len,
+            &starts,
+            &steps,
+        )
+        .unwrap();
+        assert_eq!(launch.variant, RankVariant::General);
+
+        // Diagonal over the first two axes.
+        let mut diagonal_out = extents.clone();
+        diagonal_out.remove(1);
+        diagonal_out[0] = extents[0].min(extents[1]);
+        let diagonal_layout = compact_wide(&diagonal_out);
+        let diagonal_len = diagonal_layout.element_count().unwrap();
+        let launch = plan_extract_diagonal(
+            DType::F64,
+            &layout,
+            len,
+            &diagonal_layout,
+            diagonal_len,
+            0,
+            1,
+        )
+        .unwrap();
+        assert_eq!(launch.variant, RankVariant::General);
+
+        // A reduction keeps the input rank with one unit axis.
+        let mut out_extents = extents.clone();
+        out_extents[2] = 1;
+        let reduce_out = compact_wide(&out_extents);
+        let reduce_out_len = reduce_out.element_count().unwrap();
+        let launch = plan_reduce(
+            DType::F64,
+            ReduceOp::Sum,
+            ReduceStrategy::Unit,
+            &reduce_out,
+            reduce_out_len,
+            &layout,
+            len,
+            2,
+            32,
+        )
+        .unwrap();
+        assert_eq!(launch.variant, RankVariant::General);
+
+        // The split reduction plans both passes at the same rank.
+        let partials = reduction_partials_layout(&layout, 2, 4).unwrap();
+        assert_eq!(partials.rank() as usize, rank);
+        assert_eq!(partials.extents()[2], 4);
+    }
+}
+
+#[test]
+fn fast_variants_still_report_the_fast_policy() {
+    let layout = Layout::compact(&[2, 3, 4]).unwrap();
+    let len = layout.element_count().unwrap();
+    for launch in [
+        plan_materialize_strided(DType::F32, &layout, len).unwrap(),
+        plan_contiguous_to_view(DType::F32, &layout, len).unwrap(),
+        plan_fill_zero_view(DType::F32, &layout, len).unwrap(),
+    ] {
+        assert_eq!(launch.variant, RankVariant::Fast);
+    }
+    // A rank-8 layout in the owned general-path type still selects the fast
+    // symbol: the variant follows the ranks, not the host storage type.
+    let wide = compact_wide(&[2, 3, 4, 1, 1, 1, 1, 1]);
+    assert_eq!(wide.rank(), 8);
+    assert_eq!(
+        plan_materialize_strided(DType::F32, &wide, wide.element_count().unwrap())
+            .unwrap()
+            .variant,
+        RankVariant::Fast
+    );
+}
+
+#[test]
+fn the_variant_is_general_when_any_participating_rank_is() {
+    let out = Layout::compact(&[2, 2]).unwrap();
+    let operand = compact_wide(&[2, 2, 1, 1, 1, 1, 1, 1, 3]);
+    let out_len = out.element_count().unwrap();
+    let operand_len = operand.element_count().unwrap();
+    let launch = plan_materialize_strided(DType::F32, &operand, operand_len).unwrap();
+    assert_eq!(launch.variant, RankVariant::General);
+    assert_eq!(
+        RankVariant::select(&[out.as_ref(), operand.as_ref()], &[]),
+        RankVariant::General
+    );
+    assert_eq!(RankVariant::select(&[out.as_ref()], &[]), RankVariant::Fast);
+    assert_eq!(RankVariant::select(&[], &[9]), RankVariant::General);
+    // A strided-to-strided plan whose two layouts share extents still takes the
+    // general symbol when the shared rank is above the fast bound.
+    let launch =
+        plan_strided_to_strided(DType::F32, &operand, operand_len, &operand, operand_len).unwrap();
+    assert_eq!(launch.variant, RankVariant::General);
+    let _ = out_len;
+}
+
+#[test]
+fn geometry_packing_follows_the_documented_order() {
+    let layout = wide(&[2, 3, 4], &[1, 2, 6], 5);
+    assert_eq!(layout.as_ref().pack(), vec![2, 3, 4, 1, 2, 6]);
+
+    let plan = GatherPlan {
+        window_dims: vec![0, 2],
+        offset_dims: vec![1, 3],
+        start_index_map: vec![1],
+        slice_sizes: vec![1, 2, 3, 4],
+        index_vector_dim: 1,
+    };
+    assert_eq!(pack_gather_plan(&plan), vec![0, 2, 1, 3, 1, 1, 2, 3, 4]);
+
+    let plan = ScatterPlan {
+        window_dims: vec![0, 2],
+        update_window_dims: vec![0, 1],
+        scatter_dims: vec![1],
+        index_vector_dim: 2,
+    };
+    assert_eq!(pack_scatter_plan(&plan), vec![0, 2, 0, 1, 1]);
+}
+
+#[test]
+fn general_geometry_rejects_an_unrepresentable_rank_or_length() {
+    // The `_any` ABI carries the rank as an `int`; a length that does not fit is
+    // refused instead of truncated.
+    let dummy = 0i64;
+    assert!(matches!(
+        CAxisValuesAny::new(usize::MAX, &dummy),
+        Err(Error::Overflow)
+    ));
+    // An extent product that leaves i64 is refused by the layout itself.
+    let huge = WideLayout::new(vec![1i64 << 40, 1i64 << 40], vec![1, 1], 0).unwrap();
+    assert!(matches!(huge.element_count(), Err(Error::Overflow)));
+    assert_eq!(huge.rank(), 2);
+}
+
+#[test]
+fn general_entries_mirror_their_fast_dtype_matrix() {
+    for entry in GeneralEntry::ALL {
+        assert_eq!(
+            entry.fast(),
+            Entry::ALL
+                .iter()
+                .copied()
+                .find(|fast| fast.name() == entry.fast().name())
+                .unwrap()
+        );
+        for dtype in entry.fast().supported_dtypes() {
+            assert!(entry.supports(*dtype), "{} {dtype:?}", entry.name());
+        }
+    }
 }

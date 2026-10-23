@@ -703,3 +703,406 @@ extern "C" __global__ void t4a_cuda_prefix_rank(const void* r, void* rank, void*
       break;
   }
 }
+
+// --- Revision 9 general path -----------------------------------------------
+// Pointer geometry and runtime-bounded walks. The bodies and exports above
+// are unchanged.
+
+__device__ __forceinline__ long long shorter_batch_offset_any(long long batch,
+                                                         const t4a_cuda_layout_any& layout) {
+  long long offset = 0;
+  long long remaining = batch;
+  for (int axis = 1; axis < layout.rank; ++axis) {
+    const long long extent = layout.extents[axis];
+    const long long coordinate = remaining % extent;
+    remaining /= extent;
+    offset += coordinate * layout.strides[axis];
+  }
+  return offset;
+}
+
+__device__ __forceinline__ long long matrix_batch_offset_any(long long batch,
+                                                        const t4a_cuda_layout_any& layout) {
+  long long offset = 0;
+  long long remaining = batch;
+  for (int axis = 2; axis < layout.rank; ++axis) {
+    const long long extent = layout.extents[axis];
+    const long long coordinate = remaining % extent;
+    remaining /= extent;
+    offset += coordinate * layout.strides[axis];
+  }
+  return offset;
+}
+
+template <typename T, typename F>
+__device__ __forceinline__ void column_norms_body_any(const void* work_ptr, void* norms_ptr,
+                                                  const t4a_cuda_layout_any& work,
+                                                  const t4a_cuda_layout_any& norms, long long step) {
+  const long long rows = work.extents[0];
+  const long long columns = work.extents[1];
+  const long long trailing = columns - step;
+  const long long task = blockIdx.x;
+  const long long batch = task / trailing;
+  const long long column = step + task % trailing;
+  const long long lane = threadIdx.x;
+
+  const T* work_values = static_cast<const T*>(work_ptr);
+  const long long work_base = work.offset + column * work.strides[1] +
+                              matrix_batch_offset_any(batch, work);
+  const long long row_stride = work.strides[0];
+
+  F local_max = F(0);
+  bool invalid = false;
+  for (long long row = step + lane; row < rows; row += kPlane) {
+    const F value = magnitude(work_values[work_base + row * row_stride]);
+    if (value - value != F(0)) {
+      invalid = true;
+    } else if (value > local_max) {
+      local_max = value;
+    }
+  }
+  const F scale = plane_max(local_max);
+  F local_sum = F(0);
+  if (scale > F(0)) {
+    for (long long row = step + lane; row < rows; row += kPlane) {
+      const F scaled =
+          magnitude(work_values[work_base + row * row_stride]) / scale;
+      local_sum += scaled * scaled;
+    }
+  }
+  const F norm = scale * sqrt(plane_sum(local_sum));
+  // A computed norm that is itself nonfinite cannot order columns, so it joins the
+  // nonfinite-magnitude case in the negative sentinel.
+  const bool bad = plane_any(invalid) || norm - norm != F(0);
+  if (lane == 0) {
+    F* norms_values = static_cast<F*>(norms_ptr);
+    const long long norms_index = norms.offset + column * norms.strides[0] +
+                                  shorter_batch_offset_any(batch, norms);
+    norms_values[norms_index] = bad ? F(-1) : norm;
+  }
+}
+
+template <typename F>
+__device__ __forceinline__ void select_pivot_body_any(const void* norms_ptr,
+                                                  const void* permutation_ptr, void* pivots_ptr,
+                                                  void* status_ptr, const t4a_cuda_layout_any& norms,
+                                                  const t4a_cuda_layout_any& permutation,
+                                                  long long step) {
+  const long long batch = blockIdx.x;
+  const long long columns = norms.extents[0];
+  const long long lane = threadIdx.x;
+  const F* norms_values = static_cast<const F*>(norms_ptr);
+  const long long* permutation_values = static_cast<const long long*>(permutation_ptr);
+  const long long norms_base = norms.offset + shorter_batch_offset_any(batch, norms);
+  const long long permutation_base =
+      permutation.offset + shorter_batch_offset_any(batch, permutation);
+
+  F local_max = F(0);
+  long long local_original = kNone;
+  long long local_column = kNone;
+  bool invalid = false;
+  for (long long column = step + lane; column < columns; column += kPlane) {
+    const F norm = norms_values[norms_base + column * norms.strides[0]];
+    const long long original = permutation_values[permutation_base + column * permutation.strides[0]];
+    if (norm < F(0)) {
+      invalid = true;
+    } else if (norm > local_max || (norm == local_max && original < local_original)) {
+      local_max = norm;
+      local_original = original;
+      local_column = column;
+    }
+  }
+  const F maximum = plane_max(local_max);
+  const long long original =
+      plane_min(local_max == maximum ? local_original : kNone);
+  const long long selected = plane_min(
+      local_max == maximum && local_original == original ? local_column : kNone);
+  const bool any_invalid = plane_any(invalid);
+  if (lane == 0) {
+    static_cast<long long*>(pivots_ptr)[batch] = selected == kNone ? step : selected;
+    if (any_invalid) {
+      static_cast<long long*>(status_ptr)[batch] = 1;
+    }
+  }
+}
+
+template <typename T>
+__device__ __forceinline__ void swap_columns_body_any(void* work_ptr, void* permutation_ptr,
+                                                  const void* pivots_ptr,
+                                                  const t4a_cuda_layout_any& work,
+                                                  const t4a_cuda_layout_any& permutation,
+                                                  long long step) {
+  const long long rows = work.extents[0];
+  const long long batches = 1;
+  long long batch_count = batches;
+  for (int axis = 2; axis < work.rank; ++axis) {
+    batch_count *= work.extents[axis];
+  }
+  const long long pos = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (pos >= rows * batch_count) {
+    return;
+  }
+  const long long row = pos % rows;
+  const long long batch = pos / rows;
+  const long long pivot = static_cast<const long long*>(pivots_ptr)[batch];
+  if (pivot == step) {
+    return;
+  }
+  T* work_values = static_cast<T*>(work_ptr);
+  const long long work_base = work.offset + row * work.strides[0] +
+                              matrix_batch_offset_any(batch, work);
+  const long long left = work_base + step * work.strides[1];
+  const long long right = work_base + pivot * work.strides[1];
+  const T value = work_values[left];
+  work_values[left] = work_values[right];
+  work_values[right] = value;
+  if (row == 0) {
+    long long* permutation_values = static_cast<long long*>(permutation_ptr);
+    const long long permutation_base =
+        permutation.offset + shorter_batch_offset_any(batch, permutation);
+    const long long first = permutation_base + step * permutation.strides[0];
+    const long long second = permutation_base + pivot * permutation.strides[0];
+    const long long stored = permutation_values[first];
+    permutation_values[first] = permutation_values[second];
+    permutation_values[second] = stored;
+  }
+}
+
+template <typename T>
+__device__ __forceinline__ void extract_r_body_any(const void* work_ptr, void* r_ptr,
+                                               const t4a_cuda_layout_any& work,
+                                               const t4a_cuda_layout_any& r, long long len) {
+  long long flat;
+  if (!t4a_cuda_tail_index(&flat, len)) {
+    return;
+  }
+  const long long row = flat % r.extents[0];
+  const long long column = (flat / r.extents[0]) % r.extents[1];
+  const long long batch = flat / (r.extents[0] * r.extents[1]);
+  const long long r_index = r.offset + row * r.strides[0] + column * r.strides[1] +
+                            matrix_batch_offset_any(batch, r);
+  T value = t4a_cuda_zero<T>();
+  if (row <= column) {
+    value = static_cast<const T*>(work_ptr)[work.offset + row * work.strides[0] +
+                                            column * work.strides[1] +
+                                            matrix_batch_offset_any(batch, work)];
+  }
+  static_cast<T*>(r_ptr)[r_index] = value;
+}
+
+template <typename T, typename F>
+__device__ __forceinline__ void prefix_rank_body_any(const void* r_ptr, void* rank_ptr,
+                                                 void* status_ptr, const t4a_cuda_layout_any& r,
+                                                 F rtol, F atol) {
+  const long long batch = blockIdx.x;
+  const long long k = r.extents[0];
+  const long long lane = threadIdx.x;
+  const T* values = static_cast<const T*>(r_ptr);
+  const long long base = r.offset + matrix_batch_offset_any(batch, r);
+  const F leading = magnitude(values[base]);
+  const F relative = rtol * leading;
+  // The baseline's comparison, not fmax: a NaN tolerance propagates the same way.
+  const F threshold = atol > relative ? atol : relative;
+  long long first_failure = kNone;
+  bool invalid = false;
+  for (long long diagonal = lane; diagonal < k; diagonal += kPlane) {
+    const F value = magnitude(
+        values[base + diagonal * r.strides[0] + diagonal * r.strides[1]]);
+    if (value - value != F(0)) {
+      invalid = true;
+    }
+    if (!(value > threshold) && diagonal < first_failure) {
+      first_failure = diagonal;
+    }
+  }
+  const long long failure = plane_min(first_failure);
+  const bool any_invalid = plane_any(invalid);
+  if (lane == 0) {
+    static_cast<long long*>(rank_ptr)[batch] = failure == kNone ? k : failure;
+    if (any_invalid) {
+      static_cast<long long*>(status_ptr)[batch] = 1;
+    }
+  }
+}
+
+#define T4A_COLUMN_NORMS_ANY_CASE(T, F) \
+  column_norms_body_any<T, F>(work, norms, work_layout, norms_layout, step)
+extern "C" __global__ void t4a_cuda_column_norms_any(const void* work, void* norms, int dtype,
+                                                 t4a_cuda_layout_any work_layout,
+                                                 t4a_cuda_layout_any norms_layout, long long step) {
+  switch (dtype) {
+    case T4A_CUDA_F32:
+      T4A_COLUMN_NORMS_ANY_CASE(float, float);
+      break;
+    case T4A_CUDA_F64:
+      T4A_COLUMN_NORMS_ANY_CASE(double, double);
+      break;
+    case T4A_CUDA_C32:
+      T4A_COLUMN_NORMS_ANY_CASE(t4a_cuda_c32, float);
+      break;
+    case T4A_CUDA_C64:
+      T4A_COLUMN_NORMS_ANY_CASE(t4a_cuda_c64, double);
+      break;
+    default:
+      break;
+  }
+}
+
+extern "C" __global__ void t4a_cuda_select_pivot_any(const void* norms, const void* permutation,
+                                                 void* pivots, void* status, int dtype,
+                                                 t4a_cuda_layout_any norms_layout,
+                                                 t4a_cuda_layout_any permutation_layout,
+                                                 long long step) {
+  switch (dtype) {
+    case T4A_CUDA_F32:
+      select_pivot_body_any<float>(norms, permutation, pivots, status, norms_layout,
+                               permutation_layout, step);
+      break;
+    case T4A_CUDA_F64:
+      select_pivot_body_any<double>(norms, permutation, pivots, status, norms_layout,
+                                permutation_layout, step);
+      break;
+    default:
+      break;
+  }
+}
+
+#define T4A_SWAP_COLUMNS_ANY_CASE(T) \
+  swap_columns_body_any<T>(work, permutation, pivots, work_layout, permutation_layout, step)
+extern "C" __global__ void t4a_cuda_swap_columns_any(void* work, void* permutation,
+                                                 const void* pivots, int dtype,
+                                                 t4a_cuda_layout_any work_layout,
+                                                 t4a_cuda_layout_any permutation_layout,
+                                                 long long step) {
+  T4A_CUDA_NUMERIC_DTYPE_SWITCH(dtype, T4A_SWAP_COLUMNS_ANY_CASE);
+}
+
+extern "C" __global__ void t4a_cuda_reflector_any(void* work, void* coeff, int dtype,
+                                              t4a_cuda_layout_any work_layout,
+                                              t4a_cuda_layout_any coeff_layout, long long step) {
+  const long long batch = blockIdx.x;
+  const long long column_base =
+      work_layout.offset + step * work_layout.strides[1] + matrix_batch_offset_any(batch, work_layout);
+  switch (dtype) {
+    case T4A_CUDA_F32: {
+      const long long coeff_index = coeff_layout.offset + step * coeff_layout.strides[0] +
+                                    shorter_batch_offset_any(batch, coeff_layout);
+      reflector_real_body<float>(static_cast<float*>(work), static_cast<float*>(coeff),
+                                 column_base, work_layout.strides[0], coeff_index, step,
+                                 work_layout.extents[0], threadIdx.x);
+      break;
+    }
+    case T4A_CUDA_F64: {
+      const long long coeff_index = coeff_layout.offset + step * coeff_layout.strides[0] +
+                                    shorter_batch_offset_any(batch, coeff_layout);
+      reflector_real_body<double>(static_cast<double*>(work), static_cast<double*>(coeff),
+                                  column_base, work_layout.strides[0], coeff_index, step,
+                                  work_layout.extents[0], threadIdx.x);
+      break;
+    }
+    case T4A_CUDA_C32: {
+      const long long coeff_index = coeff_layout.offset + step * coeff_layout.strides[0] +
+                                    shorter_batch_offset_any(batch, coeff_layout);
+      reflector_complex_body<t4a_cuda_c32, float>(
+          static_cast<t4a_cuda_c32*>(work), static_cast<t4a_cuda_c32*>(coeff), column_base,
+          work_layout.strides[0], coeff_index, step, work_layout.extents[0], threadIdx.x);
+      break;
+    }
+    case T4A_CUDA_C64: {
+      const long long coeff_index = coeff_layout.offset + step * coeff_layout.strides[0] +
+                                    shorter_batch_offset_any(batch, coeff_layout);
+      reflector_complex_body<t4a_cuda_c64, double>(
+          static_cast<t4a_cuda_c64*>(work), static_cast<t4a_cuda_c64*>(coeff), column_base,
+          work_layout.strides[0], coeff_index, step, work_layout.extents[0], threadIdx.x);
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+extern "C" __global__ void t4a_cuda_apply_reflector_any(
+    const void* packed, void* target, const void* coeff, int dtype,
+    t4a_cuda_layout_any packed_layout, t4a_cuda_layout_any target_layout, t4a_cuda_layout_any coeff_layout,
+    long long step, long long first_column, long long column_count) {
+  const long long task = blockIdx.x;
+  const long long batch = task / column_count;
+  const long long column = first_column + task % column_count;
+  const long long packed_base =
+      packed_layout.offset + step * packed_layout.strides[1] + matrix_batch_offset_any(batch, packed_layout);
+  const long long target_base =
+      target_layout.offset + column * target_layout.strides[1] + matrix_batch_offset_any(batch, target_layout);
+  switch (dtype) {
+    case T4A_CUDA_F32: {
+      const long long coefficient = coeff_layout.offset + step * coeff_layout.strides[0] +
+                                    shorter_batch_offset_any(batch, coeff_layout);
+      apply_reflector_real_body<float>(
+          static_cast<const float*>(packed), static_cast<float*>(target),
+          static_cast<const float*>(coeff), packed_base, target_base, coefficient, step,
+          packed_layout.extents[0], packed_layout.strides[0], target_layout.strides[0],
+          threadIdx.x);
+      break;
+    }
+    case T4A_CUDA_F64: {
+      const long long coefficient = coeff_layout.offset + step * coeff_layout.strides[0] +
+                                    shorter_batch_offset_any(batch, coeff_layout);
+      apply_reflector_real_body<double>(
+          static_cast<const double*>(packed), static_cast<double*>(target),
+          static_cast<const double*>(coeff), packed_base, target_base, coefficient, step,
+          packed_layout.extents[0], packed_layout.strides[0], target_layout.strides[0],
+          threadIdx.x);
+      break;
+    }
+    case T4A_CUDA_C32: {
+      const long long coefficient = coeff_layout.offset + step * coeff_layout.strides[0] +
+                                    shorter_batch_offset_any(batch, coeff_layout);
+      apply_reflector_complex_body<t4a_cuda_c32, float>(
+          static_cast<const t4a_cuda_c32*>(packed), static_cast<t4a_cuda_c32*>(target),
+          static_cast<const t4a_cuda_c32*>(coeff), packed_base, target_base, coefficient, step,
+          packed_layout.extents[0], packed_layout.strides[0], target_layout.strides[0],
+          threadIdx.x);
+      break;
+    }
+    case T4A_CUDA_C64: {
+      const long long coefficient = coeff_layout.offset + step * coeff_layout.strides[0] +
+                                    shorter_batch_offset_any(batch, coeff_layout);
+      apply_reflector_complex_body<t4a_cuda_c64, double>(
+          static_cast<const t4a_cuda_c64*>(packed), static_cast<t4a_cuda_c64*>(target),
+          static_cast<const t4a_cuda_c64*>(coeff), packed_base, target_base, coefficient, step,
+          packed_layout.extents[0], packed_layout.strides[0], target_layout.strides[0],
+          threadIdx.x);
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+#define T4A_EXTRACT_R_ANY_CASE(T) extract_r_body_any<T>(work, r, work_layout, r_layout, t4a_cuda_logical_count_any(r_layout))
+extern "C" __global__ void t4a_cuda_extract_r_any(const void* work, void* r, int dtype,
+                                              t4a_cuda_layout_any work_layout, t4a_cuda_layout_any r_layout) {
+  T4A_CUDA_ALGEBRA_DTYPE_SWITCH(dtype, T4A_EXTRACT_R_ANY_CASE);
+}
+
+extern "C" __global__ void t4a_cuda_prefix_rank_any(const void* r, void* rank, void* status, int dtype,
+                                                t4a_cuda_layout_any r_layout, double rtol,
+                                                double atol) {
+  switch (dtype) {
+    case T4A_CUDA_F32:
+      prefix_rank_body_any<float, float>(r, rank, status, r_layout, static_cast<float>(rtol),
+                                     static_cast<float>(atol));
+      break;
+    case T4A_CUDA_F64:
+      prefix_rank_body_any<double, double>(r, rank, status, r_layout, rtol, atol);
+      break;
+    case T4A_CUDA_C32:
+      prefix_rank_body_any<t4a_cuda_c32, float>(r, rank, status, r_layout, static_cast<float>(rtol),
+                                            static_cast<float>(atol));
+      break;
+    case T4A_CUDA_C64:
+      prefix_rank_body_any<t4a_cuda_c64, double>(r, rank, status, r_layout, rtol, atol);
+      break;
+    default:
+      break;
+  }
+}

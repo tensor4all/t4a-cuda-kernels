@@ -14,7 +14,10 @@ use std::sync::{Mutex, OnceLock};
 
 use cudarc::driver::result as drv;
 use cudarc::driver::sys;
-use t4a_cuda_kernels::{CAxisValues, CGatherPlan, CLayout, CScatterPlan, CTransposeConfig, Launch};
+use t4a_cuda_kernels::{
+    CAxisValues, CAxisValuesAny, CGatherPlan, CGatherPlanAny, CLayout, CLayoutAny, CScatterPlan,
+    CScatterPlanAny, CTransposeConfig, Launch,
+};
 
 thread_local! {
     static LAUNCHES: Cell<usize> = const { Cell::new(0) };
@@ -130,6 +133,11 @@ pub struct Buf {
 }
 
 impl Buf {
+    /// Device address, for a launch argument that carries a pointer.
+    pub fn as_ptr(&self) -> *const i64 {
+        self.ptr as usize as *const i64
+    }
+
     fn allocate(bytes: usize) -> Buf {
         let bytes = bytes.max(1);
         let ptr = unsafe { drv::malloc_sync(bytes) }.expect("cuMemAlloc");
@@ -237,6 +245,22 @@ impl Slot {
     }
 
     pub fn config(value: &CTransposeConfig) -> Slot {
+        Slot::store(value)
+    }
+
+    pub fn layout_any(value: &CLayoutAny) -> Slot {
+        Slot::store(value)
+    }
+
+    pub fn axis_values_any(value: &CAxisValuesAny) -> Slot {
+        Slot::store(value)
+    }
+
+    pub fn gather_plan_any(value: &CGatherPlanAny) -> Slot {
+        Slot::store(value)
+    }
+
+    pub fn scatter_plan_any(value: &CScatterPlanAny) -> Slot {
         Slot::store(value)
     }
 

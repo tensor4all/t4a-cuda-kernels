@@ -954,3 +954,21 @@ fn scale_in_place_is_the_scalar_mul_of_binary() {
         );
     }
 }
+
+#[test]
+fn the_composed_sources_compile_under_nvrtc() {
+    // Every exposed translation unit must compile with the shared header prepended, the
+    // way a consumer prepares artifacts. This is the prepare path's first check.
+    use cudarc::nvrtc::{compile_ptx_with_opts, CompileOptions};
+    let session = Session::new("movement");
+    let _ = &session;
+    for module in t4a_cuda_kernels::source::MODULES {
+        let composed = t4a_cuda_kernels::source::compose(module);
+        let options = CompileOptions {
+            arch: Some("compute_80"),
+            ..Default::default()
+        };
+        compile_ptx_with_opts(composed, options)
+            .unwrap_or_else(|error| panic!("{} must compile: {error}", module.name));
+    }
+}

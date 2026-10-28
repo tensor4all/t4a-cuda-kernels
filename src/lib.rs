@@ -135,7 +135,7 @@ pub mod source {
 /// device memory, selected through [`RankVariant`].
 pub const MAX_RANK: usize = 8;
 /// Version of the C ABI described by this crate.
-pub const ABI_REVISION: u32 = 10;
+pub const ABI_REVISION: u32 = 11;
 /// Threads per block for the flat (element-wise) entries.
 pub const FLAT_BLOCK: u32 = 256;
 /// Lanes per block for the plane-reduction entries: one 32-lane plane per block.
@@ -533,8 +533,11 @@ pub enum Entry {
     EmbedDiagonalCopy,
     Tril,
     Triu,
+    TrilView,
+    TriuView,
     Slice,
     DynamicSlice,
+    DynamicUpdateSlice,
     Pad,
     InitValidation,
     ValidateFloatIndices,
@@ -576,7 +579,7 @@ pub enum Entry {
 }
 
 impl Entry {
-    pub const ALL: [Entry; 55] = [
+    pub const ALL: [Entry; 58] = [
         Entry::FillZero,
         Entry::FillZeroView,
         Entry::CopyExact,
@@ -592,8 +595,11 @@ impl Entry {
         Entry::EmbedDiagonalCopy,
         Entry::Tril,
         Entry::Triu,
+        Entry::TrilView,
+        Entry::TriuView,
         Entry::Slice,
         Entry::DynamicSlice,
+        Entry::DynamicUpdateSlice,
         Entry::Pad,
         Entry::InitValidation,
         Entry::ValidateFloatIndices,
@@ -652,8 +658,11 @@ impl Entry {
             Entry::EmbedDiagonalCopy => "t4a_cuda_embed_diagonal_copy",
             Entry::Tril => "t4a_cuda_tril",
             Entry::Triu => "t4a_cuda_triu",
+            Entry::TrilView => "t4a_cuda_tril_view",
+            Entry::TriuView => "t4a_cuda_triu_view",
             Entry::Slice => "t4a_cuda_slice",
             Entry::DynamicSlice => "t4a_cuda_dynamic_slice",
+            Entry::DynamicUpdateSlice => "t4a_cuda_dynamic_update_slice",
             Entry::Pad => "t4a_cuda_pad",
             Entry::InitValidation => "t4a_cuda_init_validation",
             Entry::ValidateFloatIndices => "t4a_cuda_validate_float_indices",
@@ -1363,7 +1372,7 @@ pub struct GeneralEntry {
 
 impl GeneralEntry {
     /// Every general-path symbol, in `Entry::ALL` order.
-    pub const ALL: [GeneralEntry; 33] = [
+    pub const ALL: [GeneralEntry; 36] = [
         GeneralEntry::new("t4a_cuda_fill_zero_view_any", Entry::FillZeroView),
         GeneralEntry::new(
             "t4a_cuda_materialize_strided_any",
@@ -1373,8 +1382,14 @@ impl GeneralEntry {
         GeneralEntry::new("t4a_cuda_strided_to_strided_any", Entry::StridedToStrided),
         GeneralEntry::new("t4a_cuda_extract_diagonal_any", Entry::ExtractDiagonal),
         GeneralEntry::new("t4a_cuda_embed_diagonal_copy_any", Entry::EmbedDiagonalCopy),
+        GeneralEntry::new("t4a_cuda_tril_view_any", Entry::TrilView),
+        GeneralEntry::new("t4a_cuda_triu_view_any", Entry::TriuView),
         GeneralEntry::new("t4a_cuda_slice_any", Entry::Slice),
         GeneralEntry::new("t4a_cuda_dynamic_slice_any", Entry::DynamicSlice),
+        GeneralEntry::new(
+            "t4a_cuda_dynamic_update_slice_any",
+            Entry::DynamicUpdateSlice,
+        ),
         GeneralEntry::new("t4a_cuda_pad_any", Entry::Pad),
         GeneralEntry::new("t4a_cuda_reduce_any", Entry::Reduce),
         GeneralEntry::new("t4a_cuda_reduce_partials_any", Entry::ReducePartials),
@@ -3644,6 +3659,64 @@ pub fn plan_triu(dtype: DType, rows: i64, cols: i64, len: i64) -> Result<Launch,
     plan_triangular(Entry::Triu, dtype, rows, cols, len)
 }
 
+// --- Revision 11: the layout-taking triangle views and the window write ------
+
+/// Plan [`Entry::TrilView`]: mask the triangle of axes 0 and 1 of a strided
+/// input into a compact output that has the input's extents.
+///
+/// `k` is a launch scalar and is not part of the plan. The output takes no layout
+/// argument: its offset is zero and its compact strides follow from the input's
+/// extents, so `out_len` is only the caller's output allocation length and must
+/// hold `in.element_count()` elements. The input may have any offset and signed
+/// strides, including zero strides, and is read through them; its byte span must
+/// be disjoint from `out`, because one launch reads the input and writes the
+/// output with no ordering between threads.
+///
+/// # Errors
+///
+/// [`Error::UnsupportedDType`] for a dtype the entry does not serve,
+/// [`Error::RankOutOfRange`] below rank two (axes 0 and 1 carry the triangle),
+/// [`Error::OffsetOutOfSpan`] when the input reaches outside `in_len` or the
+/// output does not fit `out_len`, and the layout and overflow errors of
+/// [`LayoutRef::new`].
+pub fn plan_tril_view<'a>(
+    dtype: DType,
+    out_len: i64,
+    in_layout: impl Into<LayoutRef<'a>>,
+    in_len: i64,
+) -> Result<Launch, Error> {
+    plan_triangular_view(Entry::TrilView, dtype, out_len, in_layout.into(), in_len)
+}
+
+/// Plan [`Entry::TriuView`]; see [`plan_tril_view`].
+pub fn plan_triu_view<'a>(
+    dtype: DType,
+    out_len: i64,
+    in_layout: impl Into<LayoutRef<'a>>,
+    in_len: i64,
+) -> Result<Launch, Error> {
+    plan_triangular_view(Entry::TriuView, dtype, out_len, in_layout.into(), in_len)
+}
+
+fn plan_triangular_view(
+    entry: Entry,
+    dtype: DType,
+    out_len: i64,
+    in_layout: LayoutRef<'_>,
+    in_len: i64,
+) -> Result<Launch, Error> {
+    check_dtype(entry, dtype)?;
+    require_matrix(in_layout)?;
+    let len = in_layout.element_count()?;
+    in_layout.check_span(in_len, dtype.size())?;
+    // The output is the compact form of the input's extents at offset zero, so
+    // its reachable span is exactly `0..len`.
+    if out_len < len {
+        return Err(Error::OffsetOutOfSpan);
+    }
+    Ok(flat_launch(len)?.with_variant(&[in_layout], &[]))
+}
+
 /// Plan [`Entry::Slice`]. `steps[a] >= 1`, `0 <= starts[a] <= in.extents[a]`,
 /// and `out.extents[a]` is the slice length: at most the reachable count
 /// `(in - start).div_ceil(step)`. A shorter length is the caller's explicit
@@ -3724,6 +3797,66 @@ pub fn plan_dynamic_slice<'a>(
     in_layout.check_span(in_len, dtype.size())?;
     out_layout.check_span(out_len, dtype.size())?;
     Ok(flat_launch(len)?.with_variant(&[out_layout, in_layout], &[]))
+}
+
+/// Plan [`Entry::DynamicUpdateSlice`]: write `update` into the compact `out` at
+/// the window origin `starts`.
+///
+/// The window origin per axis is
+/// `clamp(trunc(starts[a]), 0, out.extents[a] - update.extents[a])`, the clamp
+/// [`Entry::DynamicSlice`] applies; `starts` is a device vector of `out.rank`
+/// values of `index_dtype`, already validated as integral and representable
+/// (float starts go through the revision-2 validators first). The launch domain
+/// is the *update*, so the work is proportional to the window and an empty
+/// update plans nothing.
+///
+/// `out` must be compact: with distinct window coordinates that makes the stores
+/// injective by construction, so no injectivity proof is asked of the caller.
+/// The elements of `out` outside the window are not written here -- the caller
+/// copies the operand into `out` first, ordered before this launch on the same
+/// stream. `update` and `starts` are read-only and must not overlap `out`; they
+/// may overlap each other.
+///
+/// # Errors
+///
+/// [`Error::UnsupportedDType`] for a data dtype the entry does not serve or an
+/// index dtype outside {F32, F64, I32, I64}, [`Error::NotCompact`] for a
+/// non-compact `out`, [`Error::RankLength`] unless `update`, `out` and the starts
+/// vector share a rank, [`Error::ShapeMismatch`] when an update extent exceeds
+/// its output extent, and the layout and span errors of [`LayoutRef::new`].
+pub fn plan_dynamic_update_slice<'a>(
+    dtype: DType,
+    index_dtype: DType,
+    out: impl Into<LayoutRef<'a>>,
+    out_len: i64,
+    update: impl Into<LayoutRef<'a>>,
+    update_len: i64,
+    starts_rank: u32,
+) -> Result<Launch, Error> {
+    let out = out.into();
+    let update = update.into();
+
+    check_dtype(Entry::DynamicUpdateSlice, dtype)?;
+    if !matches!(
+        index_dtype,
+        DType::F32 | DType::F64 | DType::I32 | DType::I64
+    ) {
+        return Err(Error::UnsupportedDType);
+    }
+    require_compact(out)?;
+    let rank = out.rank();
+    if update.rank() != rank || starts_rank != rank {
+        return Err(Error::RankLength);
+    }
+    for axis in 0..rank as usize {
+        if update.extents()[axis] > out.extents()[axis] {
+            return Err(Error::ShapeMismatch);
+        }
+    }
+    let len = update.element_count()?;
+    out.check_span(out_len, dtype.size())?;
+    update.check_span(update_len, dtype.size())?;
+    Ok(flat_launch(len)?.with_variant(&[out, update], &[]))
 }
 
 /// Plan [`Entry::Pad`]. Interior padding must be non-negative and the output

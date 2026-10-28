@@ -87,3 +87,8 @@ required-features = ["gpu-tests"]
 name = "gpu_remaining_families"
 path = "tests/gpu_remaining_families.rs"
 required-features = ["gpu-tests"]
+
+[[test]]
+name = "gpu_tril_dus"
+path = "tests/gpu_tril_dus.rs"
+required-features = ["gpu-tests"]

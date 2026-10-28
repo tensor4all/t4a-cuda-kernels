@@ -10,6 +10,11 @@
 // decodes coordinates from the layout); the source keeps signed strides.
 // Starts and steps of the static slice are runtime values here; the baseline
 // made steps a compile-time attribute.
+//
+// Revision 11 adds `t4a_cuda_dynamic_update_slice` and its `_any` twin: the
+// window write of StableHLO dynamic_update_slice, addressed through the update's
+// own signed layout and the same `clamp_window_start`. The operand copy that
+// initializes the destination is still the caller's (see the ABI document).
 
 #include <t4a/abi.cuh>
 
@@ -90,6 +95,41 @@ __device__ __forceinline__ void dynamic_slice_body(void* out_ptr,
     }
   }
   static_cast<T*>(out_ptr)[flat] = static_cast<const T*>(in_ptr)[in_index];
+}
+
+// The window write of StableHLO `dynamic_update_slice`: one thread per *update*
+// element, never per operand element. The destination is compact
+// (`require_compact` in `plan_dynamic_update_slice`), so its address is decoded
+// from its own extents and the clamped window origin; the update keeps its signed
+// strides. The operand copy that initializes `out` is ordered before this launch
+// by the caller; elements outside the window are not written here.
+template <typename T, typename I>
+__device__ __forceinline__ void dynamic_update_slice_body(
+    void* out_ptr, const void* update_ptr, const void* starts_ptr,
+    const t4a_cuda_layout& out_layout, const t4a_cuda_layout& update_layout, long long len) {
+  long long flat;
+  if (!t4a_cuda_tail_index(&flat, len)) {
+    return;
+  }
+  const I* starts = static_cast<const I*>(starts_ptr);
+  long long out_index = 0;
+  long long out_stride = 1;
+  long long update_index = update_layout.offset;
+  long long rest = flat;
+#pragma unroll
+  for (int axis = 0; axis < T4A_CUDA_MAX_RANK; ++axis) {
+    if (axis < update_layout.rank) {
+      const long long extent = update_layout.extents[axis];
+      const long long coordinate = rest % extent;
+      rest /= extent;
+      const long long start =
+          clamp_window_start<I>(starts[axis], out_layout.extents[axis], extent);
+      out_index += (start + coordinate) * out_stride;
+      out_stride *= out_layout.extents[axis];
+      update_index += coordinate * update_layout.strides[axis];
+    }
+  }
+  static_cast<T*>(out_ptr)[out_index] = static_cast<const T*>(update_ptr)[update_index];
 }
 
 // Edge padding keeps the baseline's unsigned-magnitude treatment of negative
@@ -205,6 +245,33 @@ __device__ __forceinline__ void dynamic_slice_body_any(void* out_ptr,
   static_cast<T*>(out_ptr)[flat] = static_cast<const T*>(in_ptr)[in_index];
 }
 
+template <typename T, typename I>
+__device__ __forceinline__ void dynamic_update_slice_body_any(
+    void* out_ptr, const void* update_ptr, const void* starts_ptr,
+    const t4a_cuda_layout_any& out_layout, const t4a_cuda_layout_any& update_layout,
+    long long len) {
+  long long flat;
+  if (!t4a_cuda_tail_index(&flat, len)) {
+    return;
+  }
+  const I* starts = static_cast<const I*>(starts_ptr);
+  long long out_index = 0;
+  long long out_stride = 1;
+  long long update_index = update_layout.offset;
+  long long rest = flat;
+  for (int axis = 0; axis < update_layout.rank; ++axis) {
+    const long long extent = update_layout.extents[axis];
+    const long long coordinate = rest % extent;
+    rest /= extent;
+    const long long start =
+        clamp_window_start<I>(starts[axis], out_layout.extents[axis], extent);
+    out_index += (start + coordinate) * out_stride;
+    out_stride *= out_layout.extents[axis];
+    update_index += coordinate * update_layout.strides[axis];
+  }
+  static_cast<T*>(out_ptr)[out_index] = static_cast<const T*>(update_ptr)[update_index];
+}
+
 template <typename T>
 __device__ __forceinline__ void pad_body_any(void* out_ptr,
                                              const void* in_ptr,
@@ -296,6 +363,39 @@ extern "C" __global__ void t4a_cuda_dynamic_slice(void* out, const void* in, con
   }
 }
 
+extern "C" __global__ void t4a_cuda_dynamic_update_slice(
+    void* out, const void* update, const void* starts, int dtype, int index_dtype,
+    t4a_cuda_layout out_layout, t4a_cuda_layout update_layout, long long len) {
+  switch (index_dtype) {
+    case T4A_CUDA_F32:
+#define T4A_BODY(T) \
+  dynamic_update_slice_body<T, float>(out, update, starts, out_layout, update_layout, len)
+      T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+      break;
+    case T4A_CUDA_F64:
+#define T4A_BODY(T) \
+  dynamic_update_slice_body<T, double>(out, update, starts, out_layout, update_layout, len)
+      T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+      break;
+    case T4A_CUDA_I32:
+#define T4A_BODY(T) \
+  dynamic_update_slice_body<T, int>(out, update, starts, out_layout, update_layout, len)
+      T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+      break;
+    case T4A_CUDA_I64:
+#define T4A_BODY(T) \
+  dynamic_update_slice_body<T, long long>(out, update, starts, out_layout, update_layout, len)
+      T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+      break;
+    default:
+      break;
+  }
+}
+
 extern "C" __global__ void t4a_cuda_pad(void* out, const void* in, int dtype,
                                         t4a_cuda_layout out_layout, t4a_cuda_layout in_layout,
                                         t4a_cuda_axis_values edge_low,
@@ -344,6 +444,40 @@ extern "C" __global__ void t4a_cuda_dynamic_slice_any(void* out, const void* in,
     case T4A_CUDA_I64:
 #define T4A_BODY(T) \
   dynamic_slice_body_any<T, long long>(out, in, starts, out_layout, in_layout, len)
+      T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+      break;
+    default:
+      break;
+  }
+}
+
+extern "C" __global__ void t4a_cuda_dynamic_update_slice_any(
+    void* out, const void* update, const void* starts, int dtype, int index_dtype,
+    t4a_cuda_layout_any out_layout, t4a_cuda_layout_any update_layout, long long len) {
+  switch (index_dtype) {
+    case T4A_CUDA_F32:
+#define T4A_BODY(T)                    \
+  dynamic_update_slice_body_any<T, float>(out, update, starts, out_layout, update_layout, len)
+      T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+      break;
+    case T4A_CUDA_F64:
+#define T4A_BODY(T)                     \
+  dynamic_update_slice_body_any<T, double>(out, update, starts, out_layout, update_layout, len)
+      T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+      break;
+    case T4A_CUDA_I32:
+#define T4A_BODY(T)                      \
+  dynamic_update_slice_body_any<T, int>(out, update, starts, out_layout, update_layout, len)
+      T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+      break;
+    case T4A_CUDA_I64:
+#define T4A_BODY(T)                            \
+  dynamic_update_slice_body_any<T, long long>(out, update, starts, out_layout, update_layout, \
+                                              len)
       T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
 #undef T4A_BODY
       break;

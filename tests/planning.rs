@@ -3075,7 +3075,15 @@ fn every_pinned_tenferro_cuda_kernel_resolves_to_an_entry() {
     // Reverse direction: every fast entry is either launched by the baseline or is
     // one of the consolidated entries the ABI added for it (`div`: tenferro's
     // `div_float` is an arm of `t4a_cuda_binary`, so the flat `div` entry is unused).
-    let without_baseline = ["t4a_cuda_div"];
+    // Revision 11's entries are ABI-introduced: the pinned inventory is tenferro's
+    // historical kernel list and does not name a layout-taking triangle view or a
+    // window write.
+    let without_baseline = [
+        "t4a_cuda_div",
+        "t4a_cuda_tril_view",
+        "t4a_cuda_triu_view",
+        "t4a_cuda_dynamic_update_slice",
+    ];
     for entry in Entry::ALL {
         let name = entry.name();
         let target = name.strip_prefix("t4a_cuda_").unwrap();
@@ -3292,4 +3300,263 @@ fn the_exposed_sources_match_the_files() {
             entry.name()
         );
     }
+}
+
+// --- revision 11: triangle views and the window write -----------------------
+
+use t4a_cuda_kernels::{
+    plan_dynamic_update_slice, plan_tril_view, plan_triu_view, GeneralEntry as GeneralTwin,
+};
+
+#[test]
+fn revision_eleven_entries_are_in_the_manifest() {
+    for (entry, name, general) in [
+        (
+            Entry::TrilView,
+            "t4a_cuda_tril_view",
+            "t4a_cuda_tril_view_any",
+        ),
+        (
+            Entry::TriuView,
+            "t4a_cuda_triu_view",
+            "t4a_cuda_triu_view_any",
+        ),
+        (
+            Entry::DynamicUpdateSlice,
+            "t4a_cuda_dynamic_update_slice",
+            "t4a_cuda_dynamic_update_slice_any",
+        ),
+    ] {
+        assert_eq!(entry.name(), name);
+        assert!(Entry::ALL.contains(&entry));
+        // The layout-taking and window entries are whole-view/whole-update
+        // bodies, not flat element-wise ones.
+        assert!(!entry.is_elementwise());
+        assert_eq!(entry.supported_dtypes(), &DType::ALL);
+        let twin = entry.general().expect("a general-path twin");
+        assert_eq!(twin.name(), general);
+        assert!(GeneralTwin::ALL.contains(twin));
+        assert_eq!(twin.fast(), entry);
+    }
+}
+
+/// A compact `Layout` of `extents` at offset zero, for the small-rank cases.
+fn compact(extents: &[i64]) -> Layout {
+    Layout::compact(extents).unwrap()
+}
+
+/// A rank-9 compact `WideLayout` of `extents`, so the planner must select the
+/// general path.
+fn wide_compact(extents: &[i64]) -> WideLayout {
+    WideLayout::compact(extents.to_vec()).unwrap()
+}
+
+#[test]
+fn triangular_views_read_through_the_input_layout() {
+    // A compact input: the whole output is planned, one block per 256 elements.
+    let input = compact(&[3, 4]);
+    let launch = plan_tril_view(DType::F32, 12, &input, 12).unwrap();
+    assert_eq!(launch.grid, [1, 1, 1]);
+    assert_eq!(launch.block, [FLAT_BLOCK, 1, 1]);
+    assert_eq!(launch.variant, RankVariant::Fast);
+
+    // Transposed, offset, negative-stride and zero-stride inputs are read
+    // through their own layout, so only the reachable span has to fit.
+    for (extents, strides, offset, in_len) in [
+        (vec![3i64, 4], vec![1i64, 3], 0i64, 12i64),
+        (vec![3, 4], vec![4, -1], 3, 12),
+        (vec![2, 3], vec![1, 0], 0, 3),
+        (vec![4, 4], vec![1, 4], 5, 21),
+    ] {
+        let strided = Layout::new(&extents, &strides, offset).unwrap();
+        let count = strided.element_count().unwrap();
+        assert!(
+            plan_triu_view(DType::C64, count, &strided, in_len).is_ok(),
+            "{extents:?} {strides:?} {offset}"
+        );
+    }
+
+    // The output is the compact form of the input's extents, so a shorter
+    // output allocation is refused and a longer one is the caller's slack.
+    assert_eq!(
+        plan_tril_view(DType::F32, 11, &input, 12),
+        Err(Error::OffsetOutOfSpan)
+    );
+    assert!(plan_tril_view(DType::F32, 13, &input, 12).is_ok());
+    // An input span outside its allocation is refused.
+    assert_eq!(
+        plan_tril_view(DType::F32, 12, &input, 11),
+        Err(Error::OffsetOutOfSpan)
+    );
+    // The mask needs axes 0 and 1.
+    let vector = compact(&[4]);
+    let scalar = Layout::new(&[], &[], 0).unwrap();
+    assert_eq!(
+        plan_tril_view(DType::F32, 4, &vector, 4),
+        Err(Error::RankOutOfRange)
+    );
+    assert_eq!(
+        plan_triu_view(DType::F32, 1, &scalar, 1),
+        Err(Error::RankOutOfRange)
+    );
+    // An empty input plans no launch.
+    let empty = compact(&[0, 4]);
+    assert!(plan_tril_view(DType::Bool, 0, &empty, 0)
+        .unwrap()
+        .is_empty());
+
+    // Every dtype, Bool and complex included.
+    for dtype in DType::ALL {
+        assert!(plan_triu_view(dtype, 12, &input, 12).is_ok(), "{dtype:?}");
+    }
+
+    // The launch is derived from the element count, not a constant: 1 vs ~1e6.
+    let one = compact(&[1, 1]);
+    assert_eq!(
+        plan_tril_view(DType::F64, 1, &one, 1).unwrap().grid,
+        [1, 1, 1]
+    );
+    let million = wide_compact(&[1000, 1000]);
+    assert_eq!(
+        plan_tril_view(DType::F64, 1_000_000, &million, 1_000_000)
+            .unwrap()
+            .grid,
+        [3907, 1, 1]
+    );
+    // Rank 9 selects the general symbol; rank 8 still selects the fast one.
+    let nine = wide_compact(&[2, 2, 2, 2, 2, 2, 2, 2, 3]);
+    assert_eq!(nine.element_count().unwrap(), 768);
+    let launch = plan_triu_view(DType::F32, 768, &nine, 768).unwrap();
+    assert_eq!(launch.variant, RankVariant::General);
+    let eight = wide_compact(&[2, 2, 2, 2, 2, 2, 2, 3]);
+    assert_eq!(
+        plan_triu_view(DType::F32, 384, &eight, 384)
+            .unwrap()
+            .variant,
+        RankVariant::Fast
+    );
+}
+
+#[test]
+fn dynamic_update_slice_plans_the_update_domain() {
+    let out = compact(&[6, 5]);
+    let update = Layout::new(&[2, 3], &[1, 2], 1).unwrap();
+    let launch =
+        plan_dynamic_update_slice(DType::F64, DType::I64, &out, 30, &update, 8, 2).unwrap();
+    assert_eq!(launch.grid, [1, 1, 1]);
+    assert_eq!(launch.block, [FLAT_BLOCK, 1, 1]);
+
+    // Every index route, and Bool is not one of them.
+    for index_dtype in [DType::F32, DType::F64, DType::I32, DType::I64] {
+        assert!(
+            plan_dynamic_update_slice(DType::I32, index_dtype, &out, 30, &update, 8, 2).is_ok(),
+            "{index_dtype:?}"
+        );
+    }
+    assert_eq!(
+        plan_dynamic_update_slice(DType::F64, DType::Bool, &out, 30, &update, 8, 2),
+        Err(Error::UnsupportedDType)
+    );
+    // Every data dtype, Bool included.
+    for dtype in DType::ALL {
+        assert!(
+            plan_dynamic_update_slice(dtype, DType::F32, &out, 30, &update, 8, 2).is_ok(),
+            "{dtype:?}"
+        );
+    }
+
+    // The destination must be compact; the update keeps its signed strides.
+    let strided_out = Layout::new(&[6, 5], &[1, 7], 0).unwrap();
+    assert_eq!(
+        plan_dynamic_update_slice(DType::F64, DType::I64, &strided_out, 30, &update, 8, 2),
+        Err(Error::NotCompact)
+    );
+    let transposed = Layout::new(&[3, 2], &[1, 3], 0).unwrap();
+    assert!(plan_dynamic_update_slice(DType::F64, DType::I64, &out, 30, &transposed, 6, 2).is_ok());
+    let broadcast = Layout::new(&[1, 1], &[0, 0], 0).unwrap();
+    assert!(plan_dynamic_update_slice(DType::F64, DType::I64, &out, 30, &broadcast, 1, 2).is_ok());
+
+    // Ranks and window extents must agree with the destination.
+    let rank_three = Layout::compact(&[2, 3, 1]).unwrap();
+    assert_eq!(
+        plan_dynamic_update_slice(DType::F64, DType::I64, &out, 30, &rank_three, 6, 3),
+        Err(Error::RankLength)
+    );
+    assert_eq!(
+        plan_dynamic_update_slice(DType::F64, DType::I64, &out, 30, &update, 8, 3),
+        Err(Error::RankLength)
+    );
+    let too_wide = Layout::compact(&[2, 6]).unwrap();
+    assert_eq!(
+        plan_dynamic_update_slice(DType::F64, DType::I64, &out, 30, &too_wide, 12, 2),
+        Err(Error::ShapeMismatch)
+    );
+
+    // Both spans are checked against the caller's allocation lengths.
+    assert_eq!(
+        plan_dynamic_update_slice(DType::F64, DType::I64, &out, 29, &update, 8, 2),
+        Err(Error::OffsetOutOfSpan)
+    );
+    assert_eq!(
+        plan_dynamic_update_slice(DType::F64, DType::I64, &out, 30, &update, 5, 2),
+        Err(Error::OffsetOutOfSpan)
+    );
+
+    // An empty update writes nothing and plans no launch, whatever the operand.
+    let empty = Layout::compact(&[0, 3]).unwrap();
+    assert!(
+        plan_dynamic_update_slice(DType::F64, DType::I64, &out, 30, &empty, 0, 2)
+            .unwrap()
+            .is_empty()
+    );
+    // A rank-0 update writes one element and needs no start.
+    let scalar = Layout::new(&[], &[], 0).unwrap();
+    assert_eq!(
+        plan_dynamic_update_slice(DType::F64, DType::F64, &scalar, 1, &scalar, 1, 0)
+            .unwrap()
+            .grid,
+        [1, 1, 1]
+    );
+
+    // Rank 9 selects the general symbol and its geometry is carried in device
+    // memory; the update extent is checked on the non-unit high axis.
+    let nine = wide_compact(&[2, 2, 2, 2, 2, 2, 2, 2, 3]);
+    let mut update_extents = vec![1i64; 9];
+    update_extents[8] = 2;
+    let update_nine = wide_compact(&update_extents);
+    let launch =
+        plan_dynamic_update_slice(DType::F32, DType::I32, &nine, 768, &update_nine, 2, 9).unwrap();
+    assert_eq!(launch.variant, RankVariant::General);
+    assert_eq!(launch.grid, [1, 1, 1]);
+    let mut too_wide_extents = vec![1i64; 9];
+    too_wide_extents[8] = 4;
+    let too_wide_nine = wide_compact(&too_wide_extents);
+    assert_eq!(
+        plan_dynamic_update_slice(DType::F32, DType::I32, &nine, 768, &too_wide_nine, 4, 9),
+        Err(Error::ShapeMismatch)
+    );
+
+    // The grid follows the update count: 1 vs ~1e6 elements.
+    let big_out = wide_compact(&[1000, 1000]);
+    let one = Layout::compact(&[1, 1]).unwrap();
+    assert_eq!(
+        plan_dynamic_update_slice(DType::F32, DType::I64, &big_out, 1_000_000, &one, 1, 2)
+            .unwrap()
+            .grid,
+        [1, 1, 1]
+    );
+    assert_eq!(
+        plan_dynamic_update_slice(
+            DType::F32,
+            DType::I64,
+            &big_out,
+            1_000_000,
+            &big_out,
+            1_000_000,
+            2
+        )
+        .unwrap()
+        .grid,
+        [3907, 1, 1]
+    );
 }

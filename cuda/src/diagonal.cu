@@ -15,6 +15,13 @@
 
 #include <t4a/abi.cuh>
 
+// Revision 11 adds the layout-taking view twins below (`t4a_cuda_tril_view`,
+// `t4a_cuda_triu_view` and their `_any` forms). They apply the same mask as
+// `triangular_body`, but read the input through its own signed layout and write
+// the compact output over the input's extents, so a transposed, offset or
+// broadcast input needs no staging copy. The compact flat entries above are
+// unchanged: their bodies and their compiled code stay as revision 2 built them.
+
 namespace {
 
 // Logical coordinates of `flat` in a compact layout, axis 0 fastest. Every slot is
@@ -202,6 +209,75 @@ __device__ __forceinline__ void triangular_body(void* out_ptr,
       keep ? static_cast<const T*>(in_ptr)[flat] : t4a_cuda_zero<T>();
 }
 
+// The view mask: one thread per output element. `flat` is the compact position of
+// the output, whose extents are the input's extents (see `plan_tril_view`), so the
+// same decode yields the row and column of the mask and the input coordinates.
+// The input is read through its layout only for a kept element; a masked element
+// stores zero and touches no input address.
+template <typename T>
+__device__ __forceinline__ void triangular_view_body(void* out_ptr,
+                                                    const void* in_ptr,
+                                                    const t4a_cuda_layout& in_layout,
+                                                    long long k,
+                                                    long long len,
+                                                    bool keep_below) {
+  long long flat;
+  if (!t4a_cuda_tail_index(&flat, len)) {
+    return;
+  }
+  long long coordinates[T4A_CUDA_MAX_RANK];
+  t4a_cuda_compact_coordinates(flat, in_layout, coordinates);
+  // Comparisons are overflow-free, as in `triangular_body`: the baseline's
+  // `col - k` is undefined for extreme `k`.
+  const long long offset = coordinates[1] - coordinates[0];
+  if (keep_below ? offset > k : offset < k) {
+    static_cast<T*>(out_ptr)[flat] = t4a_cuda_zero<T>();
+    return;
+  }
+  long long in_index = in_layout.offset;
+#pragma unroll
+  for (int axis = 0; axis < T4A_CUDA_MAX_RANK; ++axis) {
+    if (axis < in_layout.rank) {
+      in_index += coordinates[axis] * in_layout.strides[axis];
+    }
+  }
+  static_cast<T*>(out_ptr)[flat] = static_cast<const T*>(in_ptr)[in_index];
+}
+
+// The general-path twin: the same decode with the geometry in device memory, one
+// runtime-bounded walk and no per-axis state array.
+template <typename T>
+__device__ __forceinline__ void triangular_view_body_any(void* out_ptr,
+                                                        const void* in_ptr,
+                                                        const t4a_cuda_layout_any& in_layout,
+                                                        long long k,
+                                                        long long len,
+                                                        bool keep_below) {
+  long long flat;
+  if (!t4a_cuda_tail_index(&flat, len)) {
+    return;
+  }
+  long long row = 0;
+  long long col = 0;
+  long long in_index = in_layout.offset;
+  long long rest = flat;
+  for (int axis = 0; axis < in_layout.rank; ++axis) {
+    const long long extent = in_layout.extents[axis];
+    const long long coordinate = rest % extent;
+    rest /= extent;
+    if (axis == 0) {
+      row = coordinate;
+    } else if (axis == 1) {
+      col = coordinate;
+    }
+    in_index += coordinate * in_layout.strides[axis];
+  }
+  const long long offset = col - row;
+  static_cast<T*>(out_ptr)[flat] =
+      (keep_below ? offset <= k : offset >= k) ? static_cast<const T*>(in_ptr)[in_index]
+                                               : t4a_cuda_zero<T>();
+}
+
 }  // namespace
 
 extern "C" __global__ void t4a_cuda_extract_diagonal(void* out, const void* in, int dtype,
@@ -234,6 +310,38 @@ extern "C" __global__ void t4a_cuda_tril(void* out, const void* in, int dtype, l
 extern "C" __global__ void t4a_cuda_triu(void* out, const void* in, int dtype, long long k,
                                          long long rows, long long cols, long long len) {
 #define T4A_BODY(T) triangular_body<T>(out, in, k, rows, cols, len, false)
+  T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+}
+
+extern "C" __global__ void t4a_cuda_tril_view(void* out, const void* in, int dtype,
+                                              t4a_cuda_layout in_layout, long long k,
+                                              long long len) {
+#define T4A_BODY(T) triangular_view_body<T>(out, in, in_layout, k, len, true)
+  T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+}
+
+extern "C" __global__ void t4a_cuda_triu_view(void* out, const void* in, int dtype,
+                                              t4a_cuda_layout in_layout, long long k,
+                                              long long len) {
+#define T4A_BODY(T) triangular_view_body<T>(out, in, in_layout, k, len, false)
+  T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+}
+
+extern "C" __global__ void t4a_cuda_tril_view_any(void* out, const void* in, int dtype,
+                                                  t4a_cuda_layout_any in_layout, long long k,
+                                                  long long len) {
+#define T4A_BODY(T) triangular_view_body_any<T>(out, in, in_layout, k, len, true)
+  T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
+#undef T4A_BODY
+}
+
+extern "C" __global__ void t4a_cuda_triu_view_any(void* out, const void* in, int dtype,
+                                                  t4a_cuda_layout_any in_layout, long long k,
+                                                  long long len) {
+#define T4A_BODY(T) triangular_view_body_any<T>(out, in, in_layout, k, len, false)
   T4A_CUDA_DTYPE_SWITCH(dtype, T4A_BODY)
 #undef T4A_BODY
 }

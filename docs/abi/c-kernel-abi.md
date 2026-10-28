@@ -1,4 +1,4 @@
-# C kernel ABI (revision 10)
+# C kernel ABI (revision 11)
 
 Every entry is an `extern "C" __global__` CUDA function in `cuda/src/`. A caller
 loads the compiled module into its own context, looks the symbol up by the name
@@ -18,7 +18,7 @@ nothing, so the same text compiles under NVCC and NVRTC.
 
 ## Revision
 
-`T4A_CUDA_ABI_REVISION == 10`. Revision 2 added `t4a_cuda_axis_values` and the
+`T4A_CUDA_ABI_REVISION == 11`. Revision 2 added `t4a_cuda_axis_values` and the
 diagonal, windowing and validation-status entries; revision 3 added the reduction
 entries; revision 4 added gather and additive scatter; revision 5 added the dtype
 conversion entry; revision 6 added the elementwise, comparison and
@@ -26,8 +26,10 @@ strided-combination entries; revision 7 added the linalg auxiliary entries;
 revision 8 added the rank-revealing QR primitives; revision 9 added dynamic rank:
 four pointer-geometry structs and one general-path twin per rank-walking entry;
 revision 10 adds the two remaining kernel families (`broadcast_in_dim` and
-`concatenate_copy`) with their general-path twins.
-**Nothing in revisions 1-9 changed** — the 84 existing symbols, their signatures
+`concatenate_copy`) with their general-path twins; revision 11 adds the
+layout-taking triangle views (`tril_view`, `triu_view`) and
+`dynamic_update_slice`, each with a general-path twin, and no new struct.
+**Nothing in revisions 1-10 changed** — the 88 existing symbols, their signatures
 and the nine existing struct layouts are identical. Any
 change to a struct layout, an entry signature, an element type
 mapping or a launch contract requires a further revision bump and an entry in the
@@ -702,6 +704,55 @@ compact:
   `t4a_cuda_binary` with `op = MUL`, a scalar `rhs` and `out` aliasing `lhs`, which
   the aliasing rule below already permits.
 
+## Revision 11: the layout-taking triangle views and the window write
+
+A consumer that applies a triangle mask to a non-compact view, or writes a
+StableHLO `dynamic_update_slice` whose starts stay on the device, has no entry in
+revisions 1-10: the flat `t4a_cuda_tril`/`t4a_cuda_triu` require a compact input
+and `t4a_cuda_dynamic_slice` only reads a window. Revision 11 adds both, with the
+revision 9 general-path twins. Nothing in revisions 1-10 changes; in particular
+the flat triangle entries keep their symbol, their signature and their compiled
+code.
+
+| Symbol | Arguments | Semantics |
+| --- | --- | --- |
+| `t4a_cuda_tril_view` | `(void* out, const void* in, int dtype, t4a_cuda_layout in, long long k, long long len)` | triangle mask of the strided input into a compact output |
+| `t4a_cuda_triu_view` | same | upper triangle, `col - row >= k` |
+| `t4a_cuda_tril_view_any` / `t4a_cuda_triu_view_any` | same with a `t4a_cuda_layout_any` | general path, any rank |
+| `t4a_cuda_dynamic_update_slice` | `(void* out, const void* update, const void* starts, int dtype, int index_dtype, t4a_cuda_layout out, t4a_cuda_layout update, long long len)` | write the update into the compact operand at the device-resident window origin |
+| `t4a_cuda_dynamic_update_slice_any` | same with the two `_any` layouts | general path, any rank |
+
+- **tril_view / triu_view** — one thread per output element; `len` is the element
+  count and the whole output is written. Axes 0 and 1 of the input carry the
+  triangle (`rows = in.extents[0]`, `cols = in.extents[1]`) and every higher axis
+  batches it. An element is kept when `col - row <= k` (tril) or
+  `col - row >= k` (triu), the overflow-free comparison of the flat entries, so
+  `k = i64::MIN` and `k = i64::MAX` are well defined. The output is the compact
+  form of the input's extents at offset zero, so it takes no layout argument and
+  `out_len` must hold the whole element count. The input is read through its own
+  offset and signed strides — a transposed, offset, negative-stride or zero-stride
+  input needs no staging copy — and only for a kept element: a masked element
+  writes zero and touches no input address. The planner requires rank >= 2 and a
+  checked input span. `out` must be disjoint from `in`: one launch reads and
+  writes with no ordering between threads.
+- **dynamic_update_slice** — StableHLO/XLA semantics: with
+  `s[a] = clamp(trunc(starts[a]), 0, out.extents[a] - update.extents[a])` (the
+  `dynamic_slice` clamp), every update coordinate `i` writes
+  `out[s + i] = update[i]`. One thread per **update** element, so `len` is the
+  update's element count and the work is proportional to the window, not to the
+  operand: an empty update plans zero launches, and a rank-0 update writes one
+  element and dereferences no start. `starts` is a device vector of `out.rank`
+  values of `index_dtype` in {F32, F64, I32, I64}, already validated as integral
+  and representable exactly as for `dynamic_slice`. `out` must be compact (the
+  planner enforces it), which makes the stores injective by construction however
+  the window was computed; `update` may have any offset and signed strides.
+  Elements of `out` outside the window are untouched, so the caller copies the
+  operand into `out` first, ordered before this launch on the same stream.
+  `update` and `starts` are read-only: neither may overlap `out`, and they may
+  overlap each other.
+- Neither entry clamps a destination, atomically updates one, or allocates
+  scratch. Dtype coverage is `DType::ALL` for both families, Bool included.
+
 ## Dynamic rank (revision 9)
 
 Every entry that takes a `t4a_cuda_layout`, `t4a_cuda_axis_values`,
@@ -781,8 +832,8 @@ Fast/general pairs, per source:
 | Source | Pairs |
 | --- | --- |
 | `movement.cu` | `fill_zero_view`, `materialize_strided`, `contiguous_to_view`, `strided_to_strided` |
-| `window.cu` | `slice`, `dynamic_slice`, `pad` (the general `pad` takes `edge_low` and `interior` only; `edge_high` is a by-value extent input that the facade folds into `out_layout`) |
-| `diagonal.cu` | `extract_diagonal`, `embed_diagonal_copy` |
+| `window.cu` | `slice`, `dynamic_slice`, `dynamic_update_slice`, `pad` (the general `pad` takes `edge_low` and `interior` only; `edge_high` is a by-value extent input that the facade folds into `out_layout`) |
+| `diagonal.cu` | `extract_diagonal`, `embed_diagonal_copy`, `tril_view`, `triu_view` |
 | `elementwise.cu` | `combined_strided` |
 | `gather_scatter.cu` | `gather`, `scatter_add` |
 | `reduce.cu` | `reduce`, `reduce_partials` |
@@ -867,6 +918,11 @@ destination disjoint from all of its reads (`lu_extract_outputs`' four outputs a
 mutually disjoint, and `householder_assemble`'s two outputs are disjoint from its
 three sources).
 
+Revision 11 adds: `tril_view`/`triu_view` write only their compact destination and
+must not overlap their input. `dynamic_update_slice` writes only `out`, which must
+be a compact destination disjoint from `update` and `starts`; the two read-only
+operands may alias each other.
+
 The facade rejects any destination axis that has stride zero with extent greater
 than one, for every destination including `t4a_cuda_fill_zero_view`. That is a
 necessary condition only: full injectivity of a destination remains the caller's
@@ -904,6 +960,7 @@ identical.
 | Entry | Grid | Block | Shared |
 | --- | --- | --- | --- |
 | flat entries | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |
+| revision 11 (`tril_view`, `triu_view`, `dynamic_update_slice`) | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |
 | reductions | see the revision-3 section | `(plane_width, 1, 1)` | 0 |
 | gather / scatter add / convert | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |
 | unary / binary / compare / select / clamp / combined strided | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |

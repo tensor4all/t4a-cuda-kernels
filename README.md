@@ -100,11 +100,11 @@ see the [preparation/cache contract](docs/design/cubecl-kernel-port.md#preparati
 and `tests/gpu_fusion.rs` for the reference consumer with observed NVRTC counts.
 
 Device compilation/testing is explicit; the default build and its tests do not
-initialize CUDA. Registry publication is deferred.
+initialize CUDA. Published on crates.io as [`t4a-cuda-kernels`](https://crates.io/crates/t4a-cuda-kernels).
 
 ## Related repositories
 
 - [t4a-gpu-backend](https://github.com/tensor4all/t4a-gpu-backend): execution foundations, including t4a-cuda-runtime.
-- [tenferro-rs](https://github.com/tensor4all/tenferro-rs): a future consumer that supplies Tensor, graph and AD semantics.
+- [tenferro-rs](https://github.com/tensor4all/tenferro-rs): the consumer that supplies Tensor, graph and AD semantics (its CUDA backend since tenferro 0.8).
 
 Development follows the applicable [tensor4all agent rules](https://github.com/tensor4all/tensor4all-agent-rules/blob/main/rules/index.md). Before a source translation, preserve and audit the inherited notices described in the design.

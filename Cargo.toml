@@ -1,11 +1,28 @@
 [package]
 name = "t4a-cuda-kernels"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.82"
 license = "MIT OR Apache-2.0"
-publish = false
+authors = ["Hiroshi Shinaoka <h.shinaoka@gmail.com>", "tensor4all contributors"]
+repository = "https://github.com/tensor4all/t4a-cuda-kernels"
 description = "Runtime-independent CUDA kernels for tensor4all and external CUDA consumers"
+readme = "README.md"
+keywords = ["cuda", "gpu", "kernels", "nvrtc", "tensor4all"]
+categories = ["hardware-support", "science"]
+# The NVRTC sources under cuda/ are part of the library (include_str!); design docs,
+# worklogs and benchmark tooling stay in the repository.
+include = [
+    "/src/**",
+    "/cuda/**",
+    "/tests/**",
+    "/examples/**",
+    "/README.md",
+    "/LICENSE-MIT",
+    "/LICENSE-APACHE",
+    "/NOTICE",
+    "/THIRD_PARTY_NOTICES.md",
+]
 
 [features]
 default = []

@@ -1616,3 +1616,193 @@ fn sum_squares_rounds_before_adding() {
     let expected = square0 + square1;
     assert_eq!(got.to_bits(), expected.to_bits(), "{got} vs {expected}");
 }
+
+/// A dtype the wide-combine tests drive: the tag the kernel takes.
+trait Probe: Copy {
+    const DTYPE: DType;
+}
+
+impl Probe for f64 {
+    const DTYPE: DType = DType::F64;
+}
+
+impl Probe for f32 {
+    const DTYPE: DType = DType::F32;
+}
+
+impl Probe for i32 {
+    const DTYPE: DType = DType::I32;
+}
+
+impl Probe for C64 {
+    const DTYPE: DType = DType::C64;
+}
+
+/// Run a whole reduction exactly as its plan declares it — both passes, including the
+/// combine pass's own strategy and block width — and return the outputs.
+fn run_planned<T: Probe>(
+    session: &Session,
+    values: &[T],
+    extents: &[i64],
+    axis: usize,
+    op: ReduceOp,
+) -> (Vec<T>, ReductionPlan) {
+    let reduce = session.function("t4a_cuda_reduce");
+    let partials_fn = session.function("t4a_cuda_reduce_partials");
+    let in_layout = Layout::compact(extents).unwrap();
+    let mut out_extents = extents.to_vec();
+    out_extents[axis] = 1;
+    let out_layout = Layout::compact(&out_extents).unwrap();
+    let output_len = out_layout.element_count().unwrap();
+    let in_len = in_layout.element_count().unwrap();
+    let plan = plan_reduction(
+        T::DTYPE,
+        op,
+        &out_layout,
+        output_len,
+        &in_layout,
+        in_len,
+        axis as u32,
+        32,
+    )
+    .unwrap();
+    let src = upload(session, values);
+    let out = sentinel(session, output_len as usize * std::mem::size_of::<T>());
+    match &plan {
+        ReductionPlan::Split {
+            split,
+            pass1,
+            pass2,
+            combine_strategy,
+            combine_op,
+        } => {
+            let partials_extents =
+                t4a_cuda_kernels::reduction_partials_layout(&in_layout, axis as u32, split.splits)
+                    .unwrap()
+                    .extents()
+                    .to_vec();
+            let partials_layout = Layout::compact(&partials_extents).unwrap();
+            let partials_len = partials_layout.element_count().unwrap();
+            let partials = sentinel(session, partials_len as usize * std::mem::size_of::<T>());
+            let mut slots1 = partials_slots(
+                &partials,
+                &src,
+                T::DTYPE,
+                op,
+                &CLayout::new(&partials_layout),
+                &CLayout::new(&in_layout),
+                axis as i32,
+                output_len,
+                split.splits,
+                split.chunk_len,
+            );
+            launch_async(partials_fn, pass1, session.stream(), &mut slots1);
+            let mut slots2 = reduce_slots(
+                &out,
+                &partials,
+                T::DTYPE,
+                *combine_op,
+                *combine_strategy,
+                &CLayout::new(&out_layout),
+                &CLayout::new(&partials_layout),
+                axis as i32,
+                output_len,
+            );
+            launch_async(reduce, pass2, session.stream(), &mut slots2);
+            pub_sync(session.stream());
+        }
+        ReductionPlan::Direct { strategy, launch } => {
+            let mut slots = reduce_slots(
+                &out,
+                &src,
+                T::DTYPE,
+                op,
+                *strategy,
+                &CLayout::new(&out_layout),
+                &CLayout::new(&in_layout),
+                axis as i32,
+                output_len,
+            );
+            launch_async(reduce, launch, session.stream(), &mut slots);
+            pub_sync(session.stream());
+        }
+    }
+    (download::<T>(session, &out, output_len as usize), plan)
+}
+
+#[test]
+fn wide_combine_folds_every_partial_for_every_wide_width() {
+    // One axis length per wide block width. Each output's only large value sits in a different
+    // late partial, so a lane or a warp the combine skipped would change that output's result.
+    let session = Session::new("reduce");
+    let outputs = 4i64;
+    // The width follows `COMBINE_TARGET_FOLDS_PER_LANE = 8`, so it steps at 1024/2048/4096
+    // partials; 512 partials still use the narrowest wide block.
+    for (splits, want_block) in [(512u32, 64u32), (1_024, 128), (2_048, 256), (4_096, 512)] {
+        let axis_len = i64::from(splits) * 256;
+        let extents = [axis_len, outputs];
+        let mut values = vec![0.0f32; (axis_len * outputs) as usize];
+        for output in 0..outputs {
+            // Late in the partials order, and a different partial per output.
+            let last = axis_len - 1 - 40 * output;
+            values[(last + axis_len * output) as usize] = 100.0 + output as f32;
+        }
+        let (got, plan) = run_planned(&session, &values, &extents, 0, ReduceOp::Max);
+        let ReductionPlan::Split {
+            split,
+            combine_strategy,
+            pass2,
+            ..
+        } = plan
+        else {
+            panic!("a {axis_len}-long axis must split");
+        };
+        assert_eq!(split.splits, i64::from(splits));
+        assert_eq!(combine_strategy, ReduceStrategy::Plane);
+        assert_eq!(
+            pass2.block,
+            [want_block, 1, 1],
+            "{splits} partials must select a {want_block}-thread combine block"
+        );
+        for (output, value) in got.iter().enumerate() {
+            assert_eq!(
+                *value,
+                100.0 + output as f32,
+                "{splits} partials, output {output}: every partial must reach the combine"
+            );
+        }
+    }
+}
+
+#[test]
+fn wide_combine_matches_the_cpu_reference_for_each_dtype() {
+    let session = Session::new("reduce");
+    let axis_len = 131_072i64;
+    let f64_values: Vec<f64> = (0..axis_len)
+        .map(|index| ((index % 89) as f64 - 44.0) * 0.5)
+        .collect();
+    let (got, _) = run_planned(&session, &f64_values, &[axis_len], 0, ReduceOp::Sum);
+    let expected: f64 = f64_values.iter().sum();
+    assert!(approx_within(got[0], expected, 1e-12), "{}", got[0]);
+
+    let i32_values: Vec<i32> = (0..axis_len)
+        .map(|index| (index % 23) as i32 - 11)
+        .collect();
+    let (got, _) = run_planned(&session, &i32_values, &[axis_len], 0, ReduceOp::Sum);
+    let expected: i64 = i32_values.iter().map(|&v| i64::from(v)).sum();
+    assert_eq!(i64::from(got[0]), expected, "integer wide combine");
+
+    let c64_values: Vec<C64> = (0..axis_len)
+        .map(|index| C64 {
+            re: ((index % 31) as f64 - 15.0) * 0.25,
+            im: ((index % 17) as f64 - 8.0) * 0.5,
+        })
+        .collect();
+    let (got, _) = run_planned(&session, &c64_values, &[axis_len], 0, ReduceOp::Sum);
+    let re: f64 = c64_values.iter().map(|v| v.re).sum();
+    let im: f64 = c64_values.iter().map(|v| v.im).sum();
+    assert!(
+        approx(got[0].re, re) && approx(got[0].im, im),
+        "complex wide combine"
+    );
+}

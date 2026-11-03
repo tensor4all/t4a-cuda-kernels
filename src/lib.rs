@@ -135,7 +135,7 @@ pub mod source {
 /// device memory, selected through [`RankVariant`].
 pub const MAX_RANK: usize = 8;
 /// Version of the C ABI described by this crate.
-pub const ABI_REVISION: u32 = 11;
+pub const ABI_REVISION: u32 = 12;
 /// Threads per block for the flat (element-wise) entries.
 pub const FLAT_BLOCK: u32 = 256;
 /// Lanes per block for the plane-reduction entries: one 32-lane plane per block.
@@ -3035,6 +3035,16 @@ pub const PLANE_WIDTHS: [u32; 3] = [8, 16, 32];
 pub const MIN_CHUNK_PLANES: i64 = 8;
 /// Baseline cap on the number of split chunks.
 pub const MAX_SPLITS: i64 = 4096;
+/// Wide combine blocks: powers of two above one warp. Only a split reduction's combine pass
+/// selects one (through `combine_geometry`, as an `Auto` policy); the width is chosen inside
+/// [`plan_reduction`].
+const COMBINE_BLOCK_WIDTHS: [u32; 4] = [64, 128, 256, 512];
+/// Widest block a combine pass may use; `t4a_cuda_plane_fold` holds one result per warp.
+const MAX_BLOCK_WIDTH: u32 = 512;
+/// Partials below this count keep the baseline combine geometry.
+const WIDE_COMBINE_MIN_SPLITS: i64 = 64;
+/// Folds per lane a wide combine block aims for when it sizes itself from `splits`.
+const COMBINE_TARGET_FOLDS_PER_LANE: i64 = 8;
 
 /// Reduction operation carried by [`Entry::Reduce`] and
 /// [`Entry::ReducePartials`], as a runtime tag.
@@ -3259,6 +3269,17 @@ fn launch_for(
     }
 }
 
+/// Block width a reduce entry may use for `strategy`. `Unit` keeps the sub-warp widths
+/// (it indexes outputs by `blockIdx * blockDim + threadIdx`); `Plane` also accepts the
+/// wide combine widths, whose fold crosses warps through shared memory.
+fn check_reduce_width(strategy: ReduceStrategy, plane_width: u32) -> Result<(), Error> {
+    match strategy {
+        ReduceStrategy::Unit => check_plane_width(plane_width),
+        ReduceStrategy::Plane if COMBINE_BLOCK_WIDTHS.contains(&plane_width) => Ok(()),
+        ReduceStrategy::Plane => check_plane_width(plane_width),
+    }
+}
+
 fn check_strategy(
     strategy: ReduceStrategy,
     reduce_len: i64,
@@ -3292,7 +3313,7 @@ pub fn plan_reduce<'a>(
     let out_layout = out_layout.into();
     let in_layout = in_layout.into();
 
-    check_plane_width(plane_width)?;
+    check_reduce_width(strategy, plane_width)?;
     let (reduce_len, output_len) =
         reduce_problem(dtype, op, out_layout, out_len, in_layout, in_len, axis)?;
     check_strategy(strategy, reduce_len, plane_width)?;
@@ -3384,6 +3405,27 @@ pub fn plan_reduce_partials<'a>(
     })
 }
 
+/// Width of the wide combine block for `splits` partials: the next power of two at or
+/// above `splits / COMBINE_TARGET_FOLDS_PER_LANE`, clamped to the wide widths.
+fn combine_block_width(splits: i64) -> u32 {
+    let target = splits / COMBINE_TARGET_FOLDS_PER_LANE;
+    let mut width = WIDE_COMBINE_MIN_SPLITS as u32;
+    while i64::from(width) < target && width < MAX_BLOCK_WIDTH {
+        width *= 2;
+    }
+    width.min(MAX_BLOCK_WIDTH)
+}
+
+/// Geometry of a split reduction's combine pass. A wide block only pays off once the
+/// partials no longer fit one warp, and only for the operations whose fold this slice
+/// may reassociate: a regrouped product can turn an overflow-then-zero into `Inf * 0`.
+fn combine_geometry(combine_op: ReduceOp, splits: i64, plane_width: u32) -> (ReduceStrategy, u32) {
+    if matches!(combine_op, ReduceOp::Prod) || splits < WIDE_COMBINE_MIN_SPLITS {
+        return (strategy_for(splits, plane_width), plane_width);
+    }
+    (ReduceStrategy::Plane, combine_block_width(splits))
+}
+
 /// Plan a whole reduction with the baseline's Auto policy: unit or plane for a
 /// short axis, otherwise pass 1 partials plus a non-recursive combine pass.
 #[allow(clippy::too_many_arguments)]
@@ -3434,8 +3476,10 @@ pub fn plan_reduction<'a>(
             )?;
             let combine_op = op.combine();
             // The partials axis is `splits` long; the combine pass is never
-            // split again.
-            let combine_strategy = strategy_for(split.splits, plane_width);
+            // split again. It may widen its block, which the fold crosses warp by
+            // warp; `Prod` keeps the baseline geometry.
+            let (combine_strategy, combine_width) =
+                combine_geometry(combine_op, split.splits, plane_width);
             let pass2 = plan_reduce(
                 dtype,
                 combine_op,
@@ -3445,7 +3489,7 @@ pub fn plan_reduction<'a>(
                 &partials_layout,
                 partials_len,
                 axis,
-                plane_width,
+                combine_width,
             )?;
             Ok(ReductionPlan::Split {
                 split,

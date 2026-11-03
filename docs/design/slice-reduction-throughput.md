@@ -1,6 +1,8 @@
 # Slice — reduction throughput (tenferro-rs #2406)
 
-Status: plan (2026-11-03, revision 4 after three independent plan reviews). Follows the measured
+Status: implemented, mechanism 1 only (2026-11-03; four independent plan reviews, then
+measurement). What shipped, what was measured and rejected, and what remains are in
+§9. Follows the measured
 diagnosis in tenferro-rs #2406 and the `reduce-*` ownership row of
 [slice-perf-remainder.md](slice-perf-remainder.md) §3.
 
@@ -75,8 +77,12 @@ multiplies (or how many partials exist) can turn an overflow-then-`0` product in
      `t4a_cuda_plane_mask(warps)` — not `warps - 1`, which names the wrong lanes — and lane 0
      writes the output. That is the only barrier the fold needs: the shared array is written
      once and never reused.
-- Both the fast body and the general-rank twin (`plane_reduce_body_any`, a separate
-  implementation today) use the same wide-fold helper, so the two cannot drift.
+- The wide step lives only in the fold the combine-pass entries use. `partials_body` and
+  `partials_body_any` (pass 1) keep a narrow-only fold whose generated code is what it was:
+  the planner never widens pass 1, and having the wide step in the pass-1 kernel measured
+  12.5% slower on a strided pass-1 case (`reduce-sum-f32-4096sq-axis1`, see §9.5). Both plane
+  bodies (fast and general-rank) still take the same wide-capable fold, so the twins cannot
+  drift.
 - Width selection, for the operations in §3 only:
   `splits >= 64` → `width = clamp(next_power_of_two(splits / TARGET_FOLDS_PER_LANE), 64,
   512)` with `TARGET_FOLDS_PER_LANE = 8` (so 64 and 65–127 partials use 64, 4096 partials use 512).
@@ -258,7 +264,9 @@ pull request, in a benchmark checkout of its own.
 
 ## 7. Acceptance
 
-- `cargo fmt --check`, `cargo clippy -j 4 --all-targets --features gpu-tests -- -D warnings`,
+- `cargo fmt --check`, `cargo clippy -j 4 --all-targets -- -D warnings` (the repository's
+  documented clippy gate; the `gpu-tests` feature set already had unrelated pre-existing
+  clippy failures at the baseline, and the new gpu-test files are clean),
   `cargo test -j 4`, `cargo test -j 4 --features gpu-tests` (local A100) green, including the
   ABI/header/manifest agreement tests, `tests/gpu_reduce.rs` and `tests/gpu_dynamic_rank.rs`.
 - ABI revision 12 recorded consistently in `src/lib.rs`, the C header, the manifest and
@@ -289,3 +297,60 @@ pull request, in a benchmark checkout of its own.
   responsibilities: fix 5 waits on an uninitialised allocation entry in `t4a-cuda-runtime`
   (tensor4all/t4a-gpu-backend#13); fix 6 (deferring the in-API device synchronize) changes
   public reduction semantics and is not made by this slice.
+
+## 9. Outcome (measured)
+
+### 9.1 Shipped: mechanism 1, the wide combine pass
+
+`plan_reduction` gives a split reduction's combine pass a wide `Plane` block of 64-512 threads
+for `SUM`, `SUM_SQUARES`, `MAX` and `MIN` with at least 64 partials, and the combine-pass fold
+crosses warps through 16 static shared-memory accumulators. `PROD` and every sub-64-partials
+case keep the baseline geometry. Paired native/native campaign, 21 cases x 3 repetitions,
+A100 80GB PCIe, baseline `t4a-cuda-kernels@d44b57b` (`origin/main`), A/A noise floor 1.2%: the
+eight cells tagged `2406` improve to a median of **0.549** of the baseline time, the four
+extrema cells to **0.389-0.395** (for example `reduce-max-f32-full-1048576` 46.6 us -> 18.4 us),
+and no case regresses beyond the declared 1.03x limit (worst 1.011). The campaign measured 21 of
+the 43 declared cases; the measured-scope limitation is recorded in the worklog, which also
+holds the full table: [../worklogs/2026-11-03-reduction-throughput.md](../worklogs/2026-11-03-reduction-throughput.md).
+
+### 9.2 Withdrawn: mechanism 3 (pass-1 grouped walk)
+
+Implemented, measured, and removed. The grouped walk regressed two cells that its own path
+cannot explain, which is why it is not in this change:
+
+| case | baseline | with the grouped walk |
+| --- | ---: | ---: |
+| `reduce-sum-f32-4096sq-axis1` (strided axis) | 194.3 us | 217.3 us (**1.13x**) |
+| `reduce-sum-f32-axis-600` (2 partials, no group runs) | 16.0 us | 16.9 us (1.05x) |
+
+Restricting the grouped walk to a contiguous axis did not move the strided row (1.131x), and
+building the same change with the grouped path forced off still showed 1.115x on the strided
+case: the regression is code generation in pass 1 caused by the branch's presence, not the
+branch executing. Per the plan's non-regression rule it was withdrawn, and pass 1 is unchanged
+in this change.
+
+### 9.3 Not adopted: mechanism 4 (reduction-only extrema fold)
+
+The isolated A/B the plan requires — mechanism 1 fixed, only the extrema helper differing,
+6 extrema cells x 3 repetitions — gives a median ratio of **0.998** with a worst cell of
+**1.005**: no measurable win. Recorded as a negative result; the shared elementwise helpers
+were never touched.
+
+### 9.4 The one regression the first implementation caused, and its fix
+
+The first version of §4.1 put the wide step in the fold shared by every reduce entry. That
+regressed a case the wide block never serves: `reduce-sum-f32-4096sq-axis1` (4096x4096, axis
+1, 16 partials, pass-1 bound at 192 us) measured **1.125x** the baseline. Splitting the fold —
+pass 1 keeps the narrow-only fold, only `t4a_cuda_reduce`/`_any` can widen — restores it to
+**0.987x** with the wins unchanged, and is what shipped.
+
+### 9.5 Residual
+
+- **Pass-1 streaming is unchanged** and is now the largest remaining term for full
+  reductions: by the issue's own accounting, 16M still costs ~112 us of pass-1 streaming for
+  `max`, which this change does not touch. It needs the vectorized lane-to-element mapping
+  of §8, a slice of its own.
+- `MAX_SPLITS` stays 4096: with mechanism 1 in place the combine no longer scales with
+  `splits`, so re-tuning it bought nothing measurable and is not part of this change.
+- The per-call floor (~28 us) and the split workspace's zero fill (~9 us) remain
+  consumer/runtime responsibilities (fixes 5 and 6 of the issue).

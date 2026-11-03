@@ -6,14 +6,17 @@
 
 mod gpu;
 
-use gpu::{download, launch, read_bytes, upload, written, Buf, Session, Slot};
+use gpu::{
+    download, launch, launch_async, pub_sync, read_bytes, upload, written, Buf, Session, Slot,
+};
 use t4a_cuda_kernels::{
     pack_gather_plan, pack_scatter_plan, plan_combined_strided, plan_contiguous_to_view,
     plan_dynamic_slice, plan_embed_diagonal_copy, plan_extract_diagonal, plan_fill_one,
     plan_fill_zero_view, plan_gather, plan_materialize_strided, plan_matrix_adjoint, plan_pad,
-    plan_reduce, plan_reduce_partials, plan_scatter_add, plan_slice, plan_strided_to_strided,
-    CAxisValues, CAxisValuesAny, CGatherPlanAny, CLayout, CLayoutAny, CScatterPlanAny, DType,
-    GatherPlan, Layout, ReduceOp, ReduceStrategy, ScatterPlan, StridedOp, WideLayout,
+    plan_reduce, plan_reduce_partials, plan_reduction, plan_scatter_add, plan_slice,
+    plan_strided_to_strided, CAxisValues, CAxisValuesAny, CGatherPlanAny, CLayout, CLayoutAny,
+    CScatterPlanAny, DType, GatherPlan, Layout, ReduceOp, ReduceStrategy, ReductionPlan,
+    ScatterPlan, StridedOp, WideLayout,
 };
 
 const SENTINEL: u8 = 0xCD;
@@ -2871,4 +2874,164 @@ fn rank_nine_dynamic_slice_adjoint_and_column_norms_match_the_cpu_reference() {
         assert_guard(&session, &dst, norms_count);
         let _ = norms_strides;
     }
+}
+
+#[test]
+fn rank_nine_split_reaches_every_partial_through_the_wide_combine() {
+    // The general path's own entries (`*_any`) run the same grouped lane walk, and the
+    // combine pass widens its block the same way: 131072 along the axis is 512 partials.
+    let session = Session::new("reduce");
+    let rank = 9usize;
+    let axis = 1usize;
+    let in_extents: Vec<i64> = (0..rank)
+        .map(|index| match index {
+            0 => 2,
+            1 => 131_072,
+            _ => 1,
+        })
+        .collect();
+    let in_count: i64 = in_extents.iter().product();
+    // Every axis position holds a distinct value, and each output's maximum sits in a
+    // different late partial, so a combine that drops a warp, ignores the last partial or
+    // copies one output into another cannot pass.
+    let axis_len = in_extents[axis];
+    let values: Vec<f32> = (0..in_count)
+        .map(|index| {
+            let output = index / axis_len;
+            let position = index % axis_len;
+            let spike = axis_len - 1 - 97 * output;
+            if position == spike {
+                1_000.0 + output as f32
+            } else {
+                (position as f32) * 1e-3 + output as f32 * 1e-6
+            }
+        })
+        .collect();
+    let src = upload(&session, &values);
+    let in_layout = WideLayout::compact(in_extents.clone()).unwrap();
+    let mut out_extents = in_extents.clone();
+    out_extents[axis] = 1;
+    let out_layout = WideLayout::compact(out_extents).unwrap();
+    let out_count = out_layout.element_count().unwrap();
+    let dst = destination(&session, out_count);
+
+    let plan = plan_reduction(
+        DType::F32,
+        ReduceOp::Max,
+        &out_layout,
+        out_count,
+        &in_layout,
+        in_count,
+        axis as u32,
+        32,
+    )
+    .unwrap();
+    let ReductionPlan::Split {
+        split,
+        pass1,
+        pass2,
+        combine_strategy,
+        combine_op,
+    } = &plan
+    else {
+        panic!("a 131072-long axis must split");
+    };
+    assert_eq!(split.splits, 512);
+    assert_eq!(*combine_strategy, ReduceStrategy::Plane);
+    assert!(pass2.block[0] >= 64, "combine block {}", pass2.block[0]);
+
+    let partials_extents =
+        t4a_cuda_kernels::reduction_partials_layout(&in_layout, axis as u32, split.splits)
+            .unwrap()
+            .extents()
+            .to_vec();
+    let partials_layout = WideLayout::compact(partials_extents).unwrap();
+    let partials_count = partials_layout.element_count().unwrap();
+    let partials = destination(&session, partials_count);
+
+    let in_extents_buf = upload(&session, in_layout.extents());
+    let in_strides_buf = upload(&session, in_layout.strides());
+    let out_extents_buf = upload(&session, out_layout.extents());
+    let out_strides_buf = upload(&session, out_layout.strides());
+    let partials_extents_buf = upload(&session, partials_layout.extents());
+    let partials_strides_buf = upload(&session, partials_layout.strides());
+    let in_any = CLayoutAny::new(
+        in_layout.as_ref(),
+        in_extents_buf.as_ptr(),
+        in_strides_buf.as_ptr(),
+    )
+    .unwrap();
+    let out_any = CLayoutAny::new(
+        out_layout.as_ref(),
+        out_extents_buf.as_ptr(),
+        out_strides_buf.as_ptr(),
+    )
+    .unwrap();
+    let partials_any = CLayoutAny::new(
+        partials_layout.as_ref(),
+        partials_extents_buf.as_ptr(),
+        partials_strides_buf.as_ptr(),
+    )
+    .unwrap();
+
+    let mut slots1 = [
+        Slot::ptr(&partials),
+        Slot::ptr(&src),
+        Slot::i32(DType::F32.tag()),
+        Slot::i32(ReduceOp::Max.tag()),
+        Slot::layout_any(&partials_any),
+        Slot::layout_any(&in_any),
+        Slot::i32(axis as i32),
+        Slot::i64(out_count),
+        Slot::i64(split.splits),
+        Slot::i64(split.chunk_len),
+    ];
+    launch_async(
+        session.function("t4a_cuda_reduce_partials_any"),
+        pass1,
+        session.stream(),
+        &mut slots1,
+    );
+    let mut slots2 = [
+        Slot::ptr(&dst),
+        Slot::ptr(&partials),
+        Slot::i32(DType::F32.tag()),
+        Slot::i32(combine_op.tag()),
+        Slot::i32(combine_strategy.tag()),
+        Slot::layout_any(&out_any),
+        Slot::layout_any(&partials_any),
+        Slot::i32(axis as i32),
+        Slot::i64(out_count),
+    ];
+    launch_async(
+        session.function("t4a_cuda_reduce_any"),
+        pass2,
+        session.stream(),
+        &mut slots2,
+    );
+    pub_sync(session.stream());
+
+    let in_strides = in_layout.strides();
+    let expected: Vec<f32> = (0..out_count)
+        .map(|flat| {
+            let mut rest = flat;
+            let mut base = 0;
+            for index in 0..rank {
+                if index == axis {
+                    continue;
+                }
+                let extent = in_layout.extents()[index];
+                let coordinate = rest % extent;
+                rest /= extent;
+                base += coordinate * in_strides[index];
+            }
+            (0..in_layout.extents()[axis])
+                .map(|step| values[(base + step * in_strides[axis]) as usize])
+                .fold(f32::NEG_INFINITY, f32::max)
+        })
+        .collect();
+    assert_eq!(
+        download::<f32>(&session, &dst, out_count as usize),
+        expected
+    );
 }

@@ -122,8 +122,24 @@ __device__ __forceinline__ void t4a_cuda_reduce_offsets(const t4a_cuda_layout& o
   *out_offset = offset;
 }
 
+// A block wider than one warp: the xor tree is warp-local (a full mask does not
+// communicate across warps), so each warp's result goes through static shared memory and
+// warp 0 folds at most `t4a_cuda_max_warps` of them.
+//
+// Only the combine-pass kernels may widen, so only they take the wide-capable fold below;
+// pass 1 calls `t4a_cuda_plane_fold_narrow` directly. Folding both through the wide-capable
+// version measured 12.5% slower on a strided pass-1 case that never widens.
+constexpr int t4a_cuda_warp_width = 32;
+constexpr int t4a_cuda_max_warps = 16;
+
 template <typename Fold, typename T>
-__device__ __forceinline__ T t4a_cuda_plane_fold(T value, int plane_width, Fold fold) {
+__device__ __noinline__ T t4a_cuda_plane_fold_wide(T value, int plane_width, Fold fold);
+
+// One-warp and sub-warp fold: the xor tree alone, no shared memory. Pass 1 always folds a
+// block of `plane_width` (8/16/32) since only the combine pass may widen, so it keeps this
+// fold and its generated code stays what it was.
+template <typename Fold, typename T>
+__device__ __forceinline__ T t4a_cuda_plane_fold_narrow(T value, int plane_width, Fold fold) {
   const unsigned int mask = t4a_cuda_plane_mask(plane_width);
   // The plane combines lane accumulators, so it uses the fold's combine step:
   // sum-of-squares must not square an accumulator again.
@@ -131,6 +147,43 @@ __device__ __forceinline__ T t4a_cuda_plane_fold(T value, int plane_width, Fold 
     value = fold.combine(value, t4a_cuda_shfl_xor(value, offset, mask));
   }
   return value;
+}
+
+// Fold for the entries the *combine* pass runs (`t4a_cuda_reduce` and its general-rank
+// twin): the only place a wide block can be planned, so the wide step lives here and not in
+// the pass-1 kernels.
+template <typename Fold, typename T>
+__device__ __forceinline__ T t4a_cuda_plane_fold(T value, int plane_width, Fold fold) {
+  if (plane_width > t4a_cuda_warp_width) {
+    return t4a_cuda_plane_fold_wide(value, plane_width, fold);
+  }
+  return t4a_cuda_plane_fold_narrow(value, plane_width, fold);
+}
+
+template <typename Fold, typename T>
+__device__ __noinline__ T t4a_cuda_plane_fold_wide(T value, int plane_width, Fold fold) {
+  const unsigned int warp_mask = t4a_cuda_plane_mask(t4a_cuda_warp_width);
+  for (int offset = 1; offset < t4a_cuda_warp_width; offset <<= 1) {
+    value = fold.combine(value, t4a_cuda_shfl_xor(value, offset, warp_mask));
+  }
+  __shared__ T warp_results[t4a_cuda_max_warps];
+  const int lane = threadIdx.x & (t4a_cuda_warp_width - 1);
+  const int warp = threadIdx.x / t4a_cuda_warp_width;
+  const int warps = plane_width / t4a_cuda_warp_width;
+  if (lane == 0) {
+    warp_results[warp] = value;
+  }
+  __syncthreads();
+  if (warp != 0) {
+    return value;
+  }
+  // Lanes 0..warps load the initialized entries; the mask names only those lanes.
+  T combined = lane < warps ? warp_results[lane] : value;
+  const unsigned int warps_mask = t4a_cuda_plane_mask(warps);
+  for (int offset = 1; offset < warps; offset <<= 1) {
+    combined = fold.combine(combined, t4a_cuda_shfl_xor(combined, offset, warps_mask));
+  }
+  return combined;
 }
 
 // One thread per output, walking the axis serially. The planner only allows this
@@ -246,7 +299,7 @@ __device__ __forceinline__ void partials_body(const void* in_ptr,
   for (reduce_index += plane_width; reduce_index < end; reduce_index += plane_width) {
     acc = fold(acc, in[in_base + reduce_index * axis_stride]);
   }
-  const T reduced = t4a_cuda_plane_fold(acc, plane_width, fold);
+  const T reduced = t4a_cuda_plane_fold_narrow(acc, plane_width, fold);
   if (threadIdx.x == 0) {
     partials[partial_offset] = reduced;
   }
@@ -379,7 +432,7 @@ __device__ __forceinline__ void partials_body_any(const void* in_ptr,
   for (reduce_index += plane_width; reduce_index < end; reduce_index += plane_width) {
     acc = fold(acc, in[in_base + reduce_index * axis_stride]);
   }
-  const T reduced = t4a_cuda_plane_fold(acc, plane_width, fold);
+  const T reduced = t4a_cuda_plane_fold_narrow(acc, plane_width, fold);
   if (threadIdx.x == 0) {
     partials[partial_offset] = reduced;
   }

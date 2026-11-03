@@ -73,6 +73,10 @@ use t4a_cuda_kernels::{
     ReductionPlan, ScalarSide, ScatterPlan, TransposeConfig, UnaryOp, FUSION_ENTRY,
 };
 
+/// Clock-settling iterations before the measured region (declared in the design slice): on
+/// these kernels the first few thousand operations run at a lower clock, so the profiled
+/// region must not start there.
+const SETTLING: usize = 2_000;
 const WARMUPS: usize = 10;
 const ITERS: usize = 100;
 const SENTINEL: u8 = 0xCD;
@@ -220,12 +224,20 @@ struct Meta {
     check: &'static str,
 }
 
-fn emit_meta(case: &str, meta: &Meta, observed: Counters) {
+/// Host time of the measured region, alongside the device time nsys captures for the
+/// same region. The region is the one barrier-delimited batch, so this is warm
+/// batch-throughput (nanoseconds per operation), not per-call round-trip latency.
+struct HostTime {
+    ns_per_op: f64,
+}
+
+fn emit_meta(case: &str, meta: &Meta, observed: Counters, host: HostTime) {
     let digest = take_input_digest(case);
     println!(
         "BENCH_META case={case} kernels={} launches_per_iter={} scratch_bytes={} \
          host_waits_per_iter={} transfer_bytes_per_iter={} device_allocations_per_iter={} \
-         zero_fills_per_iter={} boundary_barriers=1 input_digest=0x{digest:016x} check={}",
+         zero_fills_per_iter={} boundary_barriers=1 host_ns_per_op={:.3} \
+         input_digest=0x{digest:016x} check={}",
         meta.kernels,
         meta.launches,
         meta.scratch_bytes,
@@ -233,25 +245,40 @@ fn emit_meta(case: &str, meta: &Meta, observed: Counters) {
         observed.transfer_bytes,
         observed.allocations,
         observed.zero_fills,
+        host.ns_per_op,
         meta.check
     );
 }
 
 /// Warm-ups, then 100 timed iterations inside the profiler range, then the one
 /// boundary barrier; asserts the measured region only launched kernels.
-fn measure(case: &str, session: &Session, meta: &Meta, run: &mut impl FnMut()) -> Counters {
+fn measure(
+    case: &str,
+    session: &Session,
+    meta: &Meta,
+    run: &mut impl FnMut(),
+) -> (Counters, HostTime) {
+    // Settle the clocks, then the profiled warm-ups: both are outside the measured region.
+    for _ in 0..SETTLING {
+        run();
+    }
     for _ in 0..WARMUPS {
         run();
     }
     sync(session);
     let before = snapshot();
     assert_eq!(profiler_start(), 0, "cuProfilerStart");
+    let started = std::time::Instant::now();
     for _ in 0..ITERS {
         run();
     }
     let after = snapshot();
-    // The single barrier at the observation boundary (not an iteration wait).
+    // The single barrier at the observation boundary (not an iteration wait). The host
+    // clock therefore spans exactly the region nsys reports device time for.
     pub_sync(session.stream());
+    let host = HostTime {
+        ns_per_op: started.elapsed().as_nanos() as f64 / ITERS as f64,
+    };
     assert_eq!(profiler_stop(), 0, "cuProfilerStop");
 
     assert_eq!(
@@ -275,10 +302,13 @@ fn measure(case: &str, session: &Session, meta: &Meta, run: &mut impl FnMut()) -
         after.host_waits, before.host_waits,
         "{case}: the measured region waited on the host"
     );
-    Counters {
-        launches: meta.launches,
-        ..Counters::default()
-    }
+    (
+        Counters {
+            launches: meta.launches,
+            ..Counters::default()
+        },
+        host,
+    )
 }
 
 fn checked(case: &str, ok: bool) {
@@ -341,6 +371,28 @@ fn close_f64(actual: f64, expected: f64) -> bool {
         return false;
     }
     (actual - expected).abs() <= 1e-9 * expected.abs().max(1.0)
+}
+
+/// Whether a reduction result is acceptable for `op` against its CPU reference.
+///
+/// `Sum`/`SumSquares` use the input-magnitude budget round-off needs. `Max`/`Min` are exact
+/// operations, so they are compared exactly: a magnitude budget would accept any value within
+/// the input's scale, i.e. almost anything. `Prod` compares relatively, because a product of
+/// a million factors cannot be checked against a magnitude budget either.
+fn reduce_acceptable(op: ReduceOp, actual: f64, expected: f64, magnitude: f64) -> bool {
+    match op {
+        ReduceOp::Max | ReduceOp::Min => actual == expected,
+        ReduceOp::Prod => {
+            if actual == expected {
+                return true;
+            }
+            if !actual.is_finite() || !expected.is_finite() {
+                return false;
+            }
+            (actual - expected).abs() <= 1e-9 * expected.abs().max(1e-30)
+        }
+        _ => close_sum(actual, expected, magnitude),
+    }
 }
 
 fn close_sum(actual: f64, expected: f64, magnitude: f64) -> bool {
@@ -452,8 +504,8 @@ fn bench_add_f32(case: &str, len: usize, filter: &[String]) {
         scratch_bytes: 0,
         check: "ok",
     };
-    let observed = measure(case, &session, &meta, &mut run);
-    emit_meta(case, &meta, observed);
+    let (observed, host_time) = measure(case, &session, &meta, &mut run);
+    emit_meta(case, &meta, observed, host_time);
 }
 
 fn bench_exp_f32(case: &str, len: usize, filter: &[String]) {
@@ -494,8 +546,8 @@ fn bench_exp_f32(case: &str, len: usize, filter: &[String]) {
         scratch_bytes: 0,
         check: "ok",
     };
-    let observed = measure(case, &session, &meta, &mut run);
-    emit_meta(case, &meta, observed);
+    let (observed, host_time) = measure(case, &session, &meta, &mut run);
+    emit_meta(case, &meta, observed, host_time);
 }
 
 fn bench_mul_c64(case: &str, len: usize, filter: &[String]) {
@@ -542,8 +594,8 @@ fn bench_mul_c64(case: &str, len: usize, filter: &[String]) {
         scratch_bytes: 0,
         check: "ok",
     };
-    let observed = measure(case, &session, &meta, &mut run);
-    emit_meta(case, &meta, observed);
+    let (observed, host_time) = measure(case, &session, &meta, &mut run);
+    emit_meta(case, &meta, observed, host_time);
 }
 
 fn bench_div_c64(case: &str, len: usize, filter: &[String]) {
@@ -614,8 +666,8 @@ fn bench_div_c64(case: &str, len: usize, filter: &[String]) {
         scratch_bytes: 0,
         check: "ok",
     };
-    let observed = measure(case, &session, &meta, &mut run);
-    emit_meta(case, &meta, observed);
+    let (observed, host_time) = measure(case, &session, &meta, &mut run);
+    emit_meta(case, &meta, observed, host_time);
 }
 
 // ---------------------------------------------------------------------------
@@ -654,8 +706,8 @@ fn bench_copy_f32(case: &str, side: usize, filter: &[String]) {
         scratch_bytes: 0,
         check: "ok",
     };
-    let observed = measure(case, &session, &meta, &mut run);
-    emit_meta(case, &meta, observed);
+    let (observed, host_time) = measure(case, &session, &meta, &mut run);
+    emit_meta(case, &meta, observed, host_time);
 }
 
 fn bench_tiled_transpose(
@@ -725,8 +777,8 @@ fn bench_tiled_transpose(
         scratch_bytes: config.tile() as usize * (config.tile() + config.padding()) as usize * 4,
         check: "ok",
     };
-    let observed = measure(case, &session, &meta, &mut run);
-    emit_meta(case, &meta, observed);
+    let (observed, host_time) = measure(case, &session, &meta, &mut run);
+    emit_meta(case, &meta, observed, host_time);
 }
 
 fn bench_materialize_negative_stride(case: &str, side: usize, filter: &[String]) {
@@ -774,8 +826,8 @@ fn bench_materialize_negative_stride(case: &str, side: usize, filter: &[String])
         scratch_bytes: 0,
         check: "ok",
     };
-    let observed = measure(case, &session, &meta, &mut run);
-    emit_meta(case, &meta, observed);
+    let (observed, host_time) = measure(case, &session, &meta, &mut run);
+    emit_meta(case, &meta, observed, host_time);
 }
 
 fn bench_slice_f32(case: &str, set: usize, filter: &[String]) {
@@ -847,8 +899,8 @@ fn bench_slice_f32(case: &str, set: usize, filter: &[String]) {
         scratch_bytes: 0,
         check: "ok",
     };
-    let observed = measure(case, &session, &meta, &mut run);
-    emit_meta(case, &meta, observed);
+    let (observed, host_time) = measure(case, &session, &meta, &mut run);
+    emit_meta(case, &meta, observed, host_time);
 }
 
 fn bench_pad_f32(case: &str, set: usize, filter: &[String]) {
@@ -944,8 +996,8 @@ fn bench_pad_f32(case: &str, set: usize, filter: &[String]) {
         scratch_bytes: 0,
         check: "ok",
     };
-    let observed = measure(case, &session, &meta, &mut run);
-    emit_meta(case, &meta, observed);
+    let (observed, host_time) = measure(case, &session, &meta, &mut run);
+    emit_meta(case, &meta, observed, host_time);
 }
 
 // ---------------------------------------------------------------------------
@@ -1007,14 +1059,14 @@ fn reduce_scratch(setup: &ReduceSetup, elem: usize) -> usize {
         .unwrap_or(0)
 }
 
-fn bench_reduce_f32(case: &str, in_extents: &[i64], axis: u32, filter: &[String]) {
+fn bench_reduce_f32(case: &str, in_extents: &[i64], axis: u32, op: ReduceOp, filter: &[String]) {
     if !wanted(case, filter) {
         return;
     }
     let session = Session::with_modules(&["reduce"]);
     let reduce_fn = session.function(Entry::Reduce.name());
     let partials_fn = session.function(Entry::ReducePartials.name());
-    let setup = reduce_setup(DType::F32, in_extents, axis, ReduceOp::Sum);
+    let setup = reduce_setup(DType::F32, in_extents, axis, op);
     let in_len = product(in_extents);
     let out_len = product(setup.out_layout.extents());
     let mut rng = Rng::new(0x1357_9BDF ^ in_extents[0] as u64);
@@ -1036,7 +1088,7 @@ fn bench_reduce_f32(case: &str, in_extents: &[i64], axis: u32, filter: &[String]
                 Slot::ptr(&dst),
                 Slot::ptr(&src),
                 Slot::i32(DType::F32.tag()),
-                Slot::i32(ReduceOp::Sum.tag()),
+                Slot::i32(op.tag()),
                 Slot::i32(strategy.tag()),
                 Slot::layout(&out_c),
                 Slot::layout(&in_c),
@@ -1058,7 +1110,7 @@ fn bench_reduce_f32(case: &str, in_extents: &[i64], axis: u32, filter: &[String]
                 Slot::ptr(partial_buf),
                 Slot::ptr(&src),
                 Slot::i32(DType::F32.tag()),
-                Slot::i32(ReduceOp::Sum.tag()),
+                Slot::i32(op.tag()),
                 Slot::layout(partial_layout),
                 Slot::layout(&in_c),
                 Slot::i32(axis as i32),
@@ -1088,7 +1140,12 @@ fn bench_reduce_f32(case: &str, in_extents: &[i64], axis: u32, filter: &[String]
     let mut ok = true;
     for out_flat in 0..out_len {
         let mut coords = coordinates(out_flat, setup.out_layout.extents());
-        let mut sum = 0.0f64;
+        let mut sum = match op {
+            ReduceOp::Prod => 1.0f64,
+            ReduceOp::Max => f64::NEG_INFINITY,
+            ReduceOp::Min => f64::INFINITY,
+            _ => 0.0f64,
+        };
         let mut magnitude = 0.0f64;
         for index in 0..in_extents[axis as usize] {
             coords[axis as usize] = index;
@@ -1098,10 +1155,16 @@ fn bench_reduce_f32(case: &str, in_extents: &[i64], axis: u32, filter: &[String]
                 flat += coordinate * strides[dim];
             }
             let value = values[flat as usize] as f64;
-            sum += value;
+            sum = match op {
+                ReduceOp::Sum => sum + value,
+                ReduceOp::Prod => sum * value,
+                ReduceOp::Max => sum.max(value),
+                ReduceOp::Min => sum.min(value),
+                ReduceOp::SumSquares => sum + value * value,
+            };
             magnitude += value.abs();
         }
-        if !close_sum(got[out_flat as usize] as f64, sum, magnitude) {
+        if !reduce_acceptable(op, got[out_flat as usize] as f64, sum, magnitude) {
             ok = false;
         }
     }
@@ -1116,23 +1179,29 @@ fn bench_reduce_f32(case: &str, in_extents: &[i64], axis: u32, filter: &[String]
         scratch_bytes: reduce_scratch(&setup, 4),
         check: "ok",
     };
-    let observed = measure(case, &session, &meta, &mut run);
-    emit_meta(case, &meta, observed);
+    let (observed, host_time) = measure(case, &session, &meta, &mut run);
+    emit_meta(case, &meta, observed, host_time);
 }
 
-fn bench_reduce_f64(case: &str, side: usize, filter: &[String]) {
+fn bench_reduce_f64(case: &str, in_extents: &[i64], axis: u32, op: ReduceOp, filter: &[String]) {
     if !wanted(case, filter) {
         return;
     }
     let session = Session::with_modules(&["reduce"]);
     let reduce_fn = session.function(Entry::Reduce.name());
     let partials_fn = session.function(Entry::ReducePartials.name());
-    let in_extents = [side as i64, side as i64];
-    let setup = reduce_setup(DType::F64, &in_extents, 0, ReduceOp::Sum);
+    let setup = reduce_setup(DType::F64, in_extents, axis, op);
     let in_len = product(&in_extents);
     let out_len = product(setup.out_layout.extents());
     let mut rng = Rng::new(0x0F0F_0F0F);
-    let values: Vec<f64> = (0..in_len).map(|_| rng.f64()).collect();
+    let values: Vec<f64> = if matches!(op, ReduceOp::Prod) {
+        // As in the f32 arm: keep the product representable so the check can fail.
+        (0..in_len)
+            .map(|_| 1.0 + (rng.f64() - 0.5) * 1e-9)
+            .collect()
+    } else {
+        (0..in_len).map(|_| rng.f64()).collect()
+    };
     record_input_digest(&[gpu::as_bytes(&values)]);
     let src = upload_counted(&session, &values);
     let dst = alloc(&session, out_len as usize * 8);
@@ -1150,11 +1219,11 @@ fn bench_reduce_f64(case: &str, side: usize, filter: &[String]) {
                 Slot::ptr(&dst),
                 Slot::ptr(&src),
                 Slot::i32(DType::F64.tag()),
-                Slot::i32(ReduceOp::Sum.tag()),
+                Slot::i32(op.tag()),
                 Slot::i32(strategy.tag()),
                 Slot::layout(&out_c),
                 Slot::layout(&in_c),
-                Slot::i32(0),
+                Slot::i32(axis as i32),
                 Slot::i64(out_len),
             ];
             launch_async(reduce_fn, launch, session.stream(), &mut slots);
@@ -1172,10 +1241,10 @@ fn bench_reduce_f64(case: &str, side: usize, filter: &[String]) {
                 Slot::ptr(partial_buf),
                 Slot::ptr(&src),
                 Slot::i32(DType::F64.tag()),
-                Slot::i32(ReduceOp::Sum.tag()),
+                Slot::i32(op.tag()),
                 Slot::layout(partial_layout),
                 Slot::layout(&in_c),
-                Slot::i32(0),
+                Slot::i32(axis as i32),
                 Slot::i64(out_len),
                 Slot::i64(split.splits),
                 Slot::i64(split.chunk_len),
@@ -1189,7 +1258,7 @@ fn bench_reduce_f64(case: &str, side: usize, filter: &[String]) {
                 Slot::i32(combine_strategy.tag()),
                 Slot::layout(&out_c),
                 Slot::layout(partial_layout),
-                Slot::i32(0),
+                Slot::i32(axis as i32),
                 Slot::i64(out_len),
             ];
             launch_async(reduce_fn, pass2, session.stream(), &mut slots2);
@@ -1198,28 +1267,51 @@ fn bench_reduce_f64(case: &str, side: usize, filter: &[String]) {
     run();
     sync(&session);
     let got = read_counted::<f64>(&session, &dst, out_len as usize);
+    let extents: Vec<i64> = in_extents.to_vec();
+    let strides = compact_strides(&extents);
     let mut ok = true;
-    for out_flat in 0..out_len as usize {
-        let mut sum = 0.0f64;
+    for out_flat in 0..out_len {
+        let mut coords = coordinates(out_flat, setup.out_layout.extents());
+        let mut sum = match op {
+            ReduceOp::Prod => 1.0f64,
+            ReduceOp::Max => f64::NEG_INFINITY,
+            ReduceOp::Min => f64::INFINITY,
+            _ => 0.0f64,
+        };
         let mut magnitude = 0.0f64;
-        for index in 0..side {
-            let value = values[index + out_flat * side];
-            sum += value;
+        for index in 0..in_extents[axis as usize] {
+            coords[axis as usize] = index;
+            let mut flat = 0i64;
+            for (dim, &coordinate) in coords.iter().enumerate() {
+                flat += coordinate * strides[dim];
+            }
+            let value = values[flat as usize];
+            sum = match op {
+                ReduceOp::Sum => sum + value,
+                ReduceOp::Prod => sum * value,
+                ReduceOp::Max => sum.max(value),
+                ReduceOp::Min => sum.min(value),
+                ReduceOp::SumSquares => sum + value * value,
+            };
             magnitude += value.abs();
         }
-        if !close_sum(got[out_flat], sum, magnitude) {
+        if !reduce_acceptable(op, got[out_flat as usize], sum, magnitude) {
             ok = false;
         }
     }
     checked(case, ok);
     let meta = Meta {
-        kernels: "t4a_cuda_reduce_partials|t4a_cuda_reduce",
+        kernels: if reduce_launches(&setup) == 2 {
+            "t4a_cuda_reduce_partials|t4a_cuda_reduce"
+        } else {
+            Entry::Reduce.name()
+        },
         launches: reduce_launches(&setup),
         scratch_bytes: reduce_scratch(&setup, 8),
         check: "ok",
     };
-    let observed = measure(case, &session, &meta, &mut run);
-    emit_meta(case, &meta, observed);
+    let (observed, host_time) = measure(case, &session, &meta, &mut run);
+    emit_meta(case, &meta, observed, host_time);
 }
 
 fn bench_reduce_c64(case: &str, side: usize, filter: &[String]) {
@@ -1323,8 +1415,8 @@ fn bench_reduce_c64(case: &str, side: usize, filter: &[String]) {
         scratch_bytes: reduce_scratch(&setup, 16),
         check: "ok",
     };
-    let observed = measure(case, &session, &meta, &mut run);
-    emit_meta(case, &meta, observed);
+    let (observed, host_time) = measure(case, &session, &meta, &mut run);
+    emit_meta(case, &meta, observed, host_time);
 }
 
 fn bench_reduce_max_i32(case: &str, side: usize, filter: &[String]) {
@@ -1422,8 +1514,8 @@ fn bench_reduce_max_i32(case: &str, side: usize, filter: &[String]) {
         scratch_bytes: reduce_scratch(&setup, 4),
         check: "ok",
     };
-    let observed = measure(case, &session, &meta, &mut run);
-    emit_meta(case, &meta, observed);
+    let (observed, host_time) = measure(case, &session, &meta, &mut run);
+    emit_meta(case, &meta, observed, host_time);
 }
 
 // ---------------------------------------------------------------------------
@@ -1519,8 +1611,8 @@ fn bench_gather(case: &str, rows: usize, filter: &[String]) {
         scratch_bytes: 0,
         check: "ok",
     };
-    let observed = measure(case, &session, &meta, &mut run);
-    emit_meta(case, &meta, observed);
+    let (observed, host_time) = measure(case, &session, &meta, &mut run);
+    emit_meta(case, &meta, observed, host_time);
 }
 
 fn bench_scatter_add(case: &str, complex: bool, filter: &[String]) {
@@ -1681,8 +1773,8 @@ fn bench_scatter_add(case: &str, complex: bool, filter: &[String]) {
         scratch_bytes: 0,
         check: "ok",
     };
-    let observed = measure(case, &session, &meta, &mut run);
-    emit_meta(case, &meta, observed);
+    let (observed, host_time) = measure(case, &session, &meta, &mut run);
+    emit_meta(case, &meta, observed, host_time);
 }
 
 // ---------------------------------------------------------------------------
@@ -1789,8 +1881,8 @@ fn bench_householder_explicit_v(
         scratch_bytes: 0,
         check: "ok",
     };
-    let observed = measure(case, &session, &meta, &mut run);
-    emit_meta(case, &meta, observed);
+    let (observed, host_time) = measure(case, &session, &meta, &mut run);
+    emit_meta(case, &meta, observed, host_time);
 }
 
 fn bench_qr_apply_phase(case: &str, rows: usize, cols: usize, complex: bool, filter: &[String]) {
@@ -2001,8 +2093,8 @@ fn bench_qr_apply_phase(case: &str, rows: usize, cols: usize, complex: bool, fil
         scratch_bytes: cols * elem,
         check: "ok",
     };
-    let observed = measure(case, &session, &meta, &mut run);
-    emit_meta(case, &meta, observed);
+    let (observed, host_time) = measure(case, &session, &meta, &mut run);
+    emit_meta(case, &meta, observed, host_time);
 }
 
 fn bench_lu_apply_pivots(case: &str, side: usize, filter: &[String]) {
@@ -2057,8 +2149,8 @@ fn bench_lu_apply_pivots(case: &str, side: usize, filter: &[String]) {
         scratch_bytes: 0,
         check: "ok",
     };
-    let observed = measure(case, &session, &meta, &mut run);
-    emit_meta(case, &meta, observed);
+    let (observed, host_time) = measure(case, &session, &meta, &mut run);
+    emit_meta(case, &meta, observed, host_time);
 }
 
 // ---------------------------------------------------------------------------
@@ -2472,8 +2564,8 @@ fn bench_rrqr(case: &str, m: usize, n: usize, complex: bool, filter: &[String]) 
         scratch_bytes: scratch,
         check: "ok",
     };
-    let observed = measure(case, &session, &meta, &mut run);
-    emit_meta(case, &meta, observed);
+    let (observed, host_time) = measure(case, &session, &meta, &mut run);
+    emit_meta(case, &meta, observed, host_time);
 }
 
 // ---------------------------------------------------------------------------
@@ -2583,8 +2675,8 @@ fn bench_fused(case: FusedCase<'_>, filter: &[String]) {
         scratch_bytes: 0,
         check: "ok",
     };
-    let observed = measure(case.case, &session, &meta, &mut run);
-    emit_meta(case.case, &meta, observed);
+    let (observed, host_time) = measure(case.case, &session, &meta, &mut run);
+    emit_meta(case.case, &meta, observed, host_time);
 
     let counters = consumer.counters();
     let miss = consumer.last_miss_timings();
@@ -2780,8 +2872,8 @@ fn bench_prepare_cold(case: &str, filter: &[String]) {
         scratch_bytes: 0,
         check: "ok",
     };
-    let observed = measure(case, &session, &meta, &mut run);
-    emit_meta(case, &meta, observed);
+    let (observed, host_time) = measure(case, &session, &meta, &mut run);
+    emit_meta(case, &meta, observed, host_time);
 
     let counters = consumer.counters();
     let miss = consumer.last_miss_timings();
@@ -2914,17 +3006,80 @@ fn main() {
             &format!("reduce-sum-f32-axis-{len}"),
             &[len, 4_096],
             0,
+            ReduceOp::Sum,
             &filter,
         );
     }
-    bench_reduce_f32("reduce-sum-f32-4096sq-axis0", &[4_096, 4_096], 0, &filter);
-    bench_reduce_f32("reduce-sum-f32-4096sq-axis1", &[4_096, 4_096], 1, &filter);
-    bench_reduce_f64("reduce-sum-f64-4096sq-axis0", 4_096, &filter);
+    bench_reduce_f32(
+        "reduce-sum-f32-4096sq-axis0",
+        &[4_096, 4_096],
+        0,
+        ReduceOp::Sum,
+        &filter,
+    );
+    bench_reduce_f32(
+        "reduce-sum-f32-4096sq-axis1",
+        &[4_096, 4_096],
+        1,
+        ReduceOp::Sum,
+        &filter,
+    );
+    bench_reduce_f64(
+        "reduce-sum-f64-4096sq-axis0",
+        &[4_096, 4_096],
+        0,
+        ReduceOp::Sum,
+        &filter,
+    );
     bench_reduce_c64("reduce-sum-c64-4096sq-axis0", 4_096, &filter);
     bench_reduce_max_i32("reduce-max-i32-4096sq-axis0", 4_096, &filter);
     for &len in &[1_000_000i64, 10_000_000] {
-        bench_reduce_f32(&format!("reduce-sum-f32-full-{len}"), &[len, 1], 0, &filter);
+        bench_reduce_f32(
+            &format!("reduce-sum-f32-full-{len}"),
+            &[len, 1],
+            0,
+            ReduceOp::Sum,
+            &filter,
+        );
     }
+    // tenferro-rs #2406: the full-reduction cells the issue measures, at the size the
+    // split cap binds (512 partials, so the combine pass widens its block).
+    for (op, name) in [
+        (ReduceOp::Sum, "sum"),
+        (ReduceOp::Prod, "prod"),
+        (ReduceOp::Max, "max"),
+        (ReduceOp::Min, "min"),
+    ] {
+        bench_reduce_f32(
+            &format!("reduce-{name}-f32-full-1048576"),
+            &[1_048_576, 1],
+            0,
+            op,
+            &filter,
+        );
+        bench_reduce_f64(
+            &format!("reduce-{name}-f64-full-1048576"),
+            &[1_048_576, 1],
+            0,
+            op,
+            &filter,
+        );
+    }
+    bench_reduce_f32(
+        "reduce-sumsquares-f32-full-1048576",
+        &[1_048_576, 1],
+        0,
+        ReduceOp::SumSquares,
+        &filter,
+    );
+    // Multi-output wide combine: four outputs, 512 partials each.
+    bench_reduce_f32(
+        "reduce-max-f32-4x131072-axis1",
+        &[4, 131_072],
+        1,
+        ReduceOp::Max,
+        &filter,
+    );
 
     bench_gather("indexing-gather-f32-1024x256-table1000", 1_000, &filter);
     bench_gather("indexing-gather-f32-1024x256-table100000", 100_000, &filter);

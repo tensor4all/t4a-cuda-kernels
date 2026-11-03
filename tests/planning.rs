@@ -3560,3 +3560,101 @@ fn dynamic_update_slice_plans_the_update_domain() {
         [3907, 1, 1]
     );
 }
+
+#[test]
+fn combine_pass_widens_only_for_long_partials_and_not_for_prod() {
+    // One output, so the combine pass folds exactly `splits` partials.
+    let out_layout = Layout::compact(&[1]).unwrap();
+    for (len, want_splits, want_block) in [
+        (8_448i64, 33i64, 32u32), // 33 partials: baseline geometry
+        (16_384, 64, 64),         // the narrowest wide block
+        (1_048_576, 4096, 512),   // the widest block the policy reaches
+    ] {
+        let in_layout = Layout::compact(&[len]).unwrap();
+        for op in [
+            ReduceOp::Sum,
+            ReduceOp::Max,
+            ReduceOp::Min,
+            ReduceOp::SumSquares,
+        ] {
+            let plan =
+                plan_reduction(DType::F64, op, &out_layout, 1, &in_layout, len, 0, 32).unwrap();
+            let ReductionPlan::Split {
+                split,
+                combine_strategy,
+                pass2,
+                ..
+            } = plan
+            else {
+                panic!("len {len} must split");
+            };
+            assert_eq!(split.splits, want_splits, "len {len} {op:?}");
+            assert_eq!(combine_strategy, ReduceStrategy::Plane, "len {len} {op:?}");
+            assert_eq!(pass2.block, [want_block, 1, 1], "len {len} {op:?}");
+        }
+        // Prod keeps the baseline split count and combine geometry.
+        let plan = plan_reduction(
+            DType::F64,
+            ReduceOp::Prod,
+            &out_layout,
+            1,
+            &in_layout,
+            len,
+            0,
+            32,
+        )
+        .unwrap();
+        let ReductionPlan::Split { pass2, .. } = plan else {
+            panic!("len {len} must split Prod");
+        };
+        assert_eq!(
+            pass2.block,
+            [32, 1, 1],
+            "Prod keeps the baseline combine block"
+        );
+    }
+}
+
+#[test]
+fn wide_combine_widths_are_plane_only_and_bounded() {
+    let out_layout = Layout::compact(&[1]).unwrap();
+    let in_layout = Layout::compact(&[1024]).unwrap();
+    // A wide Plane block is a valid planning request (the combine pass uses one) ...
+    assert!(plan_reduce(
+        DType::F64,
+        ReduceOp::Sum,
+        ReduceStrategy::Plane,
+        &out_layout,
+        1,
+        &in_layout,
+        1024,
+        0,
+        512,
+    )
+    .is_ok());
+    // ... but never for Unit, and never above the widest documented block.
+    assert!(plan_reduce(
+        DType::F64,
+        ReduceOp::Sum,
+        ReduceStrategy::Unit,
+        &out_layout,
+        1,
+        &in_layout,
+        1024,
+        0,
+        64,
+    )
+    .is_err());
+    assert!(plan_reduce(
+        DType::F64,
+        ReduceOp::Sum,
+        ReduceStrategy::Plane,
+        &out_layout,
+        1,
+        &in_layout,
+        1024,
+        0,
+        1024,
+    )
+    .is_err());
+}

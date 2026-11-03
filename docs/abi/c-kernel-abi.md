@@ -1,4 +1,4 @@
-# C kernel ABI (revision 11)
+# C kernel ABI (revision 12)
 
 Every entry is an `extern "C" __global__` CUDA function in `cuda/src/`. A caller
 loads the compiled module into its own context, looks the symbol up by the name
@@ -18,7 +18,7 @@ nothing, so the same text compiles under NVCC and NVRTC.
 
 ## Revision
 
-`T4A_CUDA_ABI_REVISION == 11`. Revision 2 added `t4a_cuda_axis_values` and the
+`T4A_CUDA_ABI_REVISION == 12`. Revision 2 added `t4a_cuda_axis_values` and the
 diagonal, windowing and validation-status entries; revision 3 added the reduction
 entries; revision 4 added gather and additive scatter; revision 5 added the dtype
 conversion entry; revision 6 added the elementwise, comparison and
@@ -28,7 +28,11 @@ four pointer-geometry structs and one general-path twin per rank-walking entry;
 revision 10 adds the two remaining kernel families (`broadcast_in_dim` and
 `concatenate_copy`) with their general-path twins; revision 11 adds the
 layout-taking triangle views (`tril_view`, `triu_view`) and
-`dynamic_update_slice`, each with a general-path twin, and no new struct.
+`dynamic_update_slice`, each with a general-path twin, and no new struct;
+revision 12 changes the *launch* contract of a split reduction's combine pass
+(a wider plane block whose fold crosses warps through static shared memory) and
+records the reassociation policy of `SUM`/`SUM_SQUARES`/`MAX`/`MIN`, with no new
+symbol, signature or struct.
 **Nothing in revisions 1-10 changed** — the 88 existing symbols, their signatures
 and the nine existing struct layouts are identical. Any
 change to a struct layout, an entry signature, an element type
@@ -264,7 +268,13 @@ Semantics:
 - **Plane collectives** use `__shfl_xor_sync` with ascending offsets
   `1, 2, 4, ... < plane_width` and a mask of exactly the participating lanes.
   The block is exactly `plane_width` (8, 16 or 32), every lane participates, and
-  lane 0 writes.
+  lane 0 writes. A split reduction's **combine pass** may instead use a wide block
+  of 64, 128, 256 or 512 threads when its operation is not `PROD` and it has at
+  least 64 partials: the xor tree then stops at the warp (`offset < 32`, full warp
+  mask), lane 0 of each warp writes its result to static shared memory, one
+  `__syncthreads()` follows, and lanes `0..warps` of warp 0 fold those results with
+  mask `(1 << warps) - 1`. The partials axis is never split a second time, so the
+  combine pass still folds the whole partials axis per output.
 - **Split pass 1** runs one block per `(output, split)` with
   `cube = output_index * splits + split`, reduces the half-open axis range
   `[split*chunk_len, end)` with `end = axis_len` for the last split and
@@ -276,6 +286,13 @@ Semantics:
   slice; the last chunk absorbs `reduce_len % splits`.
 - **Pass 2** is `t4a_cuda_reduce` over the partials, with `SUM` when pass 1 was
   `SUM_SQUARES` and the same op otherwise, and is never split again.
+- **Reassociation (revision 12).** A lane's walk over its own chunk may combine
+  four lane-strided elements as a tree before folding them into one loop-carried
+  accumulator, for `SUM`, `SUM_SQUARES`, `MAX` and `MIN`. `PROD` is never regrouped:
+  a regrouped product can turn an overflow-then-zero into `Inf * 0 = NaN`. The
+  topology is fixed for a given input, layout, plan and build, so results are
+  reproducible; near overflow a regrouped sum can differ from the serial order in
+  classification (`A, A, -A, -A` with `A = 2^127` gives `NaN` instead of `+Inf`).
 - **Arithmetic.** Integer `SUM`/`PROD` wrap. `SUM_SQUARES` squares each element
   through `fma(v, v, 0)` so the square rounds before the addition and cannot be
   contracted into it. Complex `SUM`/`PROD` use the revision-1 element-wise
@@ -285,7 +302,12 @@ Semantics:
   payload is not part of the contract; only "is NaN" is.
 - **Launch geometry.** Unit: `grid = ceil(output_len/plane_width)`. Plane:
   `grid = output_len`. Pass 1: `grid = output_len * splits`, `block =
-  plane_width`. No shared memory is used.
+  plane_width`. Pass 2 is whatever `ReductionPlan` reports — that is `Unit` with
+  `grid = ceil(output_len/plane_width)` for a short partials axis (two partials,
+  for example) and `Plane` otherwise — and its block is `plane_width`, or
+  `64..512` for the wide combine of revision 12. A caller must launch the
+  returned geometry rather than assume `Plane`: launching `Plane` over two
+  partials lets lanes seed past the partials allocation.
 
 Supported dtypes: `SUM`/`PROD` F32/F64/I32/I64/C32/C64, `SUM_SQUARES`
 F32/F64, `MAX`/`MIN` F32/F64/I32/I64.
@@ -961,7 +983,7 @@ identical.
 | --- | --- | --- | --- |
 | flat entries | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |
 | revision 11 (`tril_view`, `triu_view`, `dynamic_update_slice`) | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |
-| reductions | see the revision-3 section | `(plane_width, 1, 1)` | 0 |
+| reductions | see the revision-3 section | `(plane_width, 1, 1)`, or `(64..512, 1, 1)` for a split reduction's combine pass (revision 12) | 0 for the baseline geometries; the wide combine block allocates 16 accumulators of the element type as static shared memory (≤ 256 B for `C64`) |
 | gather / scatter add / convert | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |
 | unary / binary / compare / select / clamp / combined strided | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |
 | revision 7 linalg auxiliaries | `(ceil(domain/256), 1, 1)` | `(256, 1, 1)` | 0 |

@@ -3658,3 +3658,45 @@ fn wide_combine_widths_are_plane_only_and_bounded() {
     )
     .is_err());
 }
+
+/// The body of the first function in `source` whose signature contains `signature`.
+fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
+    let start = source.find(signature).expect("function signature");
+    let open = start + source[start..].find('{').expect("function body");
+    let mut depth = 0usize;
+    for (offset, byte) in source[open..].bytes().enumerate() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &source[open..=open + offset];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unterminated function body");
+}
+
+#[test]
+fn pass1_checks_the_axis_stride_before_forming_a_chunk_pointer() {
+    // `in + in_base + start` is only an address inside the input when the axis is
+    // contiguous: with a broadcast (stride 0) or reversed (stride -1) axis of a split
+    // reduction, `start` is a logical position, and the pointer can land outside the
+    // allocation (for example `in + 256` for a one-element input broadcast to 512). Forming
+    // such a pointer is undefined behaviour even if it is never dereferenced, so the pass-1
+    // dispatch must test the stride first and form the chunk pointer only inside that branch.
+    let source = include_str!("../cuda/src/reduce.cu");
+    let body = function_body(source, "__forceinline__ T t4a_cuda_partials_walk(");
+    let stride_check = body
+        .find("axis_stride == 1")
+        .expect("the pass-1 dispatch tests the axis stride itself");
+    let pointer = body
+        .find("const T* chunk = in + in_base + start;")
+        .expect("the pass-1 dispatch forms the chunk pointer");
+    assert!(
+        stride_check < pointer,
+        "the chunk pointer is formed before the stride check:\n{body}"
+    );
+}

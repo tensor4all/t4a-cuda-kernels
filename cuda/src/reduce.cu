@@ -322,27 +322,34 @@ __host__ __device__ constexpr bool t4a_cuda_vector_walk_enabled() {
   return Fold::kRegroup && t4a_cuda_vector_lanes<T>::value != 0;
 }
 
-// Elements before the first 16-byte boundary at or after `chunk`.
-// INVARIANT: element pointers are aligned to their dtype (c-kernel-abi.md, "Types"), so
-// the byte distance to the boundary is a whole number of elements.
+// Whether a contiguous chunk of `len` elements takes the vector walk. It must hold at least
+// one whole group of `V` elements per lane to seed from; the planner's
+// `chunk_len >= 8 * plane_width` already guarantees that, and this check keeps it true
+// independently of the planner. The values are uniform across the block, so every lane takes
+// the same walk.
 template <typename T>
-__device__ __forceinline__ long long t4a_cuda_vector_head(const T* chunk) {
-  const unsigned long long address = reinterpret_cast<unsigned long long>(chunk);
-  return static_cast<long long>(((16ull - (address & 15ull)) & 15ull) / sizeof(T));
+__device__ __forceinline__ bool t4a_cuda_vector_walk_applies(long long len, int plane_width) {
+  constexpr int V = t4a_cuda_vector_lanes<T>::value;
+  return len / V >= plane_width;
 }
 
-// Whether a block takes the vector walk. The values are uniform across the block, so
-// every lane takes the same walk. Each lane must own at least one aligned vector to seed
-// from; the planner's `chunk_len >= 8 * plane_width` already guarantees that, and this
-// check keeps it true independently of the planner.
-template <typename T>
-__device__ __forceinline__ bool t4a_cuda_vector_walk_applies(const T* chunk,
-                                                             long long len,
-                                                             long long axis_stride,
-                                                             int plane_width) {
-  constexpr int V = t4a_cuda_vector_lanes<T>::value;
-  return axis_stride == 1 && len >= V &&
-         (len - t4a_cuda_vector_head(chunk)) / V >= plane_width;
+// Group `group` of the chunk: elements `group*V .. group*V + V`. The groups are fixed by
+// the logical position in the chunk, never by the address, so the fold topology is the same
+// wherever the input sits; the address only decides whether a group is one 16-byte load
+// (`Aligned`: `chunk` is 16-byte aligned) or `V` element loads.
+template <typename T, int V, bool Aligned>
+__device__ __forceinline__ t4a_cuda_vector<T, V> t4a_cuda_load_group(const T* chunk,
+                                                                     long long group) {
+  if constexpr (Aligned) {
+    return reinterpret_cast<const t4a_cuda_vector<T, V>*>(chunk)[group];
+  } else {
+    t4a_cuda_vector<T, V> x;
+#pragma unroll
+    for (int c = 0; c < V; ++c) {
+      x.lane[c] = chunk[group * V + c];
+    }
+    return x;
+  }
 }
 
 // One vector's contribution: a pairwise tree of its seeded elements, so a sum of
@@ -357,17 +364,20 @@ __device__ __forceinline__ T t4a_cuda_vector_value(const t4a_cuda_vector<T, V>& 
   }
 }
 
-// The vector walk over `chunk[0..len)`. With `head` elements before the first 16-byte
-// boundary and `vectors = (len - head) / V` whole aligned vectors after it:
-//   - lane `t` folds vectors `t, t + W, t + 2W, ...` (one warp instruction reads `16*W`
-//     contiguous bytes), in batches of `t4a_cuda_vector_batch` loads issued before any of
-//     them is folded (the first and last batches predicated per vector);
-//   - lane `t < head` folds head element `t`;
-//   - lane `t < tail`, with `tail = len - head - vectors * V < V`, folds tail element `t`.
-// Every element of the chunk is folded exactly once. A separate, non-inlined function so
-// the scalar walk of the same kernel keeps its own code (a grouped walk inlined into pass 1
-// slowed the strided path even when it never ran; slice-reduction-throughput.md §9.2).
-template <typename Fold, typename T>
+// The vector walk over `chunk[0..len)`. With `groups = len / V` whole groups of `V`
+// elements counted from the chunk start, and `tail = len - groups * V < V` elements after
+// them:
+//   - lane `t` folds groups `t, t + W, t + 2W, ...` (one warp instruction reads `16*W`
+//     contiguous bytes when the chunk is 16-byte aligned), in batches of
+//     `t4a_cuda_vector_batch` loads issued before any of them is folded (the first and last
+//     batches predicated per group);
+//   - lane `t < tail` folds tail element `groups * V + t`.
+// Every element of the chunk is folded exactly once, and which lane folds it, in which order,
+// depends only on `len`, `W`, the element type and the operation. A separate, non-inlined
+// function so the scalar walk of the same kernel keeps its own code (a grouped walk inlined
+// into pass 1 slowed the strided path even when it never ran;
+// slice-reduction-throughput.md §9.2).
+template <typename Fold, typename T, bool Aligned>
 __device__ __noinline__ T t4a_cuda_partials_walk_vector(const T* chunk,
                                                         long long len,
                                                         int plane_width,
@@ -376,36 +386,34 @@ __device__ __noinline__ T t4a_cuda_partials_walk_vector(const T* chunk,
   constexpr int B = t4a_cuda_vector_batch;
   using Vector = t4a_cuda_vector<T, V>;
   const int lane = static_cast<int>(threadIdx.x);
-  const long long head = t4a_cuda_vector_head(chunk);
-  const long long vectors = (len - head) / V;
-  // INVARIANT: `chunk + head` is 16-byte aligned (t4a_cuda_vector_head), and
-  // `vectors >= plane_width` (t4a_cuda_vector_walk_applies), so `body[lane]` exists.
-  const Vector* body = reinterpret_cast<const Vector*>(chunk + head);
+  // INVARIANT: `groups >= plane_width` (t4a_cuda_vector_walk_applies), so group `lane`
+  // exists; with `Aligned`, `chunk` is 16-byte aligned (t4a_cuda_partials_walk).
+  const long long groups = len / V;
   const long long stride = plane_width;
 
-  // The first batch: vector `lane` always exists, and the batch's other loads are
-  // predicated on their own index, so a chunk with only a few vectors per lane still issues
-  // its loads together.
+  // The first batch: group `lane` always exists, and the batch's other loads are predicated
+  // on their own index, so a chunk with only a few groups per lane still issues its loads
+  // together.
   Vector batch[B];
 #pragma unroll
   for (int b = 0; b < B; ++b) {
-    if (b == 0 || lane + b * stride < vectors) {
-      batch[b] = body[lane + b * stride];
+    if (b == 0 || lane + b * stride < groups) {
+      batch[b] = t4a_cuda_load_group<T, V, Aligned>(chunk, lane + b * stride);
     }
   }
   T acc = t4a_cuda_vector_value<Fold, T, V>(batch[0], fold);
 #pragma unroll
   for (int b = 1; b < B; ++b) {
-    if (lane + b * stride < vectors) {
+    if (lane + b * stride < groups) {
       acc = fold.combine(acc, t4a_cuda_vector_value<Fold, T, V>(batch[b], fold));
     }
   }
   // Whole batches.
   long long index = lane + B * stride;
-  for (; index + (B - 1) * stride < vectors; index += B * stride) {
+  for (; index + (B - 1) * stride < groups; index += B * stride) {
 #pragma unroll
     for (int b = 0; b < B; ++b) {
-      batch[b] = body[index + b * stride];
+      batch[b] = t4a_cuda_load_group<T, V, Aligned>(chunk, index + b * stride);
     }
     const T low = fold.combine(t4a_cuda_vector_value<Fold, T, V>(batch[0], fold),
                                t4a_cuda_vector_value<Fold, T, V>(batch[1], fold));
@@ -413,24 +421,21 @@ __device__ __noinline__ T t4a_cuda_partials_walk_vector(const T* chunk,
                                 t4a_cuda_vector_value<Fold, T, V>(batch[3], fold));
     acc = fold.combine(acc, fold.combine(low, high));
   }
-  // The last, partial batch (fewer than `B` vectors left for this lane), predicated the same
+  // The last, partial batch (fewer than `B` groups left for this lane), predicated the same
   // way.
 #pragma unroll
   for (int b = 0; b < B - 1; ++b) {
-    if (index + b * stride < vectors) {
-      batch[b] = body[index + b * stride];
+    if (index + b * stride < groups) {
+      batch[b] = t4a_cuda_load_group<T, V, Aligned>(chunk, index + b * stride);
     }
   }
 #pragma unroll
   for (int b = 0; b < B - 1; ++b) {
-    if (index + b * stride < vectors) {
+    if (index + b * stride < groups) {
       acc = fold.combine(acc, t4a_cuda_vector_value<Fold, T, V>(batch[b], fold));
     }
   }
-  if (lane < head) {
-    acc = fold(acc, chunk[lane]);
-  }
-  const long long tail_start = head + vectors * V;
+  const long long tail_start = groups * V;
   if (lane < len - tail_start) {
     acc = fold(acc, chunk[tail_start + lane]);
   }
@@ -447,9 +452,19 @@ __device__ __forceinline__ T t4a_cuda_partials_walk(const T* in,
                                                     int plane_width,
                                                     Fold fold) {
   if constexpr (t4a_cuda_vector_walk_enabled<Fold, T>()) {
-    const T* chunk = in + in_base + start;
-    if (t4a_cuda_vector_walk_applies(chunk, end - start, axis_stride, plane_width)) {
-      return t4a_cuda_partials_walk_vector<Fold, T>(chunk, end - start, plane_width, fold);
+    // The stride comes first: `in + in_base + start` is an address inside the input only on
+    // a contiguous axis (a broadcast or reversed axis can put it outside the allocation, and
+    // forming such a pointer is undefined behaviour).
+    if (axis_stride == 1 && t4a_cuda_vector_walk_applies<T>(end - start, plane_width)) {
+      const T* chunk = in + in_base + start;
+      // INVARIANT: element pointers are aligned to their dtype (c-kernel-abi.md, "Types");
+      // the 16-byte test only selects the load instruction, never the topology.
+      if ((reinterpret_cast<unsigned long long>(chunk) & 15ull) == 0) {
+        return t4a_cuda_partials_walk_vector<Fold, T, true>(chunk, end - start, plane_width,
+                                                            fold);
+      }
+      return t4a_cuda_partials_walk_vector<Fold, T, false>(chunk, end - start, plane_width,
+                                                           fold);
     }
   }
   return t4a_cuda_partials_walk_scalar<Fold, T>(in, in_base, axis_stride, start, end,

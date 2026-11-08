@@ -211,3 +211,36 @@ loads together. The whole campaign was then repeated, and the tables are from th
 - The pass-1 entries go from 39-40 to 52-54 registers, with no spills. With one-warp blocks,
   the 32-blocks-per-SM limit still binds before registers do.
 - The vector bodies emit `LDG.E.128`.
+
+## 9. Review fixes (GPT-6.1-sol review of #23, points 1 and 2)
+
+- **Stride before pointer.** The pass-1 dispatch used to form `in + in_base + start` before it
+  tested `axis_stride == 1`.
+  - On a broadcast or reversed split axis, that pointer can lie outside the allocation:
+    `extents=[512], strides=[0]` over one element forms `in + 256`, and `strides=[-1],
+    offset=511` forms `in + 767`. Forming such a pointer is undefined behaviour.
+  - The stride is now tested first, and the chunk pointer is formed only on a contiguous
+    axis.
+  - The source-contract test `tests/planning.rs::pass1_checks_the_axis_stride_before_forming_a_chunk_pointer`
+    fails on the old code and passes now.
+  - `gpu_reduce.rs::pass1_reads_broadcast_and_reversed_axes_inside_their_allocation` runs both
+    layouts on exact-size allocations. The UB is not observable, so this test passed before
+    the fix as well.
+- **Topology independent of the address.** The vector groups were counted from the chunk's
+  first 16-byte boundary, so the same values, layout and plan grouped differently when the
+  input pointer moved by 4 bytes.
+  - With `[A, A, -A, -A, 0, ...]`, `A = 2^127`, the result was `NaN` at one alignment and `0` at
+    another.
+  - Groups are now `[g*V, g*V + V)` counted from the chunk start. Alignment only chooses
+    between one 16-byte load and `V` element loads, and the remaining `len % V` elements are
+    the tail.
+  - `gpu_reduce.rs::pass1_topology_does_not_depend_on_the_input_address` asserts identical
+    bits at leads 0-3. It failed on the old code with `0 vs NaN`.
+- **Effect.**
+  - A chunk that starts on a 16-byte boundary keeps exactly the previous grouping and
+    instructions. This covers tenferro's 1M and 16M full reductions.
+  - A chunk that starts off the boundary now uses element loads. `reduce-sum-f32-full-10000000`
+    measures 1.034x the previous head, and is still 0.77x the original baseline.
+- **Not changed, pending the maintainer's decision on point 3.** The numerical-contract text in
+  `docs/abi/c-kernel-abi.md`, including its description of the head elements, which no longer
+  exist.

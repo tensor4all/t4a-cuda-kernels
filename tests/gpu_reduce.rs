@@ -2029,9 +2029,10 @@ fn run_walk<T: WalkValue>(
 /// every size modulo the 4- and 2-element vectors and the 128-element warp stripe, a
 /// 257-element floor chunk (1028 = 4 x 257, so split starts fall off the 16-byte grid),
 /// and the `MAX_SPLITS` cap with a remainder. At the cap the chunk grows with the length
-/// (1024 elements at 4M + 5), so lanes run whole load batches and every size of the last
-/// partial batch, as they also do at an 8-lane plane.
-const WALK_LENGTHS: [i64; 12] = [
+/// (1024 elements at 4M + 5), so lanes run whole load batches. 917 507 gives 224-element
+/// chunks at an 8-lane plane: 56 groups of four F32, 7 per lane, so the last partial batch
+/// holds three groups (F64 reaches the same at a 16-lane plane).
+const WALK_LENGTHS: [i64; 13] = [
     1,
     3,
     511,
@@ -2041,6 +2042,7 @@ const WALK_LENGTHS: [i64; 12] = [
     1_031,
     4_099,
     65_549,
+    917_507,
     1 << 20,
     (1 << 20) + 7,
     (1 << 22) + 5,
@@ -2242,5 +2244,194 @@ fn product_partials_keep_the_serial_lane_walk_bit_for_bit() {
                 lanes[0]
             );
         }
+    }
+}
+
+/// One rank-1 reduction of `values` placed `lead` elements into a fresh buffer, so the
+/// input pointer the kernel sees is `lead * size_of::<T>()` bytes past a 16-byte boundary.
+fn reduce_at_lead<T: WalkValue>(
+    session: &Session,
+    values: &[T],
+    lead: usize,
+    op: ReduceOp,
+    plane_width: u32,
+) -> (Vec<T>, T) {
+    let mut host = vec![values[0]; lead];
+    host.extend_from_slice(values);
+    let src = upload(session, &host);
+    assert_eq!(src.as_ptr() as usize % 16, 0);
+    let len = values.len() as i64;
+    let (partials, _, total) = run_walk::<T>(
+        session,
+        &src,
+        host.len() as i64,
+        lead as i64,
+        len,
+        op,
+        plane_width,
+    );
+    (partials, total)
+}
+
+#[test]
+fn pass1_topology_does_not_depend_on_the_input_address() {
+    // Revision 12 promises a topology fixed by input, layout, plan and build. Two inputs
+    // that differ only in where their first element sits relative to a 16-byte boundary
+    // must therefore give the same bits.
+    let session = Session::new("reduce");
+    // GPT-6.1-sol review of #23: `[A, A, -A, -A, 0, ...]` with A = 2^127 over 1024 F32
+    // elements. A walk whose vector grid follows the address pairs `A + A` on one
+    // alignment (+Inf, then NaN against -Inf) and `A + -A` on another (0).
+    let big = 2f32.powi(127);
+    let mut witness = vec![0.0f32; 1_024];
+    witness[..4].copy_from_slice(&[big, big, -big, -big]);
+    let (partials0, total0) = reduce_at_lead(&session, &witness, 0, ReduceOp::Sum, 32);
+    for lead in 1..4 {
+        let (partials, total) = reduce_at_lead(&session, &witness, lead, ReduceOp::Sum, 32);
+        assert_eq!(
+            total.to_bits(),
+            total0.to_bits(),
+            "lead {lead}: {total} vs {total0} at lead 0"
+        );
+        let bits = |values: &[f32]| {
+            values
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(bits(&partials), bits(&partials0), "lead {lead}: partials");
+    }
+
+    // Ordinary data at several lengths, plane widths and ops: every lead gives the bits of
+    // lead 0, for every partial and the result.
+    for &len in &[1_028usize, 4_099, 65_549] {
+        let f32_values: Vec<f32> = (0..len as i64).map(f32::from_index).collect();
+        let f64_values: Vec<f64> = (0..len as i64).map(f64::from_index).collect();
+        for plane_width in [8u32, 32] {
+            for op in [ReduceOp::Sum, ReduceOp::SumSquares, ReduceOp::Max] {
+                let reference = reduce_at_lead(&session, &f32_values, 0, op, plane_width);
+                for lead in 1..4 {
+                    let got = reduce_at_lead(&session, &f32_values, lead, op, plane_width);
+                    assert_eq!(
+                        (
+                            got.0.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                            got.1.to_bits()
+                        ),
+                        (
+                            reference.0.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                            reference.1.to_bits()
+                        ),
+                        "F32 {op:?} len {len} plane {plane_width} lead {lead}"
+                    );
+                }
+                let reference = reduce_at_lead(&session, &f64_values, 0, op, plane_width);
+                let got = reduce_at_lead(&session, &f64_values, 1, op, plane_width);
+                assert_eq!(
+                    (
+                        got.0.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        got.1.to_bits()
+                    ),
+                    (
+                        reference.0.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        reference.1.to_bits()
+                    ),
+                    "F64 {op:?} len {len} plane {plane_width} lead 1"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn pass1_reads_broadcast_and_reversed_axes_inside_their_allocation() {
+    // The two layouts of the review's first point, run through both passes on allocations
+    // that hold exactly the reachable elements: a one-element input broadcast to 512
+    // (stride 0) and a reversed 512-element view (stride -1, offset 511). Both take the
+    // scalar walk.
+    let session = Session::new("reduce");
+    let out_layout = Layout::compact(&[1]).unwrap();
+    let one = upload(&session, &[0.25f32]);
+    let reversed_values: Vec<f32> = (0..512).map(f32::from_index).collect();
+    let reversed = upload(&session, &reversed_values);
+    for (src, buffer_len, layout, expected) in [
+        (
+            &one,
+            1i64,
+            Layout::new(&[512], &[0], 0).unwrap(),
+            0.25f64 * 512.0,
+        ),
+        (
+            &reversed,
+            512,
+            Layout::new(&[512], &[-1], 511).unwrap(),
+            reversed_values.iter().map(|&v| f64::from(v)).sum::<f64>(),
+        ),
+    ] {
+        let plan = plan_reduction(
+            DType::F32,
+            ReduceOp::Sum,
+            &out_layout,
+            1,
+            &layout,
+            buffer_len,
+            0,
+            32,
+        )
+        .unwrap();
+        let ReductionPlan::Split {
+            split,
+            pass1,
+            pass2,
+            combine_strategy,
+            combine_op,
+        } = plan
+        else {
+            panic!("a 512-long axis splits");
+        };
+        let partials_layout = Layout::compact(&[split.splits]).unwrap();
+        let partials = sentinel(&session, split.splits as usize * 4);
+        let out = sentinel(&session, 4);
+        let mut slots1 = partials_slots(
+            &partials,
+            src,
+            DType::F32,
+            ReduceOp::Sum,
+            &CLayout::new(&partials_layout),
+            &CLayout::new(&layout),
+            0,
+            1,
+            split.splits,
+            split.chunk_len,
+        );
+        launch_async(
+            session.function("t4a_cuda_reduce_partials"),
+            &pass1,
+            session.stream(),
+            &mut slots1,
+        );
+        let mut slots2 = reduce_slots(
+            &out,
+            &partials,
+            DType::F32,
+            combine_op,
+            combine_strategy,
+            &CLayout::new(&out_layout),
+            &CLayout::new(&partials_layout),
+            0,
+            1,
+        );
+        launch_async(
+            session.function("t4a_cuda_reduce"),
+            &pass2,
+            session.stream(),
+            &mut slots2,
+        );
+        pub_sync(session.stream());
+        let got = f64::from(download::<f32>(&session, &out, 1)[0]);
+        assert!(
+            (got - expected).abs() <= 1e-4 * expected.abs().max(1.0),
+            "stride {:?}: {got} vs {expected}",
+            layout.strides()
+        );
     }
 }

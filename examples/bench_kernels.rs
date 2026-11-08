@@ -598,6 +598,58 @@ fn bench_mul_c64(case: &str, len: usize, filter: &[String]) {
     emit_meta(case, &meta, observed, host_time);
 }
 
+// Elementwise `MAX` on `t4a_cuda_binary`, the entry whose float extrema this branch rewrote
+// from early returns to selects. Same slots as `bench_div_c64`; the inputs are finite, so the
+// NaN-propagating form and the plain ordering agree.
+fn bench_max_f32(case: &str, len: usize, filter: &[String]) {
+    if !wanted(case, filter) {
+        return;
+    }
+    let session = Session::new("elementwise");
+    let function = session.function(Entry::Binary.name());
+    let plan = plan_binary(BinaryOp::Max, DType::F32, ScalarSide::Both, len as i64).unwrap();
+    let mut rng = Rng::new(0x5555_6666);
+    let lhs: Vec<f32> = (0..len).map(|_| rng.f32()).collect();
+    let rhs: Vec<f32> = (0..len).map(|_| rng.f32()).collect();
+    record_input_digest(&[gpu::as_bytes(&lhs), gpu::as_bytes(&rhs)]);
+    let lhs_buf = upload_counted(&session, &lhs);
+    let rhs_buf = upload_counted(&session, &rhs);
+    // Untouched by `MAX`; supplied so the argument list matches the ABI.
+    let err = alloc(&session, 4);
+    let out = alloc(&session, len * 4);
+    let mut run = || {
+        let mut slots = [
+            Slot::ptr(&out),
+            Slot::ptr(&lhs_buf),
+            Slot::ptr(&rhs_buf),
+            Slot::i32(DType::F32.tag()),
+            Slot::i32(BinaryOp::Max.tag()),
+            Slot::i32(ScalarSide::Both.tag()),
+            Slot::i64(len as i64),
+            Slot::ptr(&err),
+        ];
+        launch_async(function, &plan, session.stream(), &mut slots);
+    };
+    run();
+    sync(&session);
+    let got = read_counted::<f32>(&session, &out, len);
+    checked(
+        case,
+        samples(len, 65_537).into_iter().all(|index| {
+            let (a, b) = (lhs[index], rhs[index]);
+            close_f32(got[index], if a > b { a } else { b })
+        }),
+    );
+    let meta = Meta {
+        kernels: Entry::Binary.name(),
+        launches: 1,
+        scratch_bytes: 0,
+        check: "ok",
+    };
+    let (observed, host_time) = measure(case, &session, &meta, &mut run);
+    emit_meta(case, &meta, observed, host_time);
+}
+
 fn bench_div_c64(case: &str, len: usize, filter: &[String]) {
     if !wanted(case, filter) {
         return;
@@ -2919,6 +2971,8 @@ fn main() {
     bench_exp_f32("elementwise-exp-f32-10000000", 10_000_000, &filter);
     bench_mul_c64("elementwise-mul-c64-10000000", 10_000_000, &filter);
     bench_div_c64("elementwise-div-c64-10000000", 10_000_000, &filter);
+    bench_max_f32("elementwise-max-f32-10000000", 10_000_000, &filter);
+    bench_max_f32("elementwise-max-f32-1000000", 1_000_000, &filter);
 
     bench_fused(fused_chain_f32(1_000), &filter);
     bench_fused(fused_chain_f32(10_000_000), &filter);

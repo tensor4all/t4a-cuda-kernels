@@ -1,0 +1,172 @@
+# SASS of the *production* entry points, both trees, taken with source-line attribution.
+#
+# The earlier excerpt (sass-plane-loop.log) is `plane_reduce_body<MaxFold, float>` compiled
+# alone in a probe kernel called `probe_max`; it shows the loop body but not where it ships.
+# This file is the same claim taken on the global entry points themselves.
+#
+# $ nvcc -std=c++17 -cubin -arch=sm_80 -lineinfo -I cuda/include -o reduce.cubin cuda/src/reduce.cu
+# $ nvcc -std=c++17 -cubin -arch=sm_80 -lineinfo -I cuda/include -o elementwise.cubin cuda/src/elementwise.cu
+# $ nvdisasm -g -c -sf <cubin>        # -g prints one `//## File ..., line N` per instruction
+# CUDA 12.6 (Build cuda_12.6.r12.6/compiler.35059454_0), the build the A100 campaign used.
+# The base side is the same commands in a worktree of 3c8d82c.
+#
+# Run on evo2 (Ryzen AI MAX+ 395, no NVIDIA device, no driver): compiling and disassembling
+# need no GPU, so this file is a per-instruction claim only. It measures nothing.
+#
+# Excerpts keep LDG/DSETP/FSETP/FSEL/FMNMX/BSSY/BSYNC/BRA and the line markers, and drop the
+# address arithmetic and register moves between them. Registers (`.sectioninfo`): both trees
+# report SHI_REGISTERS=40 for `t4a_cuda_reduce` and 38 for `t4a_cuda_binary`.
+#
+# abi.cuh, this branch -> 3c8d82c:
+#   t4a_cuda_nan_max(float)   748-751 -> 745-751
+#   t4a_cuda_nan_min(float)   760-763 -> 765-771
+#   t4a_cuda_nan_max(double)  754-757 -> 754-761
+#   t4a_cuda_nan_min(double)  766-769 -> 774-781
+
+## 1. `t4a_cuda_reduce` (cuda/src/reduce.cu:657), the combine pass's strided fold at
+##    reduce.cu:252-253 inside plane_reduce_body (reduce.cu:251 loads the seed).
+##    This is the entry the PR's pass-2 number comes from.
+
+### 3c8d82c: one load per fold, behind a branch on the accumulator
+        /*39f30*/                   DSETP.NAN.AND P2, PT, R20, R20, PT ;
+	//## src/reduce.cu:252
+        /*39f50*/                   BSSY B2, `(.L_x_5342) ;
+	//## include/t4a/abi.cuh:775
+        /*39fa0*/               @P2 BRA `(.L_x_5343) ;
+	//## src/reduce.cu:253
+        /*39fd0*/                   LDG.E.64 R6, [R2.64] ;
+	//## include/t4a/abi.cuh:775
+	//## include/t4a/abi.cuh:778
+        /*3a000*/                   DSETP.NAN.AND P2, PT, R6, R6, PT ;
+	//## include/t4a/abi.cuh:781
+        /*3a020*/              @!P2 DSETP.MIN.AND P3, P4, R6, R2, PT ;
+        /*3a050*/              @!P2 FSEL R27, R2, R3, P3 ;
+	//## include/t4a/abi.cuh:778
+	//## include/t4a/abi.cuh:781
+        /*3a0c0*/                   BSYNC B2 ;
+	//## src/reduce.cu:252
+        /*3a100*/               @P0 BRA `(.L_x_5344) ;
+        /*3a110*/                   BSYNC B1 ;
+	//## include/t4a/abi.cuh:775
+        /*3a140*/              @!P0 BRA `(.L_x_5336) ;
+        /*3a250*/                   DSETP.NAN.AND P0, PT, R20, R20, PT ;
+        /*3a260*/                   BSSY B1, `(.L_x_5345) ;
+        /*3a290*/               @P0 BRA `(.L_x_5346) ;
+	//## src/reduce.cu:253
+        /*3a2c0*/                   LDG.E.64 R2, [R2.64] ;
+	//## include/t4a/abi.cuh:778
+        /*3a2d0*/                   DSETP.NAN.AND P0, PT, R2, R2, PT ;
+	//## include/t4a/abi.cuh:781
+        /*3a2e0*/              @!P0 DSETP.MIN.AND P1, P2, R2, R20, PT ;
+        /*3a320*/              @!P0 FSEL R10, R0, R7, P1 ;
+        /*3a380*/                   BSYNC B1 ;
+	//## include/t4a/abi.cuh:775
+        /*3a390*/                   DSETP.NAN.AND P0, PT, R2, R2, PT ;
+	//## src/reduce.cu:253
+	//## include/t4a/abi.cuh:775
+
+### this branch: the loads are issued ahead of the folds, no branch on the accumulator
+	//## src/reduce.cu:253
+        /*3bb00*/                   LDG.E.64 R2, [R2.64] ;
+	//## include/t4a/abi.cuh:767
+	//## src/reduce.cu:252
+	//## include/t4a/abi.cuh:767
+        /*3bb50*/                   DSETP.MIN.AND P1, P2, R2, R12, PT ;
+	//## include/t4a/abi.cuh:768
+        /*3bb70*/                   DSETP.NAN.AND P3, PT, R2, R2, PT ;
+	//## include/t4a/abi.cuh:767
+        /*3bb80*/                   FSEL R19, R0, R5, P1 ;
+	//## src/reduce.cu:252
+	//## include/t4a/abi.cuh:767
+	//## include/t4a/abi.cuh:769
+        /*3bbd0*/                   DSETP.NAN.AND P2, PT, R12, R12, PT ;
+	//## src/reduce.cu:252
+	//## include/t4a/abi.cuh:767
+	//## include/t4a/abi.cuh:768
+        /*3bc10*/                   FSEL R0, R2, R4, P3 ;
+	//## src/reduce.cu:252
+	//## include/t4a/abi.cuh:768
+        /*3bc30*/                   FSEL R2, R3, R5, P3 ;
+	//## src/reduce.cu:252
+	//## include/t4a/abi.cuh:769
+        /*3bc50*/                   FSEL R12, R12, R0, P2 ;
+        /*3bc60*/                   FSEL R13, R13, R2, P2 ;
+	//## src/reduce.cu:252
+        /*3bc80*/               @P1 BRA `(.L_x_4293) ;
+        /*3bc90*/                   BSYNC B1 ;
+        /*3bca0*/              @!P0 BRA `(.L_x_4287) ;
+	//## src/reduce.cu:253
+        /*3bdd0*/                   LDG.E.64 R2, [R2.64] ;
+        /*3be00*/                   LDG.E.64 R6, [R4.64] ;
+        /*3be30*/                   LDG.E.64 R10, [R4.64] ;
+        /*3be60*/                   LDG.E.64 R18, [R22.64] ;
+	//## include/t4a/abi.cuh:767
+        /*3be90*/                   DSETP.MIN.AND P0, P1, R2, R12, PT ;
+        /*3beb0*/                   FSEL R17, R0, R5, P0 ;
+
+## 2. `t4a_cuda_binary` (cuda/src/elementwise.cu:371), the elementwise `MAX`/`MIN` routes the
+##    `sass-diff.sh` list names. Entry 0x12b0 is the float `MAX` arm (abi.cuh:749-751 here,
+##    745-751 at 3c8d82c) and 0x1310 the float `MIN` arm.
+
+### 3c8d82c: two branches per element pair
+        /*1290*/                   BSYNC B0 ;
+        /*12a0*/                   BRA `(.L_x_267) ;
+	//## include/t4a/abi.cuh:745
+        /*12b0*/                   FSETP.NAN.AND P0, PT, R0, R0, PT ;
+        /*12c0*/                   BSSY B0, `(.L_x_272) ;
+        /*12e0*/               @P0 BRA `(.L_x_273) ;
+	//## include/t4a/abi.cuh:748
+        /*12f0*/                   FSETP.NAN.AND P0, PT, R5, R5, PT ;
+        /*1310*/               @P0 BRA `(.L_x_273) ;
+	//## include/t4a/abi.cuh:751
+        /*1320*/                   FMNMX R7, R0, R5, !PT ;
+        /*1330*/                   BSYNC B0 ;
+        /*1340*/                   BRA `(.L_x_267) ;
+	//## include/t4a/abi.cuh:765
+        /*1350*/                   FSETP.NAN.AND P0, PT, R0, R0, PT ;
+        /*1360*/                   BSSY B0, `(.L_x_274) ;
+        /*1380*/               @P0 BRA `(.L_x_275) ;
+	//## include/t4a/abi.cuh:768
+        /*1390*/                   FSETP.NAN.AND P0, PT, R5, R5, PT ;
+        /*13b0*/               @P0 BRA `(.L_x_275) ;
+	//## include/t4a/abi.cuh:771
+        /*13c0*/                   FMNMX R7, R0, R5, PT ;
+        /*13d0*/                   BSYNC B0 ;
+        /*13e0*/                   BRA `(.L_x_267) ;
+	//## src/elementwise.cu:184
+        /*1440*/                   BRX R8 -0x1450                                                            (*"BRANCH_TARGETS .L_x_766,.L_x_767,.L_x_768"*);
+        /*1470*/               @P0 BRA `(.L_x_267) ;
+	//## src/elementwise.cu:201
+        /*1490*/                   BSSY B2, `(.L_x_276) ;
+
+### this branch: no branch, two selects per element pair
+        /*1290*/                   BSYNC B0 ;
+        /*12a0*/                   BRA `(.L_x_267) ;
+	//## include/t4a/abi.cuh:750
+        /*12b0*/                   FSETP.NAN.AND P0, PT, R5.reuse, R5.reuse, PT ;
+	//## include/t4a/abi.cuh:749
+        /*12c0*/                   FMNMX R4, R0.reuse, R5, !PT ;
+	//## include/t4a/abi.cuh:751
+        /*12d0*/                   FSETP.NAN.AND P1, PT, R0, R0, PT ;
+	//## include/t4a/abi.cuh:750
+        /*12e0*/                   FSEL R5, R5, R4, P0 ;
+	//## include/t4a/abi.cuh:751
+        /*12f0*/                   FSEL R7, R0, R5, P1 ;
+        /*1300*/                   BRA `(.L_x_267) ;
+	//## include/t4a/abi.cuh:762
+        /*1310*/                   FSETP.NAN.AND P0, PT, R5.reuse, R5.reuse, PT ;
+	//## include/t4a/abi.cuh:761
+        /*1320*/                   FMNMX R4, R0.reuse, R5, PT ;
+	//## include/t4a/abi.cuh:763
+        /*1330*/                   FSETP.NAN.AND P1, PT, R0, R0, PT ;
+	//## include/t4a/abi.cuh:762
+        /*1340*/                   FSEL R5, R5, R4, P0 ;
+	//## include/t4a/abi.cuh:763
+        /*1350*/                   FSEL R7, R0, R5, P1 ;
+	//## src/elementwise.cu:190
+        /*1360*/                   BRA `(.L_x_267) ;
+	//## src/elementwise.cu:184
+        /*13c0*/                   BRX R8 -0x13d0                                                            (*"BRANCH_TARGETS .L_x_759,.L_x_760,.L_x_761"*);
+        /*13f0*/               @P0 BRA `(.L_x_267) ;
+	//## src/elementwise.cu:201
+        /*1410*/                   BSSY B2, `(.L_x_272) ;

@@ -1,5 +1,50 @@
+# Two harness generations, both kept because the worklog's identity numbers come from the first.
+#
+# Part 1 is the run of 2026-11-08 on primerose (A100 80GB PCIe). Its harness ignored every CUDA
+# return value, so "mismatches 0" there means the comparison agreed *if* the copy and the launch
+# that produced its inputs happened at all — which is #26's finding.
+# Part 2 is the checked harness (CUDA_CHECK around every call), recorded by ./bit-identity.sh,
+# which prints the exit code of each run. Re-run it on a device for the identity rows; that is
+# the one thing this revision does not have.
+
+# --- Part 1: primerose, A100 80GB PCIe, driver 580.178.04, unchecked harness ---------------
 # $ nvcc -std=c++17 -arch=sm_80 -o eq bit-identity.cu && ./eq   (CUDA 12.6, A100 80GB PCIe, driver 580.178.04)
 f32: 67109120 pairs (16 special^2 + 67108864 random), mismatches 0, cuda no error
 f64: 67109120 pairs (16 special^2 + 67108864 random), mismatches 0, cuda no error
+total mismatches 0
+# exit 0
+
+# --- Part 2: evo2 (Ryzen AI MAX+ 395, no NVIDIA device, no driver), checked harness ---------
+# $ ./bit-identity.sh    (CUDA 12.6 Build cuda_12.6.r12.6/compiler.35059454_0)
+# The failures below are the first CUDA call, cudaMalloc, so this records the failure paths and
+# not the identity. Note what the last block does: with the return values ignored, the same run
+# prints `mismatches 0` and exits 0 having compared nothing.
+# no NVIDIA device: nvidia-smi gives no answer
+# nvcc --version | tail -1: Build cuda_12.6.r12.6/compiler.35059454_0
+# exit 0  (nvcc -std=c++17 -arch=sm_80 -o bit-identity bit-identity.cu)
+
+## same values, checked
+$ ./bit-identity 
+FAILED /home/shinaoka/work/cuda-26/docs/worklogs/evidence/2026-11-08-nan-extrema-select/bit-identity.cu:43 cudaMalloc(&da, bytes) -> CUDA driver version is insufficient for CUDA runtime version
+mode checked, 67108864 random pairs per type, copy as allocated
+# exit 2
+
+## copy one element past the allocation, checked
+$ ./bit-identity --bad-copy
+FAILED /home/shinaoka/work/cuda-26/docs/worklogs/evidence/2026-11-08-nan-extrema-select/bit-identity.cu:43 cudaMalloc(&da, bytes) -> CUDA driver version is insufficient for CUDA runtime version
+mode checked, 67108864 random pairs per type, copy one element too long
+# exit 2
+
+## allocation the device cannot satisfy (160 GB on an 80 GB card), checked
+$ ./bit-identity --n 40000000000
+FAILED /home/shinaoka/work/cuda-26/docs/worklogs/evidence/2026-11-08-nan-extrema-select/bit-identity.cu:43 cudaMalloc(&da, bytes) -> CUDA driver version is insufficient for CUDA runtime version
+mode checked, 40000000000 random pairs per type, copy as allocated
+# exit 2
+
+## copy one element past the allocation, every return value ignored (the pre-fix harness)
+$ ./bit-identity --legacy --bad-copy
+mode legacy (every CUDA return value ignored), 67108864 random pairs per type, copy one element too long
+f32: 67109120 pairs (16 special^2 + 67108864 random), mismatches 0, cuda CUDA driver version is insufficient for CUDA runtime version
+f64: 67109120 pairs (16 special^2 + 67108864 random), mismatches 0, cuda CUDA driver version is insufficient for CUDA runtime version
 total mismatches 0
 # exit 0

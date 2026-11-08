@@ -1,8 +1,27 @@
 // Bit-identity of the select-form NaN extrema (kf abi.cuh) against the early-return form (3c8d82c).
+//
+// Every CUDA call goes through CUDA_CHECK. Before that, the return values were ignored, so a run
+// that could not allocate, copy or launch still printed "mismatches 0" and exited 0: an evidence
+// program that passed without comparing anything. --legacy keeps that old behaviour runnable, so
+// the hole can be measured instead of described.
 #include "../../../../cuda/include/t4a/abi.cuh"
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+
+static bool legacy = false;
+
+#define CUDA_CHECK(call)                                                            \
+  do {                                                                              \
+    cudaError_t err_ = (call);                                                      \
+    if (!legacy && err_ != cudaSuccess) {                                           \
+      std::fprintf(stderr, "FAILED %s:%d %s -> %s\n", __FILE__, __LINE__, #call,    \
+                   cudaGetErrorString(err_));                                       \
+      std::exit(2);                                                                 \
+    }                                                                               \
+  } while (0)
+
 template <typename T> __device__ T old_max(T l, T r) { if (l != l) return l; if (r != r) return r; return sizeof(T) == 4 ? (T)fmaxf((float)l, (float)r) : (T)fmax((double)l, (double)r); }
 template <typename T> __device__ T old_min(T l, T r) { if (l != l) return l; if (r != r) return r; return sizeof(T) == 4 ? (T)fminf((float)l, (float)r) : (T)fmin((double)l, (double)r); }
 template <typename T, typename U> __global__ void check(const U* a, const U* b, long long n, unsigned long long* bad) {
@@ -13,19 +32,43 @@ template <typename T, typename U> __global__ void check(const U* a, const U* b, 
   if (y[0] != y[1] || y[2] != y[3]) atomicAdd(bad, 1ull);
 }
 static uint64_t s = 0x9E3779B97F4A7C15ull; static uint64_t rnd() { s ^= s << 13; s ^= s >> 7; s ^= s << 17; return s; }
-template <typename T, typename U> unsigned long long run(const U* special, int ns, long long nrand) {
-  long long n = (long long)ns * ns + nrand; U* ha = new U[n]; U* hb = new U[n]; long long k = 0;
+
+// bad_copy makes the first copy one element longer than its allocation, so cudaMemcpy fails.
+template <typename T, typename U> unsigned long long run(const U* special, int ns, long long nrand, bool bad_copy) {
+  long long n = (long long)ns * ns + nrand;
+  U *da = nullptr, *db = nullptr; unsigned long long *dbad = nullptr, bad = 0;
+  const size_t bytes = (size_t)n * sizeof(U);
+  // Device allocations come first: with a large --n this fails here, on cudaMalloc, and nothing
+  // touches an uninitialised pointer afterwards.
+  CUDA_CHECK(cudaMalloc(&da, bytes));
+  CUDA_CHECK(cudaMalloc(&db, bytes));
+  CUDA_CHECK(cudaMalloc(&dbad, sizeof bad));
+  U* ha = new U[n]; U* hb = new U[n]; long long k = 0;
   for (int i = 0; i < ns; ++i) for (int j = 0; j < ns; ++j) { ha[k] = special[i]; hb[k] = special[j]; ++k; }
   for (; k < n; ++k) { ha[k] = (U)rnd(); hb[k] = (U)rnd(); if (k % 3 == 0) hb[k] = ha[k] ^ 1; }
-  U *da, *db; unsigned long long *dbad, bad = 0; cudaMalloc(&da, n * sizeof(U)); cudaMalloc(&db, n * sizeof(U)); cudaMalloc(&dbad, 8);
-  cudaMemcpy(da, ha, n * sizeof(U), cudaMemcpyHostToDevice); cudaMemcpy(db, hb, n * sizeof(U), cudaMemcpyHostToDevice); cudaMemset(dbad, 0, 8);
-  check<T, U><<<(n + 255) / 256, 256>>>(da, db, n, dbad); cudaMemcpy(&bad, dbad, 8, cudaMemcpyDeviceToHost);
+  CUDA_CHECK(cudaMemcpy(da, ha, bad_copy ? bytes + sizeof(U) : bytes, cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(db, hb, bytes, cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemset(dbad, 0, sizeof bad));
+  check<T, U><<<(n + 255) / 256, 256>>>(da, db, n, dbad);
+  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK(cudaMemcpy(&bad, dbad, sizeof bad, cudaMemcpyDeviceToHost));
   printf("%s: %lld pairs (%d special^2 + %lld random), mismatches %llu, cuda %s\n", sizeof(T) == 4 ? "f32" : "f64", n, ns, nrand, bad, cudaGetErrorString(cudaGetLastError()));
+  CUDA_CHECK(cudaFree(da)); CUDA_CHECK(cudaFree(db)); CUDA_CHECK(cudaFree(dbad));
+  delete[] ha; delete[] hb;
   return bad;
 }
-int main() {
+int main(int argc, char** argv) {
+  long long nrand = 1ll << 26; bool bad_copy = false;
+  for (int i = 1; i < argc; ++i) {
+    if (!strcmp(argv[i], "--legacy")) legacy = true;
+    else if (!strcmp(argv[i], "--bad-copy")) bad_copy = true;
+    else if (!strcmp(argv[i], "--n") && i + 1 < argc) nrand = atoll(argv[++i]);
+    else { fprintf(stderr, "usage: %s [--legacy] [--bad-copy] [--n <random pairs>]\n", argv[0]); return 2; }
+  }
+  printf("mode %s, %lld random pairs per type, copy %s\n", legacy ? "legacy (every CUDA return value ignored)" : "checked",
+         nrand, bad_copy ? "one element too long" : "as allocated");
   const uint32_t s32[] = {0x00000000u, 0x80000000u, 0x3f800000u, 0xbf800000u, 0x7f800000u, 0xff800000u, 0x00000001u, 0x80000001u, 0x7f7fffffu, 0xff7fffffu, 0x7fc00000u, 0xffc00000u, 0x7fc00001u, 0x7f800001u, 0xff812345u, 0x7fffffffu};
   const uint64_t s64[] = {0ull, 0x8000000000000000ull, 0x3ff0000000000000ull, 0xbff0000000000000ull, 0x7ff0000000000000ull, 0xfff0000000000000ull, 1ull, 0x8000000000000001ull, 0x7fefffffffffffffull, 0xffefffffffffffffull, 0x7ff8000000000000ull, 0xfff8000000000000ull, 0x7ff8000000000001ull, 0x7ff0000000000001ull, 0xfff0123456789abcull, 0x7fffffffffffffffull};
-  unsigned long long bad = run<float, uint32_t>(s32, 16, 1ll << 26) + run<double, uint64_t>(s64, 16, 1ll << 26);
+  unsigned long long bad = run<float, uint32_t>(s32, 16, nrand, bad_copy) + run<double, uint64_t>(s64, 16, nrand, bad_copy);
   printf("total mismatches %llu\n", bad); return bad != 0;
 }

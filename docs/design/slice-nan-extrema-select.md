@@ -22,7 +22,8 @@ produces `rhs` under a branch on the accumulator. In the strided loop of
 `plane_reduce_body` (`cuda/src/reduce.cu`, the combine pass), every load then waits for the
 previous fold: the SASS is `FSETP.NAN acc` → `@P BRA` → `LDG` → `FMNMX`, once per element.
 `SUM` unrolls the same loop four times and issues four `LDG`s before its `FADD`s.
-(`sass-plane-loop.log` in the worklog evidence shows both.)
+(`sass-plane-loop.log` shows both in a probe kernel; `sass-production.log` shows them on the
+entries themselves, `t4a_cuda_reduce` at `reduce.cu:252-253` and `t4a_cuda_binary`.)
 
 ## Change
 

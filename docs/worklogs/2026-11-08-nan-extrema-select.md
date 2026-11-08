@@ -15,6 +15,12 @@ Nothing else was running on the GPU. Every bench run reports `check=ok`. The mea
 candidate tree is exactly this branch's commit: the diff against `3c8d82c` is `abi.cuh` plus
 `docs/`.
 
+The evidence revision of 2026-11-09 (checked `bit-identity.cu`, `sass-production.log`, the
+`elementwise-max-f32` bench cases) was produced on evo2 (Ryzen AI MAX+ 395, no NVIDIA device,
+no driver): `nvcc -cubin` and `nvdisasm` need no GPU, running a kernel does. So nothing in
+this revision re-measures timing, and the identity rows below still come from the unchecked
+harness of Part 1 in `bit-identity.log`.
+
 ## Results
 
 Medians over the three rounds; host time is the bench's `host_ns_per_op` (100 launches,
@@ -58,11 +64,23 @@ pass 1 + pass 2, no host wait). The per-round values are in `nsys/table.md`.
 
 ## Correctness
 
-- `bit-identity.log`: the new and old functions, compiled into one GPU program, agree bit for
-  bit for `max` and `min` over 67 109 120 pairs per type. The pairs are all 16 × 16 pairs of
-  special values (±0, ±1, ±Inf, ±smallest subnormal, ±largest finite, and quiet,
+- `bit-identity.log` Part 1: the new and old functions, compiled into one GPU program, agree
+  bit for bit for `max` and `min` over 67 109 120 pairs per type. The pairs are all 16 × 16
+  pairs of special values (±0, ±1, ±Inf, ±smallest subnormal, ±largest finite, and quiet,
   signalling and negative NaNs with distinct payloads), plus 2^26 random bit patterns, one
-  third of them pairs of neighbouring values.
+  third of them pairs of neighbouring values. That harness ignored every CUDA return value,
+  which is what #26 reports: on a host where the copy fails it still printed `mismatches 0`
+  and exited 0 (`bit-identity.log` Part 2, last block).
+- `bit-identity.log` Part 2: the checked harness (`CUDA_CHECK` around every call, device
+  allocations before host ones so a failed `cudaMalloc` is not followed by an uninitialised
+  pointer). `./bit-identity.sh` records the exit code of four runs.
+  - With a device: `./bit-identity` exits 0 with `total mismatches 0`; `--bad-copy` (a copy
+    one element past the allocation) and `--n 40000000000` (160 GB on an 80 GB card) each
+    exit 2 with the failing call and the error on stderr. **Not yet taken: this revision was
+    built on a host without a device.**
+  - Without a device (evo2): every checked run exits 2 at `cudaMalloc` with the driver error
+    on stderr, and `--legacy --bad-copy` — the pre-fix behaviour — prints `mismatches 0` and
+    exits 0 with no comparison made. Both are in Part 2.
 - `cargo-test-gpu-tests.log` (run on `3eb8376`, the code of this branch): `cargo test -j 4 --release --features gpu-tests
   --no-fail-fast` passes (all 15 test binaries and the doc-tests, `# exit 0`). This includes
   `binary_extrema_pow_rem_and_scalar_division`, which checks that the lhs NaN payload
@@ -70,8 +88,27 @@ pass 1 + pass 2, no host wait). The per-round values are in `nsys/table.md`.
 - `cargo fmt --check`, `cargo clippy -j 8 --all-targets -- -D warnings` and host `cargo test`
   pass.
 
+## SASS
+
+`evidence/2026-11-08-nan-extrema-select/sass-production.log` takes the instruction stream on
+the production entries with source-line attribution (`nvcc -lineinfo`, `nvdisasm -g`), both
+trees:
+
+- `t4a_cuda_reduce` (`cuda/src/reduce.cu:657`), the combine pass's fold at `reduce.cu:252-253`
+  inside `plane_reduce_body`: `3c8d82c` runs `DSETP.NAN` → `BSSY` → `@P2 BRA` → one `LDG.E.64`
+  → `DSETP.MIN` per fold; this branch issues four `LDG.E.64` before the folds and has no
+  branch on the accumulator.
+- `t4a_cuda_binary` (`cuda/src/elementwise.cu:371`), float `MAX`/`MIN` arms at `0x12b0` and
+  `0x1310`: two `@P0 BRA` per pair at `3c8d82c`, straight-line `FSETP.NAN`/`FMNMX`/`FSEL` here.
+
+The earlier `sass-plane-loop.log` is `plane_reduce_body<MaxFold, float>` in a probe kernel
+(`probe_max`), not the entry; it stays as the loop-body excerpt. Registers are unchanged:
+`t4a_cuda_reduce` 40 in both trees, `t4a_cuda_binary` 38 in both.
+
 ## Not measured
 
-- Elementwise `MAX`/`MIN` (`t4a_cuda_binary`) timing. Its SASS changed, and `bench_kernels`
-  has no case for it.
+- Elementwise `MAX`/`MIN` (`t4a_cuda_binary`) timing. Its SASS changed; `bench_kernels` now
+  has `elementwise-max-f32-1000000` and `elementwise-max-f32-10000000` (`plan_binary`
+  `BinaryOp::Max` on `Entry::Binary`), which compile and pass host tests but have never run:
+  the host that produced this revision has no device. No number is claimed for them.
 - Through tenferro. That needs the pin moved past this change.

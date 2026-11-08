@@ -1806,3 +1806,439 @@ fn wide_combine_matches_the_cpu_reference_for_each_dtype() {
         "complex wide combine"
     );
 }
+
+// --- Vectorized pass-1 walk (docs/design/slice-reduction-pass1-vector.md) ------------------
+//
+// Pass 1 reads a contiguous chunk of a `SUM`/`SUM_SQUARES`/`MAX`/`MIN` reduction over
+// F32/F64/I32/I64 with 16-byte loads. Every chunk must still fold each of its elements
+// exactly once, wherever the chunk starts relative to a 16-byte boundary and however many
+// elements are left over after the last whole vector.
+
+impl Probe for i64 {
+    const DTYPE: DType = DType::I64;
+}
+
+/// An element type of the vector walk with an exact `f64` view.
+trait WalkValue: Probe + std::fmt::Debug {
+    fn from_index(index: i64) -> Self;
+    fn widen(self) -> f64;
+    fn floating() -> bool;
+}
+
+impl WalkValue for f32 {
+    fn from_index(index: i64) -> f32 {
+        ((index * 7_919) % 1_009) as f32 / 1_009.0 - 0.5
+    }
+    fn widen(self) -> f64 {
+        f64::from(self)
+    }
+    fn floating() -> bool {
+        true
+    }
+}
+
+impl WalkValue for f64 {
+    fn from_index(index: i64) -> f64 {
+        ((index * 7_919) % 1_009) as f64 / 1_009.0 - 0.5
+    }
+    fn widen(self) -> f64 {
+        self
+    }
+    fn floating() -> bool {
+        true
+    }
+}
+
+impl WalkValue for i32 {
+    fn from_index(index: i64) -> i32 {
+        ((index * 7_919) % 1_009) as i32 - 504
+    }
+    fn widen(self) -> f64 {
+        f64::from(self)
+    }
+    fn floating() -> bool {
+        false
+    }
+}
+
+impl WalkValue for i64 {
+    fn from_index(index: i64) -> i64 {
+        (index * 7_919) % 1_009 - 504
+    }
+    fn widen(self) -> f64 {
+        self as f64
+    }
+    fn floating() -> bool {
+        false
+    }
+}
+
+/// The CPU reference of one fold over `values`, in `f64`. The integer inputs above keep
+/// every sum far inside the range where `f64` is exact.
+fn walk_reference(values: &[f64], op: ReduceOp) -> f64 {
+    let nan_aware = |pick: fn(f64, f64) -> f64| {
+        move |acc: f64, value: f64| {
+            if acc.is_nan() || value.is_nan() {
+                f64::NAN
+            } else {
+                pick(acc, value)
+            }
+        }
+    };
+    match op {
+        ReduceOp::Sum => values.iter().sum(),
+        ReduceOp::SumSquares => values.iter().map(|value| value * value).sum(),
+        ReduceOp::Max => values
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, nan_aware(f64::max)),
+        ReduceOp::Min => values
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, nan_aware(f64::min)),
+        ReduceOp::Prod => values.iter().product(),
+    }
+}
+
+/// Whether a device value matches the reference: exactly for integers and extrema (which
+/// select one of their inputs), and within the a-priori `n * u * sum|x|` bound any
+/// association obeys for a floating sum.
+fn walk_matches<T: WalkValue>(got: T, values: &[f64], op: ReduceOp) -> bool {
+    let expected = walk_reference(values, op);
+    let got = got.widen();
+    if !T::floating() || matches!(op, ReduceOp::Max | ReduceOp::Min) {
+        return got == expected || (got.is_nan() && expected.is_nan());
+    }
+    let unit = if T::DTYPE == DType::F32 {
+        f64::from(f32::EPSILON) / 2.0
+    } else {
+        f64::EPSILON / 2.0
+    };
+    let magnitude: f64 = match op {
+        ReduceOp::SumSquares => values.iter().map(|value| value * value).sum(),
+        _ => values.iter().map(|value| value.abs()).sum(),
+    };
+    (got - expected).abs() <= (values.len() as f64 + 1.0) * unit * magnitude
+}
+
+/// A rank-1 reduction of `len` elements starting `offset` elements into `values`, run as
+/// its plan declares. Returns the pass-1 partials (empty for a direct plan), the split and
+/// the final value.
+fn run_walk<T: WalkValue>(
+    session: &Session,
+    src: &Buf,
+    buffer_len: i64,
+    offset: i64,
+    len: i64,
+    op: ReduceOp,
+    plane_width: u32,
+) -> (Vec<T>, Option<(i64, i64)>, T) {
+    let in_layout = Layout::new(&[len], &[1], offset).unwrap();
+    let out_layout = Layout::compact(&[1]).unwrap();
+    let size = std::mem::size_of::<T>();
+    let out = sentinel(session, size);
+    let plan = plan_reduction(
+        T::DTYPE,
+        op,
+        &out_layout,
+        1,
+        &in_layout,
+        buffer_len,
+        0,
+        plane_width,
+    )
+    .unwrap();
+    match plan {
+        ReductionPlan::Direct { strategy, launch } => {
+            let mut slots = reduce_slots(
+                &out,
+                src,
+                T::DTYPE,
+                op,
+                strategy,
+                &CLayout::new(&out_layout),
+                &CLayout::new(&in_layout),
+                0,
+                1,
+            );
+            launch_async(
+                session.function("t4a_cuda_reduce"),
+                &launch,
+                session.stream(),
+                &mut slots,
+            );
+            pub_sync(session.stream());
+            (Vec::new(), None, download::<T>(session, &out, 1)[0])
+        }
+        ReductionPlan::Split {
+            split,
+            pass1,
+            pass2,
+            combine_strategy,
+            combine_op,
+        } => {
+            let partials_layout = Layout::compact(&[split.splits]).unwrap();
+            // Sentinel-filled: a partial pass 1 never wrote stays visible.
+            let partials = sentinel(session, split.splits as usize * size);
+            let mut slots1 = partials_slots(
+                &partials,
+                src,
+                T::DTYPE,
+                op,
+                &CLayout::new(&partials_layout),
+                &CLayout::new(&in_layout),
+                0,
+                1,
+                split.splits,
+                split.chunk_len,
+            );
+            launch_async(
+                session.function("t4a_cuda_reduce_partials"),
+                &pass1,
+                session.stream(),
+                &mut slots1,
+            );
+            let mut slots2 = reduce_slots(
+                &out,
+                &partials,
+                T::DTYPE,
+                combine_op,
+                combine_strategy,
+                &CLayout::new(&out_layout),
+                &CLayout::new(&partials_layout),
+                0,
+                1,
+            );
+            launch_async(
+                session.function("t4a_cuda_reduce"),
+                &pass2,
+                session.stream(),
+                &mut slots2,
+            );
+            pub_sync(session.stream());
+            (
+                download::<T>(session, &partials, split.splits as usize),
+                Some((split.splits, split.chunk_len)),
+                download::<T>(session, &out, 1)[0],
+            )
+        }
+    }
+}
+
+/// Lengths on both sides of the split threshold (512 with a 32-lane plane), with tails of
+/// every size modulo the 4- and 2-element vectors and the 128-element warp stripe, a
+/// 257-element floor chunk (1028 = 4 x 257, so split starts fall off the 16-byte grid),
+/// and the `MAX_SPLITS` cap with a remainder. At the cap the chunk grows with the length
+/// (1024 elements at 4M + 5), so lanes run whole load batches and every size of the last
+/// partial batch, as they also do at an 8-lane plane.
+const WALK_LENGTHS: [i64; 12] = [
+    1,
+    3,
+    511,
+    512,
+    515,
+    1_028,
+    1_031,
+    4_099,
+    65_549,
+    1 << 20,
+    (1 << 20) + 7,
+    (1 << 22) + 5,
+];
+
+fn check_walk<T: WalkValue>(session: &Session, ops: &[ReduceOp]) {
+    // Three spare elements after the largest view, so offsets 1..3 stay in bounds.
+    let buffer_len = (1i64 << 22) + 5 + 3;
+    let host: Vec<T> = (0..buffer_len).map(T::from_index).collect();
+    let widened: Vec<f64> = host.iter().map(|value| value.widen()).collect();
+    let src = upload(session, &host);
+    assert_eq!(
+        src.as_ptr() as usize % 16,
+        0,
+        "device allocations are 16-byte aligned"
+    );
+    for &len in &WALK_LENGTHS {
+        // Offsets 1..3 move the first element off the 16-byte grid by 4/8/12 bytes (F32/I32)
+        // or 8/0/8 bytes (F64/I64), so the head is empty, partial or a whole vector short.
+        for (offset, plane_width) in (0..4i64).flat_map(|offset| [(offset, 8u32), (offset, 32)]) {
+            let view = &widened[offset as usize..(offset + len) as usize];
+            for &op in ops {
+                let (partials, split, total) =
+                    run_walk::<T>(session, &src, buffer_len, offset, len, op, plane_width);
+                let context = format!(
+                    "{:?} {op:?} len {len} offset {offset} plane {plane_width}",
+                    T::DTYPE
+                );
+                if let Some((splits, chunk_len)) = split {
+                    for (chunk, &got) in partials.iter().enumerate() {
+                        let start = chunk as i64 * chunk_len;
+                        let end = if chunk as i64 + 1 == splits {
+                            len
+                        } else {
+                            start + chunk_len
+                        };
+                        assert!(
+                            walk_matches(got, &view[start as usize..end as usize], op),
+                            "{context}: partial {chunk} of {splits} is {got:?}"
+                        );
+                    }
+                }
+                assert!(walk_matches(total, view, op), "{context}: result {total:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn vector_walk_folds_every_element_once_for_every_op_and_dtype() {
+    let session = Session::new("reduce");
+    let floating = [
+        ReduceOp::Sum,
+        ReduceOp::SumSquares,
+        ReduceOp::Max,
+        ReduceOp::Min,
+    ];
+    let integer = [ReduceOp::Sum, ReduceOp::Max, ReduceOp::Min];
+    check_walk::<f32>(&session, &floating);
+    check_walk::<f64>(&session, &floating);
+    check_walk::<i32>(&session, &integer);
+    check_walk::<i64>(&session, &integer);
+}
+
+#[test]
+fn vector_walk_propagates_a_nan_from_the_head_the_body_and_the_tail() {
+    // 1028 = 4 chunks of 257: with offset 1 every chunk start is off the 16-byte grid, so
+    // each chunk has head elements, whole vectors and tail elements. A NaN at a chunk's first
+    // element lands in its head (or its first vector), one in the middle in a vector, and one
+    // at its last element in its tail (or last vector); every placement must reach that
+    // chunk's partial and the result, and no other partial.
+    let session = Session::new("reduce");
+    let len = 1_028i64;
+    for offset in [0i64, 1, 2, 3] {
+        for chunk in 0..4i64 {
+            for position in [0i64, 128, 256] {
+                let nan_at = offset + chunk * 257 + position;
+                let host32: Vec<f32> = (0..len + 4)
+                    .map(|index| {
+                        if index == nan_at {
+                            f32::NAN
+                        } else {
+                            f32::from_index(index)
+                        }
+                    })
+                    .collect();
+                let host64: Vec<f64> = host32.iter().map(|&value| f64::from(value)).collect();
+                for op in [ReduceOp::Max, ReduceOp::Min] {
+                    let src = upload(&session, &host32);
+                    let (partials, _, total) =
+                        run_walk::<f32>(&session, &src, len + 4, offset, len, op, 32);
+                    let src = upload(&session, &host64);
+                    let (partials64, _, total64) =
+                        run_walk::<f64>(&session, &src, len + 4, offset, len, op, 32);
+                    let context =
+                        format!("{op:?} offset {offset} chunk {chunk} position {position}");
+                    assert!(
+                        total.is_nan() && total64.is_nan(),
+                        "{context}: result drops the NaN"
+                    );
+                    for other in 0..4usize {
+                        assert_eq!(
+                            partials[other].is_nan(),
+                            other as i64 == chunk,
+                            "{context}: f32 partial {other}"
+                        );
+                        assert_eq!(
+                            partials64[other].is_nan(),
+                            other as i64 == chunk,
+                            "{context}: f64 partial {other}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn vector_walk_keeps_a_negative_zero_sum() {
+    // The vector walk seeds each lane from its first vector rather than from an identity,
+    // so a sum of negative zeros stays -0.0 (an identity of +0.0 would turn it into +0.0).
+    let session = Session::new("reduce");
+    let len = 1_031i64;
+    let src = upload(&session, &vec![-0.0f32; len as usize + 1]);
+    for offset in [0i64, 1] {
+        let (partials, _, total) =
+            run_walk::<f32>(&session, &src, len + 1, offset, len, ReduceOp::Sum, 32);
+        for (chunk, value) in partials.iter().enumerate() {
+            assert_eq!(
+                value.to_bits(),
+                (-0.0f32).to_bits(),
+                "offset {offset} partial {chunk}"
+            );
+        }
+        assert_eq!(
+            total.to_bits(),
+            (-0.0f32).to_bits(),
+            "offset {offset} result"
+        );
+    }
+}
+
+#[test]
+fn product_partials_keep_the_serial_lane_walk_bit_for_bit() {
+    // `PROD` is never regrouped (c-kernel-abi.md, "Reassociation"): each lane multiplies
+    // `start + t + k*32` in order, then the plane folds lanes with the xor tree. Emulate
+    // exactly that in `f32` and require the same bits, on a contiguous axis where the
+    // regroupable ops take the vector walk.
+    let session = Session::new("reduce");
+    for (len, offset) in [(1_028i64, 1i64), (65_549, 0), (65_549, 3)] {
+        let host: Vec<f32> = (0..len + offset)
+            .map(|index| 1.0 + (f32::from_index(index)) * 1e-3)
+            .collect();
+        let src = upload(&session, &host);
+        let (partials, split, _) = run_walk::<f32>(
+            &session,
+            &src,
+            len + offset,
+            offset,
+            len,
+            ReduceOp::Prod,
+            32,
+        );
+        let (splits, chunk_len) = split.expect("these lengths split");
+        let view = &host[offset as usize..];
+        for (chunk, got) in partials.iter().enumerate() {
+            let start = chunk as i64 * chunk_len;
+            let end = if chunk as i64 + 1 == splits {
+                len
+            } else {
+                start + chunk_len
+            };
+            let mut lanes: Vec<f32> = (0..32i64)
+                .map(|lane| {
+                    let mut index = start + lane;
+                    let mut acc = view[index as usize];
+                    index += 32;
+                    while index < end {
+                        acc *= view[index as usize];
+                        index += 32;
+                    }
+                    acc
+                })
+                .collect();
+            let mut step = 1;
+            while step < 32 {
+                lanes = (0..32)
+                    .map(|lane| lanes[lane] * lanes[lane ^ step])
+                    .collect();
+                step <<= 1;
+            }
+            assert_eq!(
+                got.to_bits(),
+                lanes[0].to_bits(),
+                "len {len} offset {offset} partial {chunk}: {got} vs {}",
+                lanes[0]
+            );
+        }
+    }
+}

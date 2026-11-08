@@ -286,13 +286,26 @@ Semantics:
   slice; the last chunk absorbs `reduce_len % splits`.
 - **Pass 2** is `t4a_cuda_reduce` over the partials, with `SUM` when pass 1 was
   `SUM_SQUARES` and the same op otherwise, and is never split again.
-- **Reassociation (revision 12).** A lane's walk over its own chunk may combine
-  four lane-strided elements as a tree before folding them into one loop-carried
-  accumulator, for `SUM`, `SUM_SQUARES`, `MAX` and `MIN`. `PROD` is never regrouped:
-  a regrouped product can turn an overflow-then-zero into `Inf * 0 = NaN`. The
-  topology is fixed for a given input, layout, plan and build, so results are
-  reproducible; near overflow a regrouped sum can differ from the serial order in
-  classification (`A, A, -A, -A` with `A = 2^127` gives `NaN` instead of `+Inf`).
+- **Reassociation (revision 12).** For `SUM`, `SUM_SQUARES`, `MAX` and `MIN`, pass 1
+  may assign a chunk's elements to lanes and combine them in an order other than the
+  serial lane-strided walk. The block still folds every element of its chunk exactly
+  once. `PROD` is never regrouped: a regrouped product can turn an overflow-then-zero
+  into `Inf * 0 = NaN`. The topology is fixed for a given input, layout, plan and
+  build, so results are reproducible. Near overflow, a regrouped sum can differ from
+  the serial order in classification: `A, A, -A, -A` with `A = 2^127` gives `NaN`
+  instead of `+Inf`.
+
+  What ships is the vector walk of
+  [slice-reduction-pass1-vector.md](../design/slice-reduction-pass1-vector.md). It
+  serves a contiguous axis (`stride == 1`) of an `F32`/`F64`/`I32`/`I64` operand:
+  - The elements before the chunk's first 16-byte boundary go one per lane.
+  - The whole 16-byte vectors after it are dealt round-robin to the lanes. Each vector
+    combines as a pairwise tree before it joins the lane's accumulator.
+  - The fewer than one vector's worth of trailing elements go one per lane.
+
+  A strided axis, `PROD` and the complex types keep the serial lane-strided walk.
+  Element pointers need only their dtype's alignment: the walk finds the 16-byte
+  boundary itself.
 - **Arithmetic.** Integer `SUM`/`PROD` wrap. `SUM_SQUARES` squares each element
   through `fma(v, v, 0)` so the square rounds before the addition and cannot be
   contracted into it. Complex `SUM`/`PROD` use the revision-1 element-wise

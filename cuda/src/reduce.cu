@@ -24,8 +24,11 @@ namespace {
 
 // A fold seeds the accumulator from the axis' first element, so the seed is the
 // operation's own identity applied to that element (sum-of-squares must square
-// it, unlike the others).
+// it, unlike the others). `kRegroup` says whether pass 1 may combine a lane's
+// elements in an order other than the serial lane-strided one (ABI revision 12,
+// "Reassociation"); `PROD` may not.
 struct SumFold {
+  static constexpr bool kRegroup = true;
   template <typename T>
   __device__ __forceinline__ T operator()(T lhs, T rhs) const {
     return t4a_cuda_add<T>(lhs, rhs);
@@ -41,6 +44,7 @@ struct SumFold {
 };
 
 struct ProdFold {
+  static constexpr bool kRegroup = false;
   template <typename T>
   __device__ __forceinline__ T operator()(T lhs, T rhs) const {
     return t4a_cuda_mul<T>(lhs, rhs);
@@ -56,6 +60,7 @@ struct ProdFold {
 };
 
 struct SumSquaresFold {
+  static constexpr bool kRegroup = true;
   template <typename T>
   __device__ __forceinline__ T operator()(T lhs, T rhs) const {
     return t4a_cuda_add<T>(lhs, t4a_cuda_square<T>(rhs));
@@ -71,6 +76,7 @@ struct SumSquaresFold {
 };
 
 struct MaxFold {
+  static constexpr bool kRegroup = true;
   template <typename T>
   __device__ __forceinline__ T operator()(T lhs, T rhs) const {
     return t4a_cuda_max<T>(lhs, rhs);
@@ -86,6 +92,7 @@ struct MaxFold {
 };
 
 struct MinFold {
+  static constexpr bool kRegroup = true;
   template <typename T>
   __device__ __forceinline__ T operator()(T lhs, T rhs) const {
     return t4a_cuda_min<T>(lhs, rhs);
@@ -251,6 +258,204 @@ __device__ __forceinline__ void plane_reduce_body(const void* in_ptr,
   }
 }
 
+// --- Pass-1 chunk walks --------------------------------------------------------
+//
+// Both pass-1 bodies (`partials_body` and its general-rank twin) take the same two
+// walks, so the twins cannot drift. The scalar walk is the baseline's: lane `t` seeds
+// from `start + t` and folds `start + t + k*W`. The vector walk serves a contiguous
+// chunk of a regroupable fold (`kRegroup`) over a 4- or 8-byte real or integer type.
+
+// The scalar walk: one lane-strided element per step and one loop-carried accumulator.
+template <typename Fold, typename T>
+__device__ __forceinline__ T t4a_cuda_partials_walk_scalar(const T* in,
+                                                           long long in_base,
+                                                           long long axis_stride,
+                                                           long long start,
+                                                           long long end,
+                                                           int plane_width,
+                                                           Fold fold) {
+  long long reduce_index = start + threadIdx.x;
+  T acc = fold.seed(in[in_base + reduce_index * axis_stride]);
+  for (reduce_index += plane_width; reduce_index < end; reduce_index += plane_width) {
+    acc = fold(acc, in[in_base + reduce_index * axis_stride]);
+  }
+  return acc;
+}
+
+// Elements per 16-byte vector for the element types the vector walk serves. Zero keeps
+// the scalar walk: the complex types are only component-aligned (`t4a_cuda_c32` is
+// 4-byte aligned, not a `float2`), and no reduction uses a narrower type.
+template <typename T>
+struct t4a_cuda_vector_lanes {
+  static constexpr int value = 0;
+};
+template <>
+struct t4a_cuda_vector_lanes<float> {
+  static constexpr int value = 4;
+};
+template <>
+struct t4a_cuda_vector_lanes<double> {
+  static constexpr int value = 2;
+};
+template <>
+struct t4a_cuda_vector_lanes<int> {
+  static constexpr int value = 4;
+};
+template <>
+struct t4a_cuda_vector_lanes<long long> {
+  static constexpr int value = 2;
+};
+
+template <typename T, int V>
+struct alignas(16) t4a_cuda_vector {
+  T lane[V];
+};
+
+// Vectors a lane loads before it folds any of them. The loads of one batch are
+// independent, so a fold whose result selects between operands (the NaN-propagating
+// extrema) no longer serializes them behind one DRAM latency each.
+constexpr int t4a_cuda_vector_batch = 4;
+static_assert(t4a_cuda_vector_batch == 4, "the whole-batch fold below is a fixed four-way tree");
+
+template <typename Fold, typename T>
+__host__ __device__ constexpr bool t4a_cuda_vector_walk_enabled() {
+  return Fold::kRegroup && t4a_cuda_vector_lanes<T>::value != 0;
+}
+
+// Elements before the first 16-byte boundary at or after `chunk`.
+// INVARIANT: element pointers are aligned to their dtype (c-kernel-abi.md, "Types"), so
+// the byte distance to the boundary is a whole number of elements.
+template <typename T>
+__device__ __forceinline__ long long t4a_cuda_vector_head(const T* chunk) {
+  const unsigned long long address = reinterpret_cast<unsigned long long>(chunk);
+  return static_cast<long long>(((16ull - (address & 15ull)) & 15ull) / sizeof(T));
+}
+
+// Whether a block takes the vector walk. The values are uniform across the block, so
+// every lane takes the same walk. Each lane must own at least one aligned vector to seed
+// from; the planner's `chunk_len >= 8 * plane_width` already guarantees that, and this
+// check keeps it true independently of the planner.
+template <typename T>
+__device__ __forceinline__ bool t4a_cuda_vector_walk_applies(const T* chunk,
+                                                             long long len,
+                                                             long long axis_stride,
+                                                             int plane_width) {
+  constexpr int V = t4a_cuda_vector_lanes<T>::value;
+  return axis_stride == 1 && len >= V &&
+         (len - t4a_cuda_vector_head(chunk)) / V >= plane_width;
+}
+
+// One vector's contribution: a pairwise tree of its seeded elements, so a sum of
+// squares squares each element exactly once.
+template <typename Fold, typename T, int V>
+__device__ __forceinline__ T t4a_cuda_vector_value(const t4a_cuda_vector<T, V>& x, Fold fold) {
+  if constexpr (V == 4) {
+    return fold.combine(fold.combine(fold.seed(x.lane[0]), fold.seed(x.lane[1])),
+                        fold.combine(fold.seed(x.lane[2]), fold.seed(x.lane[3])));
+  } else {
+    return fold.combine(fold.seed(x.lane[0]), fold.seed(x.lane[1]));
+  }
+}
+
+// The vector walk over `chunk[0..len)`. With `head` elements before the first 16-byte
+// boundary and `vectors = (len - head) / V` whole aligned vectors after it:
+//   - lane `t` folds vectors `t, t + W, t + 2W, ...` (one warp instruction reads `16*W`
+//     contiguous bytes), in batches of `t4a_cuda_vector_batch` loads issued before any of
+//     them is folded (the first and last batches predicated per vector);
+//   - lane `t < head` folds head element `t`;
+//   - lane `t < tail`, with `tail = len - head - vectors * V < V`, folds tail element `t`.
+// Every element of the chunk is folded exactly once. A separate, non-inlined function so
+// the scalar walk of the same kernel keeps its own code (a grouped walk inlined into pass 1
+// slowed the strided path even when it never ran; slice-reduction-throughput.md §9.2).
+template <typename Fold, typename T>
+__device__ __noinline__ T t4a_cuda_partials_walk_vector(const T* chunk,
+                                                        long long len,
+                                                        int plane_width,
+                                                        Fold fold) {
+  constexpr int V = t4a_cuda_vector_lanes<T>::value;
+  constexpr int B = t4a_cuda_vector_batch;
+  using Vector = t4a_cuda_vector<T, V>;
+  const int lane = static_cast<int>(threadIdx.x);
+  const long long head = t4a_cuda_vector_head(chunk);
+  const long long vectors = (len - head) / V;
+  // INVARIANT: `chunk + head` is 16-byte aligned (t4a_cuda_vector_head), and
+  // `vectors >= plane_width` (t4a_cuda_vector_walk_applies), so `body[lane]` exists.
+  const Vector* body = reinterpret_cast<const Vector*>(chunk + head);
+  const long long stride = plane_width;
+
+  // The first batch: vector `lane` always exists, and the batch's other loads are
+  // predicated on their own index, so a chunk with only a few vectors per lane still issues
+  // its loads together.
+  Vector batch[B];
+#pragma unroll
+  for (int b = 0; b < B; ++b) {
+    if (b == 0 || lane + b * stride < vectors) {
+      batch[b] = body[lane + b * stride];
+    }
+  }
+  T acc = t4a_cuda_vector_value<Fold, T, V>(batch[0], fold);
+#pragma unroll
+  for (int b = 1; b < B; ++b) {
+    if (lane + b * stride < vectors) {
+      acc = fold.combine(acc, t4a_cuda_vector_value<Fold, T, V>(batch[b], fold));
+    }
+  }
+  // Whole batches.
+  long long index = lane + B * stride;
+  for (; index + (B - 1) * stride < vectors; index += B * stride) {
+#pragma unroll
+    for (int b = 0; b < B; ++b) {
+      batch[b] = body[index + b * stride];
+    }
+    const T low = fold.combine(t4a_cuda_vector_value<Fold, T, V>(batch[0], fold),
+                               t4a_cuda_vector_value<Fold, T, V>(batch[1], fold));
+    const T high = fold.combine(t4a_cuda_vector_value<Fold, T, V>(batch[2], fold),
+                                t4a_cuda_vector_value<Fold, T, V>(batch[3], fold));
+    acc = fold.combine(acc, fold.combine(low, high));
+  }
+  // The last, partial batch (fewer than `B` vectors left for this lane), predicated the same
+  // way.
+#pragma unroll
+  for (int b = 0; b < B - 1; ++b) {
+    if (index + b * stride < vectors) {
+      batch[b] = body[index + b * stride];
+    }
+  }
+#pragma unroll
+  for (int b = 0; b < B - 1; ++b) {
+    if (index + b * stride < vectors) {
+      acc = fold.combine(acc, t4a_cuda_vector_value<Fold, T, V>(batch[b], fold));
+    }
+  }
+  if (lane < head) {
+    acc = fold(acc, chunk[lane]);
+  }
+  const long long tail_start = head + vectors * V;
+  if (lane < len - tail_start) {
+    acc = fold(acc, chunk[tail_start + lane]);
+  }
+  return acc;
+}
+
+// One lane's fold over its share of the chunk `[start, end)` of the axis at `in_base`.
+template <typename Fold, typename T>
+__device__ __forceinline__ T t4a_cuda_partials_walk(const T* in,
+                                                    long long in_base,
+                                                    long long axis_stride,
+                                                    long long start,
+                                                    long long end,
+                                                    int plane_width,
+                                                    Fold fold) {
+  if constexpr (t4a_cuda_vector_walk_enabled<Fold, T>()) {
+    const T* chunk = in + in_base + start;
+    if (t4a_cuda_vector_walk_applies(chunk, end - start, axis_stride, plane_width)) {
+      return t4a_cuda_partials_walk_vector<Fold, T>(chunk, end - start, plane_width, fold);
+    }
+  }
+  return t4a_cuda_partials_walk_scalar<Fold, T>(in, in_base, axis_stride, start, end,
+                                                plane_width, fold);
+}
+
 // Pass 1 of a split reduction: one block per (output, split). The planner
 // guarantees `chunk_len >= plane_width` and `chunk_len == axis_len / splits`, so
 // every lane seeds from inside its own chunk and only the last split absorbs the
@@ -294,11 +499,8 @@ __device__ __forceinline__ void partials_body(const void* in_ptr,
   const long long axis_len = in_layout.extents[axis];
   const long long start = split * chunk_len;
   const long long end = split + 1 == splits ? axis_len : start + chunk_len;
-  long long reduce_index = start + threadIdx.x;
-  T acc = fold.seed(in[in_base + reduce_index * axis_stride]);
-  for (reduce_index += plane_width; reduce_index < end; reduce_index += plane_width) {
-    acc = fold(acc, in[in_base + reduce_index * axis_stride]);
-  }
+  const T acc = t4a_cuda_partials_walk<Fold, T>(in, in_base, axis_stride, start, end,
+                                                plane_width, fold);
   const T reduced = t4a_cuda_plane_fold_narrow(acc, plane_width, fold);
   if (threadIdx.x == 0) {
     partials[partial_offset] = reduced;
@@ -427,11 +629,8 @@ __device__ __forceinline__ void partials_body_any(const void* in_ptr,
   const long long axis_len = in_layout.extents[axis];
   const long long start = split * chunk_len;
   const long long end = split + 1 == splits ? axis_len : start + chunk_len;
-  long long reduce_index = start + threadIdx.x;
-  T acc = fold.seed(in[in_base + reduce_index * axis_stride]);
-  for (reduce_index += plane_width; reduce_index < end; reduce_index += plane_width) {
-    acc = fold(acc, in[in_base + reduce_index * axis_stride]);
-  }
+  const T acc = t4a_cuda_partials_walk<Fold, T>(in, in_base, axis_stride, start, end,
+                                                plane_width, fold);
   const T reduced = t4a_cuda_plane_fold_narrow(acc, plane_width, fold);
   if (threadIdx.x == 0) {
     partials[partial_offset] = reduced;

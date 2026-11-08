@@ -3035,3 +3035,178 @@ fn rank_nine_split_reaches_every_partial_through_the_wide_combine() {
         expected
     );
 }
+
+#[test]
+fn rank_nine_contiguous_split_takes_the_vector_walk_through_the_general_twin() {
+    // The general-rank pass 1 (`t4a_cuda_reduce_partials_any`) shares the vector walk with
+    // the fast body. Reduce the contiguous axis 0 of a rank-9 `[1027, 2, 1, ...]` view at
+    // element offset 1: output 0's chunks start off the 16-byte grid by one element and
+    // output 1's by 1028 elements, and each output's last chunk carries a 259-element tail.
+    // Every partial is checked against its own chunk, so a skipped or doubled vector fails at
+    // that partial.
+    let session = Session::new("reduce");
+    let rank = 9usize;
+    let axis = 0usize;
+    let axis_len = 1_027i64;
+    let outputs = 2i64;
+    let offset = 1i64;
+    let in_extents: Vec<i64> = (0..rank)
+        .map(|index| match index {
+            0 => axis_len,
+            1 => outputs,
+            _ => 1,
+        })
+        .collect();
+    let mut in_strides = vec![1i64; rank];
+    for index in 1..rank {
+        in_strides[index] = in_strides[index - 1] * in_extents[index - 1];
+    }
+    let in_count = offset + axis_len * outputs;
+    let values: Vec<f32> = (0..in_count)
+        .map(|index| ((index * 7_919) % 1_009) as f32 / 1_009.0 - 0.5)
+        .collect();
+    let src = upload(&session, &values);
+    let in_layout = wide(&in_extents, &in_strides, offset);
+    let mut out_extents = in_extents.clone();
+    out_extents[axis] = 1;
+    let out_layout = WideLayout::compact(out_extents).unwrap();
+    let out_count = out_layout.element_count().unwrap();
+
+    for op in [ReduceOp::Sum, ReduceOp::Max] {
+        let dst = destination(&session, out_count);
+        let plan = plan_reduction(
+            DType::F32,
+            op,
+            &out_layout,
+            out_count,
+            &in_layout,
+            in_count,
+            axis as u32,
+            32,
+        )
+        .unwrap();
+        let ReductionPlan::Split {
+            split,
+            pass1,
+            pass2,
+            combine_strategy,
+            combine_op,
+        } = &plan
+        else {
+            panic!("a 1027-long axis must split");
+        };
+        assert_eq!((split.splits, split.chunk_len), (4, 256));
+        let partials_extents =
+            t4a_cuda_kernels::reduction_partials_layout(&in_layout, axis as u32, split.splits)
+                .unwrap()
+                .extents()
+                .to_vec();
+        let partials_layout = WideLayout::compact(partials_extents).unwrap();
+        let partials_count = partials_layout.element_count().unwrap();
+        let partials = destination(&session, partials_count);
+
+        let in_extents_buf = upload(&session, in_layout.extents());
+        let in_strides_buf = upload(&session, in_layout.strides());
+        let out_extents_buf = upload(&session, out_layout.extents());
+        let out_strides_buf = upload(&session, out_layout.strides());
+        let partials_extents_buf = upload(&session, partials_layout.extents());
+        let partials_strides_buf = upload(&session, partials_layout.strides());
+        let in_any = CLayoutAny::new(
+            in_layout.as_ref(),
+            in_extents_buf.as_ptr(),
+            in_strides_buf.as_ptr(),
+        )
+        .unwrap();
+        let out_any = CLayoutAny::new(
+            out_layout.as_ref(),
+            out_extents_buf.as_ptr(),
+            out_strides_buf.as_ptr(),
+        )
+        .unwrap();
+        let partials_any = CLayoutAny::new(
+            partials_layout.as_ref(),
+            partials_extents_buf.as_ptr(),
+            partials_strides_buf.as_ptr(),
+        )
+        .unwrap();
+
+        let mut slots1 = [
+            Slot::ptr(&partials),
+            Slot::ptr(&src),
+            Slot::i32(DType::F32.tag()),
+            Slot::i32(op.tag()),
+            Slot::layout_any(&partials_any),
+            Slot::layout_any(&in_any),
+            Slot::i32(axis as i32),
+            Slot::i64(out_count),
+            Slot::i64(split.splits),
+            Slot::i64(split.chunk_len),
+        ];
+        launch_async(
+            session.function("t4a_cuda_reduce_partials_any"),
+            pass1,
+            session.stream(),
+            &mut slots1,
+        );
+        let mut slots2 = [
+            Slot::ptr(&dst),
+            Slot::ptr(&partials),
+            Slot::i32(DType::F32.tag()),
+            Slot::i32(combine_op.tag()),
+            Slot::i32(combine_strategy.tag()),
+            Slot::layout_any(&out_any),
+            Slot::layout_any(&partials_any),
+            Slot::i32(axis as i32),
+            Slot::i64(out_count),
+        ];
+        launch_async(
+            session.function("t4a_cuda_reduce_any"),
+            pass2,
+            session.stream(),
+            &mut slots2,
+        );
+        pub_sync(session.stream());
+
+        let fold = |range: std::ops::Range<i64>, output: i64| -> (f64, f64) {
+            let elements =
+                range.map(|step| f64::from(values[(offset + output * axis_len + step) as usize]));
+            match op {
+                ReduceOp::Max => (elements.fold(f64::NEG_INFINITY, f64::max), 0.0),
+                _ => elements.fold((0.0, 0.0), |(sum, magnitude), value| {
+                    (sum + value, magnitude + value.abs())
+                }),
+            }
+        };
+        let close = |got: f32, (expected, magnitude): (f64, f64), count: i64| match op {
+            ReduceOp::Max => f64::from(got) == expected,
+            _ => {
+                (f64::from(got) - expected).abs()
+                    <= (count as f64 + 1.0) * f64::from(f32::EPSILON) / 2.0 * magnitude
+            }
+        };
+        let got_partials = download::<f32>(&session, &partials, partials_count as usize);
+        for output in 0..outputs {
+            for chunk in 0..split.splits {
+                let start = chunk * split.chunk_len;
+                let end = if chunk + 1 == split.splits {
+                    axis_len
+                } else {
+                    start + split.chunk_len
+                };
+                let got = got_partials[(chunk + split.splits * output) as usize];
+                assert!(
+                    close(got, fold(start..end, output), end - start),
+                    "{op:?} output {output} partial {chunk}: {got}"
+                );
+            }
+        }
+        let got = download::<f32>(&session, &dst, out_count as usize);
+        for output in 0..outputs {
+            assert!(
+                close(got[output as usize], fold(0..axis_len, output), axis_len),
+                "{op:?} output {output}: {}",
+                got[output as usize]
+            );
+        }
+    }
+}

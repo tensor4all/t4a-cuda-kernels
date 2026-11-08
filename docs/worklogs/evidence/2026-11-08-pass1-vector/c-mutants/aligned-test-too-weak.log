@@ -1,0 +1,94 @@
+# commit 65a74d5de849aca37dbbbf778a168224b9c8c034 + c-mutants/aligned-test-too-weak.patch
+# $ cargo test -j 4 --release --features gpu-tests --no-fail-fast --test gpu_reduce --test gpu_dynamic_rank -- vector_walk rank_nine_contiguous product_partials pass1_
+   Compiling t4a-cuda-kernels v0.1.1 (/home/shinaoka/tensor4all/t4a-cuda-kernels-pass1)
+    Finished `release` profile [optimized] target(s) in 0.49s
+     Running tests/gpu_dynamic_rank.rs (target/release/deps/gpu_dynamic_rank-22a243ebf3c59b3b)
+
+running 1 test
+
+thread 'rank_nine_contiguous_split_takes_the_vector_walk_through_the_general_twin' (2781511) panicked at tests/gpu/mod.rs:334:49:
+cuStreamSynchronize: DriverError(CUDA_ERROR_MISALIGNED_ADDRESS, "misaligned address")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'rank_nine_contiguous_split_takes_the_vector_walk_through_the_general_twin' (2781511) panicked at tests/gpu/mod.rs:182:45:
+called `Result::unwrap()` on an `Err` value: DriverError(CUDA_ERROR_MISALIGNED_ADDRESS, "misaligned address")
+stack backtrace:
+   0:     0x61a473ea5bc1 - <<std[68c81ae915296b05]::sys::backtrace::BacktraceLock>::print::DisplayBacktrace as core[efd5e57aef94d71e]::fmt::Display>::fmt
+   1:     0x61a473ebafca - core[efd5e57aef94d71e]::fmt::write
+   2:     0x61a473eaa05c - <alloc[c23e483dde3f7cfb]::vec::Vec<u8> as core[efd5e57aef94d71e]::io::write::Write>::write_fmt
+   3:     0x61a473e819e6 - std[68c81ae915296b05]::panicking::default_hook::{closure#0}
+   4:     0x61a473e9dfb9 - std[68c81ae915296b05]::panicking::default_hook
+   5:     0x61a473e32490 - test[ff178199d140d5fa]::test_main_inner::<test[ff178199d140d5fa]::test_main_static::{closure#0}>::{closure#0}
+   6:     0x61a473e9e172 - std[68c81ae915296b05]::panicking::panic_with_hook
+   7:     0x61a473e81a92 - std[68c81ae915296b05]::panicking::panic_handler::{closure#0}
+   8:     0x61a473e79ee9 - std[68c81ae915296b05]::sys::backtrace::__rust_end_short_backtrace::<std[68c81ae915296b05]::panicking::panic_handler::{closure#0}, !>
+   9:     0x61a473e8268d - __rustc[3d2f79520d6fa809]::rust_begin_unwind
+  10:     0x61a473ebb6fc - core[efd5e57aef94d71e]::panicking::panic_fmt
+  11:     0x61a473ebb4d2 - core[efd5e57aef94d71e]::result::unwrap_failed
+  12:     0x61a473e2373c - <gpu_dynamic_rank[36f0a54511d2c27d]::rank_nine_contiguous_split_takes_the_vector_walk_through_the_general_twin::{closure#0} as core[efd5e57aef94d71e]::ops::function::FnOnce<()>>::call_once
+  13:     0x61a473e2577b - test[ff178199d140d5fa]::__rust_begin_short_backtrace::<core[efd5e57aef94d71e]::result::Result<(), alloc[c23e483dde3f7cfb]::string::String>, fn() -> core[efd5e57aef94d71e]::result::Result<(), alloc[c23e483dde3f7cfb]::string::String>>
+  14:     0x61a473e32de5 - test[ff178199d140d5fa]::run_test::{closure#0}
+  15:     0x61a473e2c1a4 - std[68c81ae915296b05]::sys::backtrace::__rust_begin_short_backtrace::<test[ff178199d140d5fa]::run_test::{closure#1}, ()>
+  16:     0x61a473e35f42 - <std[68c81ae915296b05]::thread::lifecycle::spawn_unchecked<test[ff178199d140d5fa]::run_test::{closure#1}, ()>::{closure#1} as core[efd5e57aef94d71e]::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}
+  17:     0x61a473ea5179 - <std[68c81ae915296b05]::sys::thread::unix::Thread>::new::thread_start
+  18:      0x9092f49cb84 - start_thread
+                               at ./nptl/pthread_create.c:447:8
+  19:      0x9092f529ecc - clone3
+                               at ./misc/../sysdeps/unix/sysv/linux/x86_64/clone3.S:78:0
+  20:                0x0 - <unknown>
+
+thread 'rank_nine_contiguous_split_takes_the_vector_walk_through_the_general_twin' (2781511) panicked at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/panicking.rs:233:5:
+panic in a destructor during cleanup
+thread caused non-unwinding panic. aborting.
+error: test failed, to rerun pass `--test gpu_dynamic_rank`
+
+Caused by:
+  process didn't exit successfully: `/home/shinaoka/tensor4all/t4a-cuda-kernels-pass1/target/release/deps/gpu_dynamic_rank-22a243ebf3c59b3b vector_walk rank_nine_contiguous product_partials pass1_` (signal: 6, SIGABRT: process abort signal)
+     Running tests/gpu_reduce.rs (target/release/deps/gpu_reduce-652123b6ba646ae6)
+
+running 9 tests
+
+thread 'pass1_adds_exactly_the_one_nonzero_element' (2781651) panicked at tests/gpu/mod.rs:334:49:
+cuStreamSynchronize: DriverError(CUDA_ERROR_MISALIGNED_ADDRESS, "misaligned address")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'pass1_adds_exactly_the_one_nonzero_element' (2781651) panicked at tests/gpu/mod.rs:182:45:
+called `Result::unwrap()` on an `Err` value: DriverError(CUDA_ERROR_MISALIGNED_ADDRESS, "misaligned address")
+stack backtrace:
+   0:     0x61b2a0acf561 - <<std[68c81ae915296b05]::sys::backtrace::BacktraceLock>::print::DisplayBacktrace as core[efd5e57aef94d71e]::fmt::Display>::fmt
+   1:     0x61b2a0ae4c0a - core[efd5e57aef94d71e]::fmt::write
+   2:     0x61b2a0ad39fc - <alloc[c23e483dde3f7cfb]::vec::Vec<u8> as core[efd5e57aef94d71e]::io::write::Write>::write_fmt
+   3:     0x61b2a0aab386 - std[68c81ae915296b05]::panicking::default_hook::{closure#0}
+   4:     0x61b2a0ac7959 - std[68c81ae915296b05]::panicking::default_hook
+   5:     0x61b2a0a5cba0 - test[ff178199d140d5fa]::test_main_inner::<test[ff178199d140d5fa]::test_main_static::{closure#0}>::{closure#0}
+   6:     0x61b2a0ac7b12 - std[68c81ae915296b05]::panicking::panic_with_hook
+   7:     0x61b2a0aab432 - std[68c81ae915296b05]::panicking::panic_handler::{closure#0}
+   8:     0x61b2a0aa3889 - std[68c81ae915296b05]::sys::backtrace::__rust_end_short_backtrace::<std[68c81ae915296b05]::panicking::panic_handler::{closure#0}, !>
+   9:     0x61b2a0aac02d - __rustc[3d2f79520d6fa809]::rust_begin_unwind
+  10:     0x61b2a0ae533c - core[efd5e57aef94d71e]::panicking::panic_fmt
+  11:     0x61b2a0ae5112 - core[efd5e57aef94d71e]::result::unwrap_failed
+  12:     0x61b2a0a3b4aa - core[efd5e57aef94d71e]::ptr::drop_glue::<gpu_reduce[e185797cdedf2335]::gpu::Buf>
+  13:     0x61b2a0a4fd29 - gpu_reduce[e185797cdedf2335]::run_walk::<f32>
+  14:     0x61b2a0a29795 - <gpu_reduce[e185797cdedf2335]::pass1_adds_exactly_the_one_nonzero_element::{closure#0} as core[efd5e57aef94d71e]::ops::function::FnOnce<()>>::call_once
+  15:     0x61b2a0a4fe8b - test[ff178199d140d5fa]::__rust_begin_short_backtrace::<core[efd5e57aef94d71e]::result::Result<(), alloc[c23e483dde3f7cfb]::string::String>, fn() -> core[efd5e57aef94d71e]::result::Result<(), alloc[c23e483dde3f7cfb]::string::String>>
+  16:     0x61b2a0a5d4f5 - test[ff178199d140d5fa]::run_test::{closure#0}
+  17:     0x61b2a0a568b4 - std[68c81ae915296b05]::sys::backtrace::__rust_begin_short_backtrace::<test[ff178199d140d5fa]::run_test::{closure#1}, ()>
+  18:     0x61b2a0a60652 - <std[68c81ae915296b05]::thread::lifecycle::spawn_unchecked<test[ff178199d140d5fa]::run_test::{closure#1}, ()>::{closure#1} as core[efd5e57aef94d71e]::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}
+  19:     0x61b2a0aceb19 - <std[68c81ae915296b05]::sys::thread::unix::Thread>::new::thread_start
+  20:      0xe776269cb84 - start_thread
+                               at ./nptl/pthread_create.c:447:8
+  21:      0xe7762729ecc - clone3
+                               at ./misc/../sysdeps/unix/sysv/linux/x86_64/clone3.S:78:0
+  22:                0x0 - <unknown>
+
+thread 'pass1_adds_exactly_the_one_nonzero_element' (2781651) panicked at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/panicking.rs:233:5:
+panic in a destructor during cleanup
+thread caused non-unwinding panic. aborting.
+error: test failed, to rerun pass `--test gpu_reduce`
+
+Caused by:
+  process didn't exit successfully: `/home/shinaoka/tensor4all/t4a-cuda-kernels-pass1/target/release/deps/gpu_reduce-652123b6ba646ae6 vector_walk rank_nine_contiguous product_partials pass1_` (signal: 6, SIGABRT: process abort signal)
+error: 2 targets failed:
+    `--test gpu_dynamic_rank`
+    `--test gpu_reduce`
+# exit 101

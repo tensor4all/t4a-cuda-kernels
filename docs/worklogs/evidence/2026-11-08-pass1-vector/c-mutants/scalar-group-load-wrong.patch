@@ -1,0 +1,13 @@
+diff --git a/cuda/src/reduce.cu b/cuda/src/reduce.cu
+index d580701..74db75d 100644
+--- a/cuda/src/reduce.cu
++++ b/cuda/src/reduce.cu
+@@ -346,7 +346,7 @@ __device__ __forceinline__ t4a_cuda_vector<T, V> t4a_cuda_load_group(const T* ch
+     t4a_cuda_vector<T, V> x;
+ #pragma unroll
+     for (int c = 0; c < V; ++c) {
+-      x.lane[c] = chunk[group * V + c];
++      x.lane[c] = chunk[group * V];
+     }
+     return x;
+   }

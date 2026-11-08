@@ -3065,6 +3065,29 @@ fn main() {
             &filter,
         );
     }
+    // The pass-1 streaming cells of the vectorized lane mapping
+    // (docs/design/slice-reduction-pass1-vector.md): 64/128 MiB inputs, where pass 1 is
+    // DRAM-bound rather than L2-resident.
+    for (op, name) in [
+        (ReduceOp::Sum, "sum"),
+        (ReduceOp::Max, "max"),
+        (ReduceOp::Min, "min"),
+    ] {
+        bench_reduce_f32(
+            &format!("reduce-{name}-f32-full-16777216"),
+            &[16_777_216, 1],
+            0,
+            op,
+            &filter,
+        );
+        bench_reduce_f64(
+            &format!("reduce-{name}-f64-full-16777216"),
+            &[16_777_216, 1],
+            0,
+            op,
+            &filter,
+        );
+    }
     bench_reduce_f32(
         "reduce-sumsquares-f32-full-1048576",
         &[1_048_576, 1],

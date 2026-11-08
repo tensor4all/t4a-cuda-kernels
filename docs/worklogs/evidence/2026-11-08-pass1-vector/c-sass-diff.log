@@ -1,0 +1,8 @@
+# commit 65a74d5de849aca37dbbbf778a168224b9c8c034
+# $ scripts/sass-diff.sh 31b734e
+Preparing worktree (detached HEAD 31b734e)
+symbols present in both trees: 94
+identical: 92
+added by this branch: 0
+DIFFERS  reduce.txt: t4a_cuda_reduce_partials -- SASS differs
+DIFFERS  reduce.txt: t4a_cuda_reduce_partials_any -- SASS differs

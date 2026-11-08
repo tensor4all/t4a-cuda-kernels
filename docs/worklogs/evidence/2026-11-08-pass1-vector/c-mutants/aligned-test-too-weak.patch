@@ -1,0 +1,13 @@
+diff --git a/cuda/src/reduce.cu b/cuda/src/reduce.cu
+index d580701..a198f56 100644
+--- a/cuda/src/reduce.cu
++++ b/cuda/src/reduce.cu
+@@ -459,7 +459,7 @@ __device__ __forceinline__ T t4a_cuda_partials_walk(const T* in,
+       const T* chunk = in + in_base + start;
+       // INVARIANT: element pointers are aligned to their dtype (c-kernel-abi.md, "Types");
+       // the 16-byte test only selects the load instruction, never the topology.
+-      if ((reinterpret_cast<unsigned long long>(chunk) & 15ull) == 0) {
++      if ((reinterpret_cast<unsigned long long>(chunk) & 3ull) == 0) {
+         return t4a_cuda_partials_walk_vector<Fold, T, true>(chunk, end - start, plane_width,
+                                                             fold);
+       }

@@ -1,0 +1,325 @@
+# commit 65a74d5de849aca37dbbbf778a168224b9c8c034
+# $ nvcc -std=c++17 -cubin -arch=sm_80 -I cuda/include -Xptxas -v cuda/src/reduce.cu
+ptxas info    : 0 bytes gmem
+ptxas info    : Compiling entry function 't4a_cuda_reduce_partials_any' for 'sm_80'
+ptxas info    : Function properties for t4a_cuda_reduce_partials_any
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 50 registers, used 0 barriers, 472 bytes cmem[0], 56 bytes cmem[2]
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_14SumSquaresFoldEdLb0EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_14SumSquaresFoldEdLb1EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_14SumSquaresFoldEfLb0EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_14SumSquaresFoldEfLb1EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7MaxFoldEdLb0EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7MaxFoldEdLb1EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7MaxFoldEfLb0EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7MaxFoldEfLb1EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7MaxFoldEiLb0EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7MaxFoldEiLb1EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7MaxFoldExLb0EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7MaxFoldExLb1EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7MinFoldEdLb0EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7MinFoldEdLb1EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7MinFoldEfLb0EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7MinFoldEfLb1EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7MinFoldEiLb0EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7MinFoldEiLb1EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7MinFoldExLb0EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7MinFoldExLb1EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7SumFoldEdLb0EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7SumFoldEdLb1EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7SumFoldEfLb0EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7SumFoldEfLb1EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7SumFoldEiLb0EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7SumFoldEiLb1EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7SumFoldExLb0EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7SumFoldExLb1EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Compiling entry function 't4a_cuda_reduce_any' for 'sm_80'
+ptxas info    : Function properties for t4a_cuda_reduce_any
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 43 registers, used 1 barriers, 2496 bytes smem, 464 bytes cmem[0], 56 bytes cmem[2]
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_14SumSquaresFoldEdEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_14SumSquaresFoldEfEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7MaxFoldEdEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7MaxFoldEfEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7MaxFoldEiEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7MaxFoldExEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7MinFoldEdEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7MinFoldEfEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7MinFoldEiEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7MinFoldExEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7SumFoldE12t4a_cuda_c32EET0_S4_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7SumFoldE12t4a_cuda_c64EET0_S4_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7SumFoldEdEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7SumFoldEfEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7SumFoldEiEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7SumFoldExEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_8ProdFoldE12t4a_cuda_c32EET0_S4_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_8ProdFoldE12t4a_cuda_c64EET0_S4_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_8ProdFoldEdEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_8ProdFoldEfEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_8ProdFoldEiEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_8ProdFoldExEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Compiling entry function 't4a_cuda_reduce_partials' for 'sm_80'
+ptxas info    : Function properties for t4a_cuda_reduce_partials
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 50 registers, used 0 barriers, 696 bytes cmem[0], 72 bytes cmem[2]
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_14SumSquaresFoldEdLb0EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_14SumSquaresFoldEdLb1EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_14SumSquaresFoldEfLb0EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_14SumSquaresFoldEfLb1EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7MaxFoldEdLb0EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7MaxFoldEdLb1EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7MaxFoldEfLb0EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7MaxFoldEfLb1EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7MaxFoldEiLb0EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7MaxFoldEiLb1EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7MaxFoldExLb0EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7MaxFoldExLb1EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7MinFoldEdLb0EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7MinFoldEdLb1EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7MinFoldEfLb0EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7MinFoldEfLb1EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7MinFoldEiLb0EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7MinFoldEiLb1EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7MinFoldExLb0EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7MinFoldExLb1EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7SumFoldEdLb0EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7SumFoldEdLb1EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7SumFoldEfLb0EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7SumFoldEfLb1EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7SumFoldEiLb0EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7SumFoldEiLb1EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7SumFoldExLb0EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc29t4a_cuda_partials_walk_vectorINS0_7SumFoldExLb1EEET0_PKS3_xiT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Compiling entry function 't4a_cuda_reduce' for 'sm_80'
+ptxas info    : Function properties for t4a_cuda_reduce
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 1 barriers, 2496 bytes smem, 688 bytes cmem[0], 80 bytes cmem[2]
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_14SumSquaresFoldEdEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_14SumSquaresFoldEfEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7MaxFoldEdEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7MaxFoldEfEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7MaxFoldEiEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7MaxFoldExEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7MinFoldEdEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7MinFoldEfEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7MinFoldEiEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7MinFoldExEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7SumFoldE12t4a_cuda_c32EET0_S4_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7SumFoldE12t4a_cuda_c64EET0_S4_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7SumFoldEdEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7SumFoldEfEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7SumFoldEiEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7SumFoldExEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_8ProdFoldE12t4a_cuda_c32EET0_S4_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_8ProdFoldE12t4a_cuda_c64EET0_S4_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_8ProdFoldEdEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_8ProdFoldEfEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_8ProdFoldEiEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN39_INTERNAL_0ef8be51_9_reduce_cu_e748d5bc41_GLOBAL__N__0ef8be51_9_reduce_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_8ProdFoldExEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+# --- baseline 31b734e
+ptxas info    : 0 bytes gmem
+ptxas info    : Compiling entry function 't4a_cuda_reduce_partials_any' for 'sm_80'
+ptxas info    : Function properties for t4a_cuda_reduce_partials_any
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers, 472 bytes cmem[0], 56 bytes cmem[2]
+ptxas info    : Compiling entry function 't4a_cuda_reduce_any' for 'sm_80'
+ptxas info    : Function properties for t4a_cuda_reduce_any
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 43 registers, used 1 barriers, 2496 bytes smem, 464 bytes cmem[0], 56 bytes cmem[2]
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_14SumSquaresFoldEdEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_14SumSquaresFoldEfEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7MaxFoldEdEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7MaxFoldEfEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7MaxFoldEiEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7MaxFoldExEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7MinFoldEdEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7MinFoldEfEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7MinFoldEiEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7MinFoldExEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7SumFoldE12t4a_cuda_c32EET0_S4_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7SumFoldE12t4a_cuda_c64EET0_S4_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7SumFoldEdEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7SumFoldEfEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7SumFoldEiEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7SumFoldExEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_8ProdFoldE12t4a_cuda_c32EET0_S4_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_8ProdFoldE12t4a_cuda_c64EET0_S4_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_8ProdFoldEdEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_8ProdFoldEfEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_8ProdFoldEiEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_8ProdFoldExEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Compiling entry function 't4a_cuda_reduce_partials' for 'sm_80'
+ptxas info    : Function properties for t4a_cuda_reduce_partials
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 39 registers, used 0 barriers, 696 bytes cmem[0], 72 bytes cmem[2]
+ptxas info    : Compiling entry function 't4a_cuda_reduce' for 'sm_80'
+ptxas info    : Function properties for t4a_cuda_reduce
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 1 barriers, 2496 bytes smem, 688 bytes cmem[0], 80 bytes cmem[2]
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_14SumSquaresFoldEdEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_14SumSquaresFoldEfEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7MaxFoldEdEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7MaxFoldEfEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7MaxFoldEiEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7MaxFoldExEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7MinFoldEdEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7MinFoldEfEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7MinFoldEiEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7MinFoldExEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7SumFoldE12t4a_cuda_c32EET0_S4_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7SumFoldE12t4a_cuda_c64EET0_S4_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7SumFoldEdEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7SumFoldEfEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7SumFoldEiEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_7SumFoldExEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_8ProdFoldE12t4a_cuda_c32EET0_S4_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_8ProdFoldE12t4a_cuda_c64EET0_S4_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_8ProdFoldEdEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_8ProdFoldEfEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_8ProdFoldEiEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN37_INTERNAL_41257651_7_base_cu_e748d5bc39_GLOBAL__N__41257651_7_base_cu_e748d5bc24t4a_cuda_plane_fold_wideINS0_8ProdFoldExEET0_S3_iT_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads

@@ -1,0 +1,86 @@
+# commit 65a74d5de849aca37dbbbf778a168224b9c8c034 + c-mutants/scalar-group-load-wrong.patch
+# $ cargo test -j 4 --release --features gpu-tests --no-fail-fast --test gpu_reduce --test gpu_dynamic_rank -- vector_walk rank_nine_contiguous product_partials pass1_
+   Compiling t4a-cuda-kernels v0.1.1 (/home/shinaoka/tensor4all/t4a-cuda-kernels-pass1)
+    Finished `release` profile [optimized] target(s) in 0.50s
+     Running tests/gpu_dynamic_rank.rs (target/release/deps/gpu_dynamic_rank-22a243ebf3c59b3b)
+
+running 1 test
+test rank_nine_contiguous_split_takes_the_vector_walk_through_the_general_twin ... FAILED
+
+failures:
+
+---- rank_nine_contiguous_split_takes_the_vector_walk_through_the_general_twin stdout ----
+
+thread 'rank_nine_contiguous_split_takes_the_vector_walk_through_the_general_twin' (2781993) panicked at tests/gpu_dynamic_rank.rs:3199:17:
+Sum output 0 partial 0: 2.0336967
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    rank_nine_contiguous_split_takes_the_vector_walk_through_the_general_twin
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 22 filtered out; finished in 8.07s
+
+error: test failed, to rerun pass `--test gpu_dynamic_rank`
+     Running tests/gpu_reduce.rs (target/release/deps/gpu_reduce-652123b6ba646ae6)
+
+running 9 tests
+test vector_walk_keeps_a_negative_zero_sum ... ok
+test pass1_reads_broadcast_and_reversed_axes_inside_their_allocation ... ok
+test pass1_topology_does_not_depend_on_the_input_address ... FAILED
+test pass1_overflow_follows_the_revision_13_grouping ... FAILED
+test product_partials_keep_the_serial_lane_walk_bit_for_bit ... ok
+test pass1_adds_exactly_the_one_nonzero_element ... FAILED
+test pass1_folds_nothing_outside_its_chunk ... FAILED
+test vector_walk_folds_every_element_once_for_every_op_and_dtype ... FAILED
+test vector_walk_propagates_a_nan_from_the_first_group_the_body_and_the_tail ... ok
+
+failures:
+
+---- pass1_topology_does_not_depend_on_the_input_address stdout ----
+
+thread 'pass1_topology_does_not_depend_on_the_input_address' (2782070) panicked at tests/gpu_reduce.rs:2291:9:
+assertion `left == right` failed: lead 1: inf vs NaN at lead 0
+  left: 2139095040
+ right: 2147483647
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- pass1_overflow_follows_the_revision_13_grouping stdout ----
+
+thread 'pass1_overflow_follows_the_revision_13_grouping' (2782068) panicked at tests/gpu_reduce.rs:2593:9:
+assertion `left == right` failed: lead 1: cancelling groups give +0
+  left: 2139095040
+ right: 0
+
+---- pass1_adds_exactly_the_one_nonzero_element stdout ----
+
+thread 'pass1_adds_exactly_the_one_nonzero_element' (2782066) panicked at tests/gpu_reduce.rs:2534:13:
+assertion `left == right` failed: lead 0 position 257: result 4
+  left: 1082130432
+ right: 1065353216
+
+---- pass1_folds_nothing_outside_its_chunk stdout ----
+
+thread 'pass1_folds_nothing_outside_its_chunk' (2782067) panicked at tests/gpu_reduce.rs:2473:21:
+F32 Sum len 512 lead 1 plane 8: -3.8652134
+
+---- vector_walk_folds_every_element_once_for_every_op_and_dtype stdout ----
+
+thread 'vector_walk_folds_every_element_once_for_every_op_and_dtype' (2782072) panicked at tests/gpu_reduce.rs:2084:25:
+F32 Sum len 511 offset 0 plane 8: partial 1 of 7 is -0.6853322
+
+
+failures:
+    pass1_adds_exactly_the_one_nonzero_element
+    pass1_folds_nothing_outside_its_chunk
+    pass1_overflow_follows_the_revision_13_grouping
+    pass1_topology_does_not_depend_on_the_input_address
+    vector_walk_folds_every_element_once_for_every_op_and_dtype
+
+test result: FAILED. 4 passed; 5 failed; 0 ignored; 0 measured; 19 filtered out; finished in 8.27s
+
+error: test failed, to rerun pass `--test gpu_reduce`
+error: 2 targets failed:
+    `--test gpu_dynamic_rank`
+    `--test gpu_reduce`
+# exit 101

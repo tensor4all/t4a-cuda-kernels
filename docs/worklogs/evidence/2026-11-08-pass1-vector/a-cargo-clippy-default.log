@@ -1,0 +1,4 @@
+# commit 65a74d5de849aca37dbbbf778a168224b9c8c034
+# $ cargo clippy -j 4 --all-targets -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.07s
+# exit 0

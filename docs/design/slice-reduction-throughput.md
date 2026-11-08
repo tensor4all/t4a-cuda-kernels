@@ -349,7 +349,8 @@ pass 1 keeps the narrow-only fold, only `t4a_cuda_reduce`/`_any` can widen — r
 - **Pass-1 streaming is unchanged** and is now the largest remaining term for full
   reductions: by the issue's own accounting, 16M still costs ~112 us of pass-1 streaming for
   `max`, which this change does not touch. It needs the vectorized lane-to-element mapping
-  of §8, a slice of its own.
+  of §8, a slice of its own. Delivered by
+  [slice-reduction-pass1-vector.md](slice-reduction-pass1-vector.md).
 - `MAX_SPLITS` stays 4096: with mechanism 1 in place the combine no longer scales with
   `splits`, so re-tuning it bought nothing measurable and is not part of this change.
 - The per-call floor (~28 us) and the split workspace's zero fill (~9 us) remain

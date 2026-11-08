@@ -1,0 +1,1452 @@
+# commit 65a74d5de849aca37dbbbf778a168224b9c8c034
+# $ cargo clippy -j 4 --keep-going --all-targets --features gpu-tests -- -D warnings
+    Checking t4a-cuda-kernels v0.1.1 (/home/shinaoka/tensor4all/t4a-cuda-kernels-pass1)
+error: manual implementation of an assign operation
+   --> tests/gpu_fusion.rs:576:21
+    |
+576 |                       a = a * half;
+    |                       ^^^^^^^^^^^^ help: replace it with: `a *= half`
+...
+613 | / complex_division!(
+614 | |     cdiv32,
+615 | |     f32,
+616 | |     f32::MAX,
+...   |
+619 | |     f32::from_bits(0x7fc0_0000)
+620 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: `-D clippy::assign-op-pattern` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::assign_op_pattern)]`
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_fusion.rs:577:21
+    |
+577 |                       b = b * half;
+    |                       ^^^^^^^^^^^^ help: replace it with: `b *= half`
+...
+613 | / complex_division!(
+614 | |     cdiv32,
+615 | |     f32,
+616 | |     f32::MAX,
+...   |
+619 | |     f32::from_bits(0x7fc0_0000)
+620 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_fusion.rs:578:21
+    |
+578 |                       scale = scale * two;
+    |                       ^^^^^^^^^^^^^^^^^^^ help: replace it with: `scale *= two`
+...
+613 | / complex_division!(
+614 | |     cdiv32,
+615 | |     f32,
+616 | |     f32::MAX,
+...   |
+619 | |     f32::from_bits(0x7fc0_0000)
+620 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_fusion.rs:580:21
+    |
+580 |                       a = a * big;
+    |                       ^^^^^^^^^^^ help: replace it with: `a *= big`
+...
+613 | / complex_division!(
+614 | |     cdiv32,
+615 | |     f32,
+616 | |     f32::MAX,
+...   |
+619 | |     f32::from_bits(0x7fc0_0000)
+620 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_fusion.rs:581:21
+    |
+581 |                       b = b * big;
+    |                       ^^^^^^^^^^^ help: replace it with: `b *= big`
+...
+613 | / complex_division!(
+614 | |     cdiv32,
+615 | |     f32,
+616 | |     f32::MAX,
+...   |
+619 | |     f32::from_bits(0x7fc0_0000)
+620 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_fusion.rs:582:21
+    |
+582 |                       scale = scale / big;
+    |                       ^^^^^^^^^^^^^^^^^^^ help: replace it with: `scale /= big`
+...
+613 | / complex_division!(
+614 | |     cdiv32,
+615 | |     f32,
+616 | |     f32::MAX,
+...   |
+619 | |     f32::from_bits(0x7fc0_0000)
+620 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_fusion.rs:585:21
+    |
+585 |                       c = c * half;
+    |                       ^^^^^^^^^^^^ help: replace it with: `c *= half`
+...
+613 | / complex_division!(
+614 | |     cdiv32,
+615 | |     f32,
+616 | |     f32::MAX,
+...   |
+619 | |     f32::from_bits(0x7fc0_0000)
+620 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_fusion.rs:586:21
+    |
+586 |                       d = d * half;
+    |                       ^^^^^^^^^^^^ help: replace it with: `d *= half`
+...
+613 | / complex_division!(
+614 | |     cdiv32,
+615 | |     f32,
+616 | |     f32::MAX,
+...   |
+619 | |     f32::from_bits(0x7fc0_0000)
+620 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_fusion.rs:587:21
+    |
+587 |                       scale = scale * half;
+    |                       ^^^^^^^^^^^^^^^^^^^^ help: replace it with: `scale *= half`
+...
+613 | / complex_division!(
+614 | |     cdiv32,
+615 | |     f32,
+616 | |     f32::MAX,
+...   |
+619 | |     f32::from_bits(0x7fc0_0000)
+620 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_fusion.rs:589:21
+    |
+589 |                       c = c * big;
+    |                       ^^^^^^^^^^^ help: replace it with: `c *= big`
+...
+613 | / complex_division!(
+614 | |     cdiv32,
+615 | |     f32,
+616 | |     f32::MAX,
+...   |
+619 | |     f32::from_bits(0x7fc0_0000)
+620 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_fusion.rs:590:21
+    |
+590 |                       d = d * big;
+    |                       ^^^^^^^^^^^ help: replace it with: `d *= big`
+...
+613 | / complex_division!(
+614 | |     cdiv32,
+615 | |     f32,
+616 | |     f32::MAX,
+...   |
+619 | |     f32::from_bits(0x7fc0_0000)
+620 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_fusion.rs:591:21
+    |
+591 |                       scale = scale * big;
+    |                       ^^^^^^^^^^^^^^^^^^^ help: replace it with: `scale *= big`
+...
+613 | / complex_division!(
+614 | |     cdiv32,
+615 | |     f32,
+616 | |     f32::MAX,
+...   |
+619 | |     f32::from_bits(0x7fc0_0000)
+620 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_fusion.rs:576:21
+    |
+576 |                       a = a * half;
+    |                       ^^^^^^^^^^^^ help: replace it with: `a *= half`
+...
+621 | / complex_division!(
+622 | |     cdiv64,
+623 | |     f64,
+624 | |     f64::MAX,
+...   |
+627 | |     f64::from_bits(0x7ff8_0000_0000_0000)
+628 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_fusion.rs:577:21
+    |
+577 |                       b = b * half;
+    |                       ^^^^^^^^^^^^ help: replace it with: `b *= half`
+...
+621 | / complex_division!(
+622 | |     cdiv64,
+623 | |     f64,
+624 | |     f64::MAX,
+...   |
+627 | |     f64::from_bits(0x7ff8_0000_0000_0000)
+628 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_fusion.rs:578:21
+    |
+578 |                       scale = scale * two;
+    |                       ^^^^^^^^^^^^^^^^^^^ help: replace it with: `scale *= two`
+...
+621 | / complex_division!(
+622 | |     cdiv64,
+623 | |     f64,
+624 | |     f64::MAX,
+...   |
+627 | |     f64::from_bits(0x7ff8_0000_0000_0000)
+628 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_fusion.rs:580:21
+    |
+580 |                       a = a * big;
+    |                       ^^^^^^^^^^^ help: replace it with: `a *= big`
+...
+621 | / complex_division!(
+622 | |     cdiv64,
+623 | |     f64,
+624 | |     f64::MAX,
+...   |
+627 | |     f64::from_bits(0x7ff8_0000_0000_0000)
+628 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_fusion.rs:581:21
+    |
+581 |                       b = b * big;
+    |                       ^^^^^^^^^^^ help: replace it with: `b *= big`
+...
+621 | / complex_division!(
+622 | |     cdiv64,
+623 | |     f64,
+624 | |     f64::MAX,
+...   |
+627 | |     f64::from_bits(0x7ff8_0000_0000_0000)
+628 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_fusion.rs:582:21
+    |
+582 |                       scale = scale / big;
+    |                       ^^^^^^^^^^^^^^^^^^^ help: replace it with: `scale /= big`
+...
+621 | / complex_division!(
+622 | |     cdiv64,
+623 | |     f64,
+624 | |     f64::MAX,
+...   |
+627 | |     f64::from_bits(0x7ff8_0000_0000_0000)
+628 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_fusion.rs:585:21
+    |
+585 |                       c = c * half;
+    |                       ^^^^^^^^^^^^ help: replace it with: `c *= half`
+...
+621 | / complex_division!(
+622 | |     cdiv64,
+623 | |     f64,
+624 | |     f64::MAX,
+...   |
+627 | |     f64::from_bits(0x7ff8_0000_0000_0000)
+628 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_fusion.rs:586:21
+    |
+586 |                       d = d * half;
+    |                       ^^^^^^^^^^^^ help: replace it with: `d *= half`
+...
+621 | / complex_division!(
+622 | |     cdiv64,
+623 | |     f64,
+624 | |     f64::MAX,
+...   |
+627 | |     f64::from_bits(0x7ff8_0000_0000_0000)
+628 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_fusion.rs:587:21
+    |
+587 |                       scale = scale * half;
+    |                       ^^^^^^^^^^^^^^^^^^^^ help: replace it with: `scale *= half`
+...
+621 | / complex_division!(
+622 | |     cdiv64,
+623 | |     f64,
+624 | |     f64::MAX,
+...   |
+627 | |     f64::from_bits(0x7ff8_0000_0000_0000)
+628 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_fusion.rs:589:21
+    |
+589 |                       c = c * big;
+    |                       ^^^^^^^^^^^ help: replace it with: `c *= big`
+...
+621 | / complex_division!(
+622 | |     cdiv64,
+623 | |     f64,
+624 | |     f64::MAX,
+...   |
+627 | |     f64::from_bits(0x7ff8_0000_0000_0000)
+628 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_fusion.rs:590:21
+    |
+590 |                       d = d * big;
+    |                       ^^^^^^^^^^^ help: replace it with: `d *= big`
+...
+621 | / complex_division!(
+622 | |     cdiv64,
+623 | |     f64,
+624 | |     f64::MAX,
+...   |
+627 | |     f64::from_bits(0x7ff8_0000_0000_0000)
+628 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_fusion.rs:591:21
+    |
+591 |                       scale = scale * big;
+    |                       ^^^^^^^^^^^^^^^^^^^ help: replace it with: `scale *= big`
+...
+621 | / complex_division!(
+622 | |     cdiv64,
+623 | |     f64,
+624 | |     f64::MAX,
+...   |
+627 | |     f64::from_bits(0x7ff8_0000_0000_0000)
+628 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: the borrowed expression implements the required traits
+    --> tests/gpu_fusion.rs:1549:31
+     |
+1549 |         compile_ptx_with_opts(&emitted.source(), options()).unwrap_or_else(|error| {
+     |                               ^^^^^^^^^^^^^^^^^ help: change this to: `emitted.source()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#needless_borrows_for_generic_args
+     = note: `-D clippy::needless-borrows-for-generic-args` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::needless_borrows_for_generic_args)]`
+
+error: useless use of `vec!`
+    --> tests/gpu_fusion.rs:1342:32
+     |
+1342 |     let mid = written(session, &vec![SENTINEL; 4 + GUARD]);
+     |                                ^^^^^^^^^^^^^^^^^^^^^^^^^^ help: you can use a slice directly: `&[SENTINEL; 4 + GUARD]`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#useless_vec
+     = note: `-D clippy::useless-vec` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::useless_vec)]`
+
+error: useless use of `vec!`
+    --> tests/gpu_fusion.rs:1343:32
+     |
+1343 |     let out = written(session, &vec![SENTINEL; 4 + GUARD]);
+     |                                ^^^^^^^^^^^^^^^^^^^^^^^^^^ help: you can use a slice directly: `&[SENTINEL; 4 + GUARD]`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#useless_vec
+
+error: could not compile `t4a-cuda-kernels` (test "gpu_fusion") due to 27 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: the loop variable `axis` is used to index `extents`
+   --> tests/gpu_rrqr.rs:246:25
+    |
+246 |             for axis in 0..extents.len() {
+    |                         ^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#needless_range_loop
+    = note: `-D clippy::needless-range-loop` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::needless_range_loop)]`
+help: consider using an iterator and enumerate()
+    |
+246 -             for axis in 0..extents.len() {
+246 +             for (axis, <item>) in extents.iter().enumerate() {
+    |
+
+error: this function has too many arguments (8/7)
+   --> tests/gpu_rrqr.rs:536:1
+    |
+536 | / fn swap_columns_bytes(
+537 | |     session: &Session,
+538 | |     dtype: DType,
+539 | |     work_layout: &Layout,
+...   |
+544 | |     step: i64,
+545 | | ) -> (Vec<u8>, Vec<u8>) {
+    | |_______________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#too_many_arguments
+    = note: `-D clippy::too-many-arguments` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::too_many_arguments)]`
+
+error: this function has too many arguments (8/7)
+    --> tests/gpu_rrqr.rs:1820:1
+     |
+1820 | / fn prefix_rank_case<E: El>(
+1821 | |     session: &Session,
+1822 | |     dtype: DType,
+1823 | |     k: i64,
+...    |
+1828 | |     atol: f64,
+1829 | | ) -> (Vec<i64>, Vec<i64>) {
+     | |_________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#too_many_arguments
+
+error: this function has too many arguments (8/7)
+    --> tests/gpu_rrqr.rs:1835:1
+     |
+1835 | / fn prefix_rank_pairs_case<E: El>(
+1836 | |     session: &Session,
+1837 | |     dtype: DType,
+1838 | |     k: i64,
+...    |
+1843 | |     atol: f64,
+1844 | | ) -> (Vec<i64>, Vec<i64>) {
+     | |_________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#too_many_arguments
+
+error: could not compile `t4a-cuda-kernels` (test "gpu_rrqr") due to 4 previous errors
+error: the loop variable `axis` is used to index `extents`
+   --> tests/gpu_linalg_aux.rs:193:25
+    |
+193 |             for axis in 0..extents.len() {
+    |                         ^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#needless_range_loop
+    = note: `-D clippy::needless-range-loop` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::needless_range_loop)]`
+help: consider using an iterator and enumerate()
+    |
+193 -             for axis in 0..extents.len() {
+193 +             for (axis, <item>) in extents.iter().enumerate() {
+    |
+
+error: this function has too many arguments (8/7)
+   --> tests/gpu_linalg_aux.rs:664:1
+    |
+664 | / fn apply_pivots_bytes(
+665 | |     session: &Session,
+666 | |     dtype: DType,
+667 | |     out_layout: &Layout,
+...   |
+672 | |     inverse: bool,
+673 | | ) -> Vec<u8> {
+    | |____________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#too_many_arguments
+    = note: `-D clippy::too-many-arguments` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::too_many_arguments)]`
+
+error: the loop variable `batch` is only used to index `diagonals`
+    --> tests/gpu_linalg_aux.rs:1364:18
+     |
+1364 |     for batch in 0..2 {
+     |                  ^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#needless_range_loop
+help: consider using an iterator
+     |
+1364 -     for batch in 0..2 {
+1364 +     for <item> in &diagonals {
+     |
+
+error: the loop variable `index` is only used to index `diagonals`
+    --> tests/gpu_linalg_aux.rs:1365:22
+     |
+1365 |         for index in 0..7 {
+     |                      ^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#needless_range_loop
+help: consider using an iterator
+     |
+1365 -         for index in 0..7 {
+1365 +         for <item> in &diagonals {
+     |
+
+error: this operation has no effect
+    --> tests/gpu_linalg_aux.rs:1905:18
+     |
+1905 |     expected[4 + 6 * 1] = 1;
+     |                  ^^^^^ help: consider reducing it to: `6`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#identity_op
+     = note: `-D clippy::identity-op` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::identity_op)]`
+
+error: this operation has no effect
+    --> tests/gpu_linalg_aux.rs:1920:18
+     |
+1920 |     expected[3 + 4 * 1] = 1;
+     |                  ^^^^^ help: consider reducing it to: `4`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#identity_op
+
+error: this operation has no effect
+    --> tests/gpu_linalg_aux.rs:1936:18
+     |
+1936 |     expected[3 + 5 * 1] = 1;
+     |                  ^^^^^ help: consider reducing it to: `5`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#identity_op
+
+error: this operation has no effect
+    --> tests/gpu_linalg_aux.rs:1953:14
+     |
+1953 |     expected[2 + 4 * 0] = 1;
+     |              ^^^^^^^^^ help: consider reducing it to: `2`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#identity_op
+
+error: this operation will always return zero. This is likely not the intended outcome
+    --> tests/gpu_linalg_aux.rs:1953:18
+     |
+1953 |     expected[2 + 4 * 0] = 1;
+     |                  ^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#erasing_op
+     = note: `#[deny(clippy::erasing_op)]` on by default
+
+error: this operation has no effect
+    --> tests/gpu_linalg_aux.rs:1969:14
+     |
+1969 |     expected[3 + 5 * 0] = 1;
+     |              ^^^^^^^^^ help: consider reducing it to: `3`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#identity_op
+
+error: this operation will always return zero. This is likely not the intended outcome
+    --> tests/gpu_linalg_aux.rs:1969:18
+     |
+1969 |     expected[3 + 5 * 0] = 1;
+     |                  ^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#erasing_op
+
+error: this operation has no effect
+    --> tests/gpu_linalg_aux.rs:1994:14
+     |
+1994 |     expected[(5 + 9 * 0) as usize] = 1;
+     |              ^^^^^^^^^^^ help: consider reducing it to: `5`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#identity_op
+
+error: this operation will always return zero. This is likely not the intended outcome
+    --> tests/gpu_linalg_aux.rs:1994:19
+     |
+1994 |     expected[(5 + 9 * 0) as usize] = 1;
+     |                   ^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#erasing_op
+
+error: casting to the same type is unnecessary (`i32` -> `i32`)
+    --> tests/gpu_linalg_aux.rs:2441:48
+     |
+2441 |     let pivots: Vec<i32> = (0..40).map(|index| ((index * 7) % 20 + 1) as i32).collect();
+     |                                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `((index * 7) % 20 + 1)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#unnecessary_cast
+     = note: `-D clippy::unnecessary-cast` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::unnecessary_cast)]`
+
+error: casting to the same type is unnecessary (`i32` -> `i32`)
+    --> tests/gpu_linalg_aux.rs:2603:22
+     |
+2603 |         .map(|index| ((index * 11) % 20 + 1) as i32)
+     |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `((index * 11) % 20 + 1)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#unnecessary_cast
+
+error: could not compile `t4a-cuda-kernels` (test "gpu_linalg_aux") due to 15 previous errors
+error: this expression creates a reference which is immediately dereferenced by the compiler
+   --> tests/gpu_dynamic_rank.rs:222:22
+    |
+222 |     let src = source(&session, in_count);
+    |                      ^^^^^^^^ help: change this to: `session`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#needless_borrow
+    = note: `-D clippy::needless-borrow` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::needless_borrow)]`
+
+error: this expression creates a reference which is immediately dereferenced by the compiler
+   --> tests/gpu_dynamic_rank.rs:245:29
+    |
+245 |     let starts_buf = upload(&session, &starts);
+    |                             ^^^^^^^^ help: change this to: `session`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#needless_borrow
+
+error: this expression creates a reference which is immediately dereferenced by the compiler
+   --> tests/gpu_dynamic_rank.rs:246:28
+    |
+246 |     let steps_buf = upload(&session, &steps);
+    |                            ^^^^^^^^ help: change this to: `session`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#needless_borrow
+
+error: this expression creates a reference which is immediately dereferenced by the compiler
+   --> tests/gpu_dynamic_rank.rs:247:30
+    |
+247 |     let extents_buf = upload(&session, &out_extents);
+    |                              ^^^^^^^^ help: change this to: `session`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#needless_borrow
+
+error: this expression creates a reference which is immediately dereferenced by the compiler
+   --> tests/gpu_dynamic_rank.rs:248:30
+    |
+248 |     let strides_buf = upload(&session, out_layout.strides());
+    |                              ^^^^^^^^ help: change this to: `session`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#needless_borrow
+
+error: this expression creates a reference which is immediately dereferenced by the compiler
+   --> tests/gpu_dynamic_rank.rs:249:33
+    |
+249 |     let in_extents_buf = upload(&session, &extents);
+    |                                 ^^^^^^^^ help: change this to: `session`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#needless_borrow
+
+error: this expression creates a reference which is immediately dereferenced by the compiler
+   --> tests/gpu_dynamic_rank.rs:250:33
+    |
+250 |     let in_strides_buf = upload(&session, in_layout.strides());
+    |                                 ^^^^^^^^ help: change this to: `session`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#needless_borrow
+
+error: this expression creates a reference which is immediately dereferenced by the compiler
+   --> tests/gpu_dynamic_rank.rs:266:27
+    |
+266 |     let dst = destination(&session, out_count);
+    |                           ^^^^^^^^ help: change this to: `session`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#needless_borrow
+
+error: this expression creates a reference which is immediately dereferenced by the compiler
+   --> tests/gpu_dynamic_rank.rs:310:25
+    |
+310 |         download::<f64>(&session, &dst, out_count as usize),
+    |                         ^^^^^^^^ help: change this to: `session`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#needless_borrow
+
+error: this expression creates a reference which is immediately dereferenced by the compiler
+   --> tests/gpu_dynamic_rank.rs:327:22
+    |
+327 |     let src = source(&session, in_count);
+    |                      ^^^^^^^^ help: change this to: `session`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#needless_borrow
+
+error: this expression creates a reference which is immediately dereferenced by the compiler
+   --> tests/gpu_dynamic_rank.rs:343:34
+    |
+343 |     let out_extents_buf = upload(&session, out_layout.extents());
+    |                                  ^^^^^^^^ help: change this to: `session`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#needless_borrow
+
+error: this expression creates a reference which is immediately dereferenced by the compiler
+   --> tests/gpu_dynamic_rank.rs:344:34
+    |
+344 |     let out_strides_buf = upload(&session, out_layout.strides());
+    |                                  ^^^^^^^^ help: change this to: `session`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#needless_borrow
+
+error: this expression creates a reference which is immediately dereferenced by the compiler
+   --> tests/gpu_dynamic_rank.rs:345:33
+    |
+345 |     let in_extents_buf = upload(&session, in_layout.extents());
+    |                                 ^^^^^^^^ help: change this to: `session`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#needless_borrow
+
+error: this expression creates a reference which is immediately dereferenced by the compiler
+   --> tests/gpu_dynamic_rank.rs:346:33
+    |
+346 |     let in_strides_buf = upload(&session, in_layout.strides());
+    |                                 ^^^^^^^^ help: change this to: `session`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#needless_borrow
+
+error: this expression creates a reference which is immediately dereferenced by the compiler
+   --> tests/gpu_dynamic_rank.rs:360:27
+    |
+360 |     let dst = destination(&session, out_count);
+    |                           ^^^^^^^^ help: change this to: `session`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#needless_borrow
+
+error: this expression creates a reference which is immediately dereferenced by the compiler
+   --> tests/gpu_dynamic_rank.rs:409:25
+    |
+409 |         download::<f64>(&session, &dst, out_count as usize),
+    |                         ^^^^^^^^ help: change this to: `session`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#needless_borrow
+
+error: the loop variable `axis` is used to index `strides`
+    --> tests/gpu_dynamic_rank.rs:2569:29
+     |
+2569 |                 for axis in 0..rank {
+     |                             ^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#needless_range_loop
+     = note: `-D clippy::needless-range-loop` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::needless_range_loop)]`
+help: consider using an iterator and enumerate()
+     |
+2569 -                 for axis in 0..rank {
+2569 +                 for (axis, <item>) in strides.iter().enumerate().take(rank) {
+     |
+
+error: the loop variable `flat` is used to index `expected`
+    --> tests/gpu_dynamic_rank.rs:2706:25
+     |
+2706 |             for flat in 0..out_count as usize {
+     |                         ^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#needless_range_loop
+help: consider using an iterator and enumerate()
+     |
+2706 -             for flat in 0..out_count as usize {
+2706 +             for (flat, <item>) in expected.iter_mut().enumerate().take(out_count as usize) {
+     |
+
+error: the loop variable `flat` is used to index `expected`
+    --> tests/gpu_dynamic_rank.rs:2841:21
+     |
+2841 |         for flat in 0..norms_count as usize {
+     |                     ^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#needless_range_loop
+help: consider using an iterator and enumerate()
+     |
+2841 -         for flat in 0..norms_count as usize {
+2841 +         for (flat, <item>) in expected.iter_mut().enumerate().take(norms_count as usize) {
+     |
+
+error: the loop variable `index` is used to index `in_strides`
+    --> tests/gpu_dynamic_rank.rs:3019:26
+     |
+3019 |             for index in 0..rank {
+     |                          ^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#needless_range_loop
+help: consider using an iterator and enumerate()
+     |
+3019 -             for index in 0..rank {
+3019 +             for (index, <item>) in in_strides.iter().enumerate().take(rank) {
+     |
+
+error: could not compile `t4a-cuda-kernels` (test "gpu_dynamic_rank") due to 20 previous errors
+error: unused import: `download`
+  --> tests/gpu_remaining_families.rs:10:11
+   |
+10 | use gpu::{download, launch, read_bytes, upload, written, Buf, Session, Slot};
+   |           ^^^^^^^^
+   |
+   = note: `-D unused-imports` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(unused_imports)]`
+
+error: unused variable: `out_strides`
+   --> tests/gpu_remaining_families.rs:244:9
+    |
+244 |     let out_strides = out.strides().to_vec();
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_out_strides`
+    |
+    = note: `-D unused-variables` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(unused_variables)]`
+
+error: variable does not need to be mutable
+   --> tests/gpu_remaining_families.rs:447:13
+    |
+447 |         let mut write = |offset: i64, base: i64, image: &mut Vec<u8>| {
+    |             ----^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `-D unused-mut` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(unused_mut)]`
+
+error: casting to the same type is unnecessary (`i64` -> `i64`)
+   --> tests/gpu_remaining_families.rs:115:59
+    |
+115 |             let values: Vec<i64> = (0..count).map(|index| (base + index) as i64 - 7).collect();
+    |                                                           ^^^^^^^^^^^^^^^^^^^^^ help: try: `(base + index)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#unnecessary_cast
+    = note: `-D clippy::unnecessary-cast` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::unnecessary_cast)]`
+
+error: casting to the same type is unnecessary (`i64` -> `i64`)
+   --> tests/gpu_remaining_families.rs:156:24
+    |
+156 |         DType::I64 => (index as i64 - 7).to_le_bytes().to_vec(),
+    |                        ^^^^^^^^^^^^ help: try: `index`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#unnecessary_cast
+
+error: this function has too many arguments (10/7)
+   --> tests/gpu_remaining_families.rs:374:1
+    |
+374 | / fn concatenate(
+375 | |     session: &Session,
+376 | |     general: bool,
+377 | |     dtype: DType,
+...   |
+384 | |     source: &Buf,
+385 | | ) {
+    | |_^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#too_many_arguments
+    = note: `-D clippy::too-many-arguments` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::too_many_arguments)]`
+
+error: casting to the same type is unnecessary (`i64` -> `i64`)
+   --> tests/gpu_remaining_families.rs:701:29
+    |
+701 |                 let index = (coordinate0 + coordinate1 * 5) as i64;
+    |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `(coordinate0 + coordinate1 * 5)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#unnecessary_cast
+
+error: this function has too many arguments (8/7)
+   --> tests/gpu_remaining_families.rs:714:1
+    |
+714 | / fn broadcast_source_capacity(
+715 | |     session: &Session,
+716 | |     general: bool,
+717 | |     dtype: DType,
+...   |
+722 | |     in_capacity: i64,
+723 | | ) -> (Buf, usize) {
+    | |_________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#too_many_arguments
+
+error: useless use of `vec!`
+   --> tests/gpu_remaining_families.rs:533:31
+    |
+533 |         let mut coordinates = vec![0i64; 3];
+    |                               ^^^^^^^^^^^^^ help: you can use an array directly: `[0i64; 3]`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#useless_vec
+    = note: `-D clippy::useless-vec` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::useless_vec)]`
+
+error: useless use of `vec!`
+   --> tests/gpu_remaining_families.rs:925:40
+    |
+925 |         let status = written(&session, &vec![0u8; 4]);
+    |                                        ^^^^^^^^^^^^^ help: you can use a slice directly: `&[0u8; 4]`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#useless_vec
+
+error: could not compile `t4a-cuda-kernels` (test "gpu_remaining_families") due to 10 previous errors
+error: this expression creates a reference which is immediately dereferenced by the compiler
+    --> examples/bench_kernels.rs:1194:26
+     |
+1194 |     let in_len = product(&in_extents);
+     |                          ^^^^^^^^^^^ help: change this to: `in_extents`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#needless_borrow
+     = note: `-D clippy::needless-borrow` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::needless_borrow)]`
+
+error: could not compile `t4a-cuda-kernels` (example "bench_kernels") due to 1 previous error
+error: manual implementation of an assign operation
+   --> tests/gpu_elementwise.rs:599:21
+    |
+599 |                       a = a * half;
+    |                       ^^^^^^^^^^^^ help: replace it with: `a *= half`
+...
+636 | / complex_division!(
+637 | |     cdiv32,
+638 | |     f32,
+639 | |     f32::MAX,
+...   |
+642 | |     f32::from_bits(0x7fc0_0000)
+643 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: `-D clippy::assign-op-pattern` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::assign_op_pattern)]`
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_elementwise.rs:600:21
+    |
+600 |                       b = b * half;
+    |                       ^^^^^^^^^^^^ help: replace it with: `b *= half`
+...
+636 | / complex_division!(
+637 | |     cdiv32,
+638 | |     f32,
+639 | |     f32::MAX,
+...   |
+642 | |     f32::from_bits(0x7fc0_0000)
+643 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_elementwise.rs:601:21
+    |
+601 |                       scale = scale * two;
+    |                       ^^^^^^^^^^^^^^^^^^^ help: replace it with: `scale *= two`
+...
+636 | / complex_division!(
+637 | |     cdiv32,
+638 | |     f32,
+639 | |     f32::MAX,
+...   |
+642 | |     f32::from_bits(0x7fc0_0000)
+643 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_elementwise.rs:603:21
+    |
+603 |                       a = a * big;
+    |                       ^^^^^^^^^^^ help: replace it with: `a *= big`
+...
+636 | / complex_division!(
+637 | |     cdiv32,
+638 | |     f32,
+639 | |     f32::MAX,
+...   |
+642 | |     f32::from_bits(0x7fc0_0000)
+643 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_elementwise.rs:604:21
+    |
+604 |                       b = b * big;
+    |                       ^^^^^^^^^^^ help: replace it with: `b *= big`
+...
+636 | / complex_division!(
+637 | |     cdiv32,
+638 | |     f32,
+639 | |     f32::MAX,
+...   |
+642 | |     f32::from_bits(0x7fc0_0000)
+643 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_elementwise.rs:605:21
+    |
+605 |                       scale = scale / big;
+    |                       ^^^^^^^^^^^^^^^^^^^ help: replace it with: `scale /= big`
+...
+636 | / complex_division!(
+637 | |     cdiv32,
+638 | |     f32,
+639 | |     f32::MAX,
+...   |
+642 | |     f32::from_bits(0x7fc0_0000)
+643 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_elementwise.rs:608:21
+    |
+608 |                       c = c * half;
+    |                       ^^^^^^^^^^^^ help: replace it with: `c *= half`
+...
+636 | / complex_division!(
+637 | |     cdiv32,
+638 | |     f32,
+639 | |     f32::MAX,
+...   |
+642 | |     f32::from_bits(0x7fc0_0000)
+643 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_elementwise.rs:609:21
+    |
+609 |                       d = d * half;
+    |                       ^^^^^^^^^^^^ help: replace it with: `d *= half`
+...
+636 | / complex_division!(
+637 | |     cdiv32,
+638 | |     f32,
+639 | |     f32::MAX,
+...   |
+642 | |     f32::from_bits(0x7fc0_0000)
+643 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_elementwise.rs:610:21
+    |
+610 |                       scale = scale * half;
+    |                       ^^^^^^^^^^^^^^^^^^^^ help: replace it with: `scale *= half`
+...
+636 | / complex_division!(
+637 | |     cdiv32,
+638 | |     f32,
+639 | |     f32::MAX,
+...   |
+642 | |     f32::from_bits(0x7fc0_0000)
+643 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_elementwise.rs:612:21
+    |
+612 |                       c = c * big;
+    |                       ^^^^^^^^^^^ help: replace it with: `c *= big`
+...
+636 | / complex_division!(
+637 | |     cdiv32,
+638 | |     f32,
+639 | |     f32::MAX,
+...   |
+642 | |     f32::from_bits(0x7fc0_0000)
+643 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_elementwise.rs:613:21
+    |
+613 |                       d = d * big;
+    |                       ^^^^^^^^^^^ help: replace it with: `d *= big`
+...
+636 | / complex_division!(
+637 | |     cdiv32,
+638 | |     f32,
+639 | |     f32::MAX,
+...   |
+642 | |     f32::from_bits(0x7fc0_0000)
+643 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_elementwise.rs:614:21
+    |
+614 |                       scale = scale * big;
+    |                       ^^^^^^^^^^^^^^^^^^^ help: replace it with: `scale *= big`
+...
+636 | / complex_division!(
+637 | |     cdiv32,
+638 | |     f32,
+639 | |     f32::MAX,
+...   |
+642 | |     f32::from_bits(0x7fc0_0000)
+643 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_elementwise.rs:599:21
+    |
+599 |                       a = a * half;
+    |                       ^^^^^^^^^^^^ help: replace it with: `a *= half`
+...
+644 | / complex_division!(
+645 | |     cdiv64,
+646 | |     f64,
+647 | |     f64::MAX,
+...   |
+650 | |     f64::from_bits(0x7ff8_0000_0000_0000)
+651 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_elementwise.rs:600:21
+    |
+600 |                       b = b * half;
+    |                       ^^^^^^^^^^^^ help: replace it with: `b *= half`
+...
+644 | / complex_division!(
+645 | |     cdiv64,
+646 | |     f64,
+647 | |     f64::MAX,
+...   |
+650 | |     f64::from_bits(0x7ff8_0000_0000_0000)
+651 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_elementwise.rs:601:21
+    |
+601 |                       scale = scale * two;
+    |                       ^^^^^^^^^^^^^^^^^^^ help: replace it with: `scale *= two`
+...
+644 | / complex_division!(
+645 | |     cdiv64,
+646 | |     f64,
+647 | |     f64::MAX,
+...   |
+650 | |     f64::from_bits(0x7ff8_0000_0000_0000)
+651 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_elementwise.rs:603:21
+    |
+603 |                       a = a * big;
+    |                       ^^^^^^^^^^^ help: replace it with: `a *= big`
+...
+644 | / complex_division!(
+645 | |     cdiv64,
+646 | |     f64,
+647 | |     f64::MAX,
+...   |
+650 | |     f64::from_bits(0x7ff8_0000_0000_0000)
+651 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_elementwise.rs:604:21
+    |
+604 |                       b = b * big;
+    |                       ^^^^^^^^^^^ help: replace it with: `b *= big`
+...
+644 | / complex_division!(
+645 | |     cdiv64,
+646 | |     f64,
+647 | |     f64::MAX,
+...   |
+650 | |     f64::from_bits(0x7ff8_0000_0000_0000)
+651 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_elementwise.rs:605:21
+    |
+605 |                       scale = scale / big;
+    |                       ^^^^^^^^^^^^^^^^^^^ help: replace it with: `scale /= big`
+...
+644 | / complex_division!(
+645 | |     cdiv64,
+646 | |     f64,
+647 | |     f64::MAX,
+...   |
+650 | |     f64::from_bits(0x7ff8_0000_0000_0000)
+651 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_elementwise.rs:608:21
+    |
+608 |                       c = c * half;
+    |                       ^^^^^^^^^^^^ help: replace it with: `c *= half`
+...
+644 | / complex_division!(
+645 | |     cdiv64,
+646 | |     f64,
+647 | |     f64::MAX,
+...   |
+650 | |     f64::from_bits(0x7ff8_0000_0000_0000)
+651 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_elementwise.rs:609:21
+    |
+609 |                       d = d * half;
+    |                       ^^^^^^^^^^^^ help: replace it with: `d *= half`
+...
+644 | / complex_division!(
+645 | |     cdiv64,
+646 | |     f64,
+647 | |     f64::MAX,
+...   |
+650 | |     f64::from_bits(0x7ff8_0000_0000_0000)
+651 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_elementwise.rs:610:21
+    |
+610 |                       scale = scale * half;
+    |                       ^^^^^^^^^^^^^^^^^^^^ help: replace it with: `scale *= half`
+...
+644 | / complex_division!(
+645 | |     cdiv64,
+646 | |     f64,
+647 | |     f64::MAX,
+...   |
+650 | |     f64::from_bits(0x7ff8_0000_0000_0000)
+651 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_elementwise.rs:612:21
+    |
+612 |                       c = c * big;
+    |                       ^^^^^^^^^^^ help: replace it with: `c *= big`
+...
+644 | / complex_division!(
+645 | |     cdiv64,
+646 | |     f64,
+647 | |     f64::MAX,
+...   |
+650 | |     f64::from_bits(0x7ff8_0000_0000_0000)
+651 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_elementwise.rs:613:21
+    |
+613 |                       d = d * big;
+    |                       ^^^^^^^^^^^ help: replace it with: `d *= big`
+...
+644 | / complex_division!(
+645 | |     cdiv64,
+646 | |     f64,
+647 | |     f64::MAX,
+...   |
+650 | |     f64::from_bits(0x7ff8_0000_0000_0000)
+651 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: manual implementation of an assign operation
+   --> tests/gpu_elementwise.rs:614:21
+    |
+614 |                       scale = scale * big;
+    |                       ^^^^^^^^^^^^^^^^^^^ help: replace it with: `scale *= big`
+...
+644 | / complex_division!(
+645 | |     cdiv64,
+646 | |     f64,
+647 | |     f64::MAX,
+...   |
+650 | |     f64::from_bits(0x7ff8_0000_0000_0000)
+651 | | );
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assign_op_pattern
+    = note: this error originates in the macro `complex_division` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: unnecessary use of `to_vec`
+    --> tests/gpu_elementwise.rs:2005:46
+     |
+2005 |     let a_indices = view_indices(&[3, 4, 2], &a_layout.strides().to_vec(), a_layout.offset());
+     |                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: use: `a_layout.strides()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#unnecessary_to_owned
+     = note: `-D clippy::unnecessary-to-owned` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::unnecessary_to_owned)]`
+
+error: unnecessary use of `to_vec`
+    --> tests/gpu_elementwise.rs:2006:46
+     |
+2006 |     let b_indices = view_indices(&[3, 4, 2], &b_layout.strides().to_vec(), b_layout.offset());
+     |                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: use: `b_layout.strides()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#unnecessary_to_owned
+
+error: this multiplication by -1 can be written more succinctly
+    --> tests/gpu_elementwise.rs:2053:54
+     |
+2053 |         let expected = 2.0 * a_values[index / 256] + -1.0 * b_values[index];
+     |                                                      ^^^^^^^^^^^^^^^^^^^^^^ help: consider using: `-b_values[index]`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#neg_multiply
+     = note: `-D clippy::neg-multiply` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::neg_multiply)]`
+
+error: casting to the same type is unnecessary (`i32` -> `i32`)
+    --> tests/gpu_elementwise.rs:2062:22
+     |
+2062 |         .map(|index| (index as i32).wrapping_mul(0x1000_0000))
+     |                      ^^^^^^^^^^^^^^ help: try: `index`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#unnecessary_cast
+     = note: `-D clippy::unnecessary-cast` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::unnecessary_cast)]`
+
+error: could not compile `t4a-cuda-kernels` (test "gpu_elementwise") due to 28 previous errors
+# exit 101

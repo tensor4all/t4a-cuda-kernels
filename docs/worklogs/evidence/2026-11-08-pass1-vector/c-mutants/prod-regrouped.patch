@@ -1,0 +1,13 @@
+diff --git a/cuda/src/reduce.cu b/cuda/src/reduce.cu
+index d580701..bf41563 100644
+--- a/cuda/src/reduce.cu
++++ b/cuda/src/reduce.cu
+@@ -44,7 +44,7 @@ struct SumFold {
+ };
+ 
+ struct ProdFold {
+-  static constexpr bool kRegroup = false;
++  static constexpr bool kRegroup = true;
+   template <typename T>
+   __device__ __forceinline__ T operator()(T lhs, T rhs) const {
+     return t4a_cuda_mul<T>(lhs, rhs);

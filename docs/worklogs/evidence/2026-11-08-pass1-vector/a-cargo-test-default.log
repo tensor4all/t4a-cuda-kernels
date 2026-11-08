@@ -1,0 +1,123 @@
+# commit 65a74d5de849aca37dbbbf778a168224b9c8c034
+# $ cargo test -j 4
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (target/debug/deps/t4a_cuda_kernels-1d7668674e20ed4e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/fusion.rs (target/debug/deps/fusion-5413f43c5c30b7fc)
+
+running 7 tests
+test the_launch_geometry_follows_the_runtime_length ... ok
+test shared_values_are_computed_once ... ok
+test arity_operands_and_bounds_are_validated ... ok
+test complex_plans_use_the_component_forms_and_the_robust_division ... ok
+test eligibility_matches_the_pinned_matrix ... ok
+test the_key_covers_everything_that_changes_the_artifact ... ok
+test the_source_is_self_contained_and_canonical ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/planning.rs (target/debug/deps/planning-16c656270418cf81)
+
+running 89 tests
+test a_reversed_layout_is_a_strided_movement_plan ... ok
+test a_split_reduction_exposes_its_partials_layout ... ok
+test apply_reflector_checks_the_target_window ... ok
+test abi_revision_is_documented ... ok
+test abi_revision_matches_the_c_header ... ok
+test assemble_requires_only_the_regions_its_branches_read ... ok
+test binary_entries_follow_the_dtype_matrix ... ok
+test binary_accepts_exactly_the_documented_op_dtype_side_triples ... ok
+test broadcast_axis_is_not_a_destination ... ok
+test broadcast_in_dim_plans_the_rank_map ... ok
+test byte_lengths_are_checked ... ok
+test c_axis_values_mirror_layout ... ok
+test c_layout_mirror_round_trips ... ok
+test column_norms_maps_one_task_per_trailing_column ... ok
+test combined_strided_validates_the_shared_domain_and_spans ... ok
+test combine_pass_widens_only_for_long_partials_and_not_for_prod ... ok
+test compact_layout_has_axis_zero_fastest ... ok
+test compare_select_and_clamp_reject_complex_and_bool ... ok
+test concatenate_copy_plans_the_axis_offset ... ok
+test convert_accepts_every_unequal_pair_and_rejects_identity ... ok
+test dynamic_slice_checks_windows_and_index_dtype ... ok
+test dynamic_update_slice_plans_the_update_domain ... ok
+test embed_diagonal_allows_an_insertion_position_at_the_end ... ok
+test empty_views_need_no_span ... ok
+test explicit_v_may_be_narrower_than_the_packed_factors ... ok
+test extract_diagonal_derives_the_output_layout ... ok
+test extent_product_overflow_is_rejected ... ok
+test extract_r_copies_the_upper_triangle_only ... ok
+test fast_variants_still_report_the_fast_policy ... ok
+test fill_one_is_a_layout_fill ... ok
+test fill_zero_plans_one_block_per_256_elements ... ok
+test flat_plan_rejects_negative_and_oversized_counts ... ok
+test gather_and_scatter_mirrors_have_the_documented_layout ... ok
+test gather_derives_the_output_and_plans_one_flat_launch ... ok
+test gather_requires_unit_slices_on_collapsed_axes ... ok
+test general_entries_mirror_their_fast_dtype_matrix ... ok
+test general_geometry_rejects_an_unrepresentable_rank_or_length ... ok
+test general_path_accepts_rank_nine_and_sixteen ... ok
+test geometry_packing_follows_the_documented_order ... ok
+test identity_shifted_allows_zero_complement_columns ... ok
+test initialize_permutation_is_the_modulo_image ... ok
+test layout_rejects_bad_inputs ... ok
+test lu_apply_pivots_needs_matching_extents_and_a_bounded_k ... ok
+test lu_extract_checks_the_pinned_shape_relationships ... ok
+test matrix_adjoint_swaps_the_first_two_axes ... ok
+test negative_strides_report_the_reachable_span ... ok
+test offsets_must_fit_a_64_bit_byte_address ... ok
+test pad_derives_the_padded_extents ... ok
+test partials_plans_enforce_the_floor_split ... ok
+test prefix_rank_bounds_the_diagonal_domain ... ok
+test pass1_checks_the_axis_stride_before_forming_a_chunk_pointer ... ok
+test qr_apply_phase_checks_the_r_rows_and_the_start ... ok
+test qr_phase_bounds_the_diagonal_it_reads ... ok
+test rank_zero_is_a_scalar_view ... ok
+test reduction_dtype_gates_follow_the_operation ... ok
+test reduction_geometry_and_shapes ... ok
+test reduction_plan_applies_the_auto_policy ... ok
+test reflector_bounds_the_step_and_the_coefficients ... ok
+test revision_eight_entries_are_in_the_manifest ... ok
+test revision_eleven_entries_are_in_the_manifest ... ok
+test revision_seven_entries_are_in_the_manifest ... ok
+test entry_dtype_matrix_matches_the_abi_document ... ok
+test revision_six_entries_are_in_the_manifest ... ok
+test revision_six_tags_are_stable_and_unique ... ok
+test scatter_validates_the_batch_shape_and_ignores_operand_fit ... ok
+test scatter_with_an_empty_destination_plans_nothing ... ok
+test select_pivot_requires_matching_arrays_and_capacities ... ok
+test slice_requires_the_reachable_count ... ok
+test split_policy_matches_the_baseline ... ok
+test strategy_boundary_is_the_plane_width ... ok
+test strided_to_strided_requires_equal_extents ... ok
+test structural_extras_are_expressible_with_revision_one_entries ... ok
+test swap_columns_bounds_the_step_and_the_permutation ... ok
+test the_variant_is_general_when_any_participating_rank_is ... ok
+test transpose_configuration_range ... ok
+test transpose_plans_grid_shared_memory_and_batches ... ok
+test transpose_rejects_bad_batches_and_limits ... ok
+test every_pinned_tenferro_cuda_kernel_resolves_to_an_entry ... ok
+test triangular_plans_accept_batches_and_extreme_offsets ... ok
+test triangular_views_read_through_the_input_layout ... ok
+test validation_plans_cap_the_domain_and_check_stride ... ok
+test unary_accepts_exactly_the_documented_pairs ... ok
+test view_entries_derive_the_count_from_the_extents ... ok
+test view_entries_reject_out_of_span_layouts ... ok
+test violation_matrix_is_i32_whatever_the_input_dtype ... ok
+test wide_combine_widths_are_plane_only_and_bounded ... ok
+test window_dims_helper_drops_collapsed_axes ... ok
+test entry_names_are_unique_and_exported_by_the_sources ... ok
+test the_exposed_sources_match_the_files ... ok
+
+test result: ok. 89 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
+
+   Doc-tests t4a_cuda_kernels
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

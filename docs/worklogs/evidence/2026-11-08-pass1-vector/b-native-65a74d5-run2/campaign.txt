@@ -1,0 +1,4 @@
+campaign /tmp/claude-2000/-home-shinaoka-work-t4a-reduce-2406/7036dc7e-cb48-4619-846e-725e49469709/scratchpad/native4 reps=3 cpus=0-7
+NVIDIA A100 80GB PCIe, 580.178.04
+baseline /home/shinaoka/tensor4all/t4a-cuda-kernels-pass1-base/target/release/examples/bench_kernels
+candidate /home/shinaoka/tensor4all/t4a-cuda-kernels-pass1/target/release/examples/bench_kernels

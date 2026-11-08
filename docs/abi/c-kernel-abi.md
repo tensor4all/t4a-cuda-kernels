@@ -1,4 +1,4 @@
-# C kernel ABI (revision 12)
+# C kernel ABI (revision 13)
 
 Every entry is an `extern "C" __global__` CUDA function in `cuda/src/`. A caller
 loads the compiled module into its own context, looks the symbol up by the name
@@ -18,7 +18,7 @@ nothing, so the same text compiles under NVCC and NVRTC.
 
 ## Revision
 
-`T4A_CUDA_ABI_REVISION == 12`. Revision 2 added `t4a_cuda_axis_values` and the
+`T4A_CUDA_ABI_REVISION == 13`. Revision 2 added `t4a_cuda_axis_values` and the
 diagonal, windowing and validation-status entries; revision 3 added the reduction
 entries; revision 4 added gather and additive scatter; revision 5 added the dtype
 conversion entry; revision 6 added the elementwise, comparison and
@@ -32,11 +32,14 @@ layout-taking triangle views (`tril_view`, `triu_view`) and
 revision 12 changes the *launch* contract of a split reduction's combine pass
 (a wider plane block whose fold crosses warps through static shared memory) and
 records the reassociation policy of `SUM`/`SUM_SQUARES`/`MAX`/`MIN`, with no new
-symbol, signature or struct.
+symbol, signature or struct; revision 13 fixes which elements a lane of split pass 1
+combines, and in what order, on a contiguous axis (the "Pass-1 lane assignment"
+section), with no new symbol, signature, struct or launch geometry.
 **Nothing in revisions 1-10 changed** — the 88 existing symbols, their signatures
 and the nine existing struct layouts are identical. Any
 change to a struct layout, an entry signature, an element type
-mapping or a launch contract requires a further revision bump and an entry in the
+mapping, a launch contract or a documented numerical topology (which elements a
+reduction combines, and in what order) requires a further revision bump and an entry in the
 compilation/artifact key of any consumer that caches compiled code.
 
 ## Types
@@ -286,13 +289,53 @@ Semantics:
   slice; the last chunk absorbs `reduce_len % splits`.
 - **Pass 2** is `t4a_cuda_reduce` over the partials, with `SUM` when pass 1 was
   `SUM_SQUARES` and the same op otherwise, and is never split again.
-- **Reassociation (revision 12).** A lane's walk over its own chunk may combine
-  four lane-strided elements as a tree before folding them into one loop-carried
-  accumulator, for `SUM`, `SUM_SQUARES`, `MAX` and `MIN`. `PROD` is never regrouped:
-  a regrouped product can turn an overflow-then-zero into `Inf * 0 = NaN`. The
-  topology is fixed for a given input, layout, plan and build, so results are
-  reproducible; near overflow a regrouped sum can differ from the serial order in
-  classification (`A, A, -A, -A` with `A = 2^127` gives `NaN` instead of `+Inf`).
+- **Pass-1 lane assignment (revision 13).** `W` is the block width (`plane_width`)
+  and `len` the chunk length.
+  - **Group walk.** It applies to `SUM`, `SUM_SQUARES`, `MAX` and `MIN` over a
+    contiguous axis (`stride == 1`) of an `F32`, `F64`, `I32` or `I64` operand,
+    when the chunk holds at least `W` groups:
+    - The chunk divides into `groups = len / V` groups of `V = 16 / element size`
+      elements (4 for `F32`/`I32`, 2 for `F64`/`I64`). Group `g` is
+      `[g*V, g*V + V)`, counted from the chunk's first element.
+    - A group's value is a pairwise tree of its seeded elements: `(x0 ⊕ x1) ⊕
+      (x2 ⊕ x3)`, or `x0 ⊕ x1`. `SUM_SQUARES` squares each element once.
+    - Lane `t` takes groups `t, t + W, t + 2W, ...` in batches of four:
+      - its first group seeds the accumulator, and the next three join it one at
+        a time;
+      - each whole batch `g0..g3` that follows joins as `(g0 ⊕ g1) ⊕ (g2 ⊕ g3)`;
+      - the at most three groups left join one at a time.
+    - Lane `t < len mod V` then folds trailing element `groups*V + t`.
+    - The lanes combine with the xor tree.
+  - **Address independence.** The topology depends only on `len`, `W`, the element
+    type and the operation, and never on the input address. Alignment only decides
+    whether a group is one 16-byte load or `V` element loads.
+  - **Serial walk.** Every other case uses the serial lane-strided walk: lane `t`
+    seeds from `start + t` and folds `start + t + k*W` in order. That covers a
+    strided or broadcast axis, `PROD`, `C32`/`C64`, and a chunk with fewer than `W`
+    groups.
+  - **What changed against revision 12.** Revision 12 kept each element on the lane
+    of the elements `W` apart from it, and allowed only a regrouping inside that
+    lane's walk. Revision 13 moves an element onto the lane of its group neighbours.
+    Where the group walk applies:
+    - sums and sums of squares round differently;
+    - integer sums agree, modulo wrap;
+    - `MAX`/`MIN` select the same value, and only the NaN payload may differ;
+    - near overflow, the classification can change in either direction.
+
+    For example, take an `F32` `SUM` of 1024 elements at `W = 32` with
+    `A = 2^127`, all other elements zero:
+    - `x0 = x1 = A` and `x32 = x33 = -A` returned `0` under revision 12, because
+      each lane cancelled `A` with `-A`. It now returns `NaN`: `A + A` and
+      `-A + -A` overflow to `±Inf` in two lanes.
+    - `x0 = x32 = A` and `x1 = x33 = -A` returned `NaN` under revision 12 and now
+      returns `0`.
+
+    `PROD`, and every case on the serial walk, is bit-identical to revision 12.
+  - **Other guarantees.** Every element of the chunk is folded exactly once, and an
+    empty axis is refused by the planner rather than folded. The topology is fixed
+    for a given input, layout, plan and build, so results are reproducible. `PROD`
+    is never regrouped: a regrouped product can turn an overflow-then-zero into
+    `Inf * 0 = NaN`.
 - **Arithmetic.** Integer `SUM`/`PROD` wrap. `SUM_SQUARES` squares each element
   through `fma(v, v, 0)` so the square rounds before the addition and cannot be
   contracted into it. Complex `SUM`/`PROD` use the revision-1 element-wise

@@ -2060,7 +2060,9 @@ fn check_walk<T: WalkValue>(session: &Session, ops: &[ReduceOp]) {
     for &len in &WALK_LENGTHS {
         // Offsets 1..3 move the first element off the 16-byte grid by 4/8/12 bytes (F32/I32)
         // or 8/0/8 bytes (F64/I64), so the head is empty, partial or a whole vector short.
-        for (offset, plane_width) in (0..4i64).flat_map(|offset| [(offset, 8u32), (offset, 32)]) {
+        for (offset, plane_width) in
+            (0..4i64).flat_map(|offset| [(offset, 8u32), (offset, 16), (offset, 32)])
+        {
             let view = &widened[offset as usize..(offset + len) as usize];
             for &op in ops {
                 let (partials, split, total) =

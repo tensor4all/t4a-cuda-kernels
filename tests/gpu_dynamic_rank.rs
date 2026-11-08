@@ -3040,8 +3040,9 @@ fn rank_nine_split_reaches_every_partial_through_the_wide_combine() {
 fn rank_nine_contiguous_split_takes_the_vector_walk_through_the_general_twin() {
     // The general-rank pass 1 (`t4a_cuda_reduce_partials_any`) shares the vector walk with
     // the fast body. Reduce the contiguous axis 0 of a rank-9 `[1027, 2, 1, ...]` view at
-    // element offset 1: output 0's chunks start off the 16-byte grid by one element and
-    // output 1's by 1028 elements, and each output's last chunk carries a 259-element tail.
+    // element offset 1: output 0 starts one element past a 16-byte boundary (a three-element
+    // head), output 1 starts at element 1028, which is on the grid (no head), and each output's
+    // last chunk is 259 elements long, so a tail follows its last whole vector.
     // Every partial is checked against its own chunk, so a skipped or doubled vector fails at
     // that partial.
     let session = Session::new("reduce");

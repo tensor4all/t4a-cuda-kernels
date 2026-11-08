@@ -1,6 +1,6 @@
 # Slice — vectorized pass-1 lane mapping (tenferro-rs #2406, part 2)
 
-Status: plan, 2026-11-08. Follows the residual of
+Status: implemented and measured, 2026-11-08. Follows the residual of
 [slice-reduction-throughput.md](slice-reduction-throughput.md) §8 and §9.5: pass-1 streaming is the
 largest remaining term of a full reduction. Outcome: §8.
 
@@ -181,6 +181,33 @@ The repository asks for an independent `openai/gpt-6.1-sol` review through the
 `independent-review` skill. That skill is not installed on this host. A fresh-context reviewer
 agent stands in, and the substitution is stated in the PR.
 
-## 8. Outcome
+## 8. Outcome (measured)
 
-Pending.
+**Adopted.**
+- The primary metric (§5) is **0.609**, against the ≤ 0.95 rule. It is the median over the six
+  `n16777216` cells of the direct-arm ratio through tenferro, drift-normalised.
+- The native paired campaign's worst case is **1.007x**: `reduce-sum-f32-4096sq-axis1`, the
+  strided sentinel. The limit is 1.03x.
+- Pass 1 at 16M reaches 70-79 % of the A100's 1935 GB/s, up from 23-74 %. For example,
+  `max` f32 goes from 149.4 µs to 49.6 µs, and from 449 GB/s to 1354 GB/s.
+- `PROD`, strided and complex cells are unchanged within noise (0.998-1.007).
+
+The tables, commands and environment are in
+[../worklogs/2026-11-08-reduction-pass1-vector.md](../worklogs/2026-11-08-reduction-pass1-vector.md).
+
+**One adjustment after the first campaign.** In the first candidate, a lane loaded only its
+first vector before the batch loop, and took the vectors left after the loop one at a time.
+Chunks of 2-4 vectors per lane (1M elements, and the 600-long axis) therefore never ran a
+batch, and paid one DRAM latency per vector:
+- `reduce-sum-f32-axis-600` measured 1.053x;
+- `reduce-sum-f64-full-1048576` measured 1.029x.
+
+The fix predicates the first and the last batch per vector, so a short chunk also issues its
+loads together. The whole campaign was then repeated, and the tables are from the repeat.
+
+**Instruction evidence.**
+- `scripts/sass-diff.sh 31b734e`: 92 entries identical. Only `t4a_cuda_reduce_partials` and
+  `t4a_cuda_reduce_partials_any` differ, and both carry the new walk.
+- The pass-1 entries go from 39-40 to 52-54 registers, with no spills. With one-warp blocks,
+  the 32-blocks-per-SM limit still binds before registers do.
+- The vector bodies emit `LDG.E.128`.

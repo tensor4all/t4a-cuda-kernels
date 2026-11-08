@@ -65,25 +65,26 @@ drift, plus a uniform per-block choice of walk:
     the fold);
   - the element type is `float`, `double`, `int` or `long long`, giving 4, 2, 4 and 2 lanes
     per 16-byte vector;
-  - the chunk holds at least one aligned vector per lane.
+  - the chunk holds at least one group of `V` elements per lane (`len / V >= W`).
 
   Everything else takes the existing scalar walk, unchanged: strided axes, `PROD`, `C32` and
   `C64` (`t4a_cuda_c32` is 4-byte aligned, not a `float2`; `c-kernel-abi.md:55-56`), and short
   chunks. The chunk test is a guard, not a reachable case under the current planner:
-  `chunk_len >= 8 * W` gives at least `2W - 1` vectors.
-- **Mapping.** `head` is the number of elements before the first 16-byte boundary at or after
-  the chunk start. It is computed from the address, since element pointers are only
-  dtype-aligned (`c-kernel-abi.md`, Types). The `nvec = (len - head) / V` aligned vectors are
-  dealt round-robin: lane `t` reads vectors `t, t + W, t + 2W, ...`, so one warp instruction
-  reads 512 contiguous bytes. The `len - head - nvec*V < V` tail elements and the `head < V`
-  head elements are read one each, by lanes `0..tail` and `0..head`.
+  `chunk_len >= 8 * W` gives at least `2W` groups. The stride is tested before the chunk
+  pointer is formed (§9).
+- **Mapping.** The chunk divides into `groups = len / V` groups of `V` consecutive elements,
+  counted from the chunk's first element, so the grouping never depends on the address. Lane
+  `t` takes groups `t, t + W, t + 2W, ...`, so on a 16-byte-aligned chunk one warp
+  instruction reads 512 contiguous bytes. A chunk that starts off a 16-byte boundary loads each
+  group with `V` element loads instead, with the same grouping. The `len mod V` trailing
+  elements are read one each by lanes `0..len mod V`.
 - **Batched loads.** The vector loop issues four independent 16-byte loads per lane before it
   folds any of them, so memory-level parallelism no longer depends on how the compiler
-  schedules the fold. A remainder loop takes the last `< 4` vectors.
+  schedules the fold. The first and the last batch are predicated per group.
 - **Fold order within a lane.** Each vector combines as a pairwise tree, `(seed(x0) ⊕
   seed(x1)) ⊕ (seed(x2) ⊕ seed(x3))`, which squares each element once for `SUM_SQUARES`. The
   accumulator is seeded from the lane's first vector, so no identity value is introduced and a
-  `-0.0` sum stays `-0.0`. The head and tail scalars fold in last.
+  `-0.0` sum stays `-0.0`. The tail elements fold in last.
 - **Code generation of the scalar path.** The vector walk is a `__noinline__` device
   function, so the strided and `PROD` instantiations keep their own straight-line walk. That
   is the regression mechanism of the withdrawn grouped walk (throughput slice §9.2 and §9.4):
@@ -96,20 +97,37 @@ drift, plus a uniform per-block choice of walk:
 - The launch geometry, entry symbols, signatures and structs.
 - The set of elements each block reduces.
 - Pass 2.
+- The serial lane-strided walk of every case outside the eligibility above.
 - `PROD`'s walk, which stays bit-for-bit.
 
-**ABI.**
-- `c-kernel-abi.md` revision 12 already grants `SUM`/`SUM_SQUARES`/`MAX`/`MIN` reassociation
-  within a lane's chunk walk. The topology is fixed per input, layout, plan and build, and is
-  "not across revisions".
-- That paragraph describes a four-lane-strided tree that never shipped (throughput slice §9.2).
-  This slice rewrites it to describe the vector mapping that does ship.
-- No struct, signature, element-type mapping or launch contract changes, which are the bump
-  triggers `c-kernel-abi.md:36-40` lists, so the revision stays 12. This is a reviewer
-  decision point, recorded rather than assumed: if the reviewer counts a changed lane topology
-  as a contract change, the bump is mechanical.
-- Consumers' compiled-module caches key on the composed source text, so they invalidate
-  either way.
+**ABI: revision 13.** The ABI's "Pass-1 lane assignment (revision 13)" section in
+`docs/abi/c-kernel-abi.md` states the topology.
+- Revision 12 kept every element on the lane of the elements `W` apart from it, and allowed
+  only regrouping inside that lane's walk. Revision 13 puts an element on the lane of its
+  group neighbours. That is a different numerical topology, and the ABI's bump rule now names
+  it as a bump trigger. No symbol, signature, struct or launch geometry changes.
+- Which inputs change, and how (eligible cases only; everything else is bit-identical):
+  - `SUM`/`SUM_SQUARES` over `F32`/`F64` round differently.
+  - Integer `SUM` is unchanged, modulo wrap.
+  - `MAX`/`MIN` select the same value; only a NaN payload can differ.
+  - Near overflow the classification can flip either way. For an `F32` `SUM` of 1024
+    elements at `W = 32`, with `A = 2^127` and all other elements zero:
+    - `x0 = x1 = A, x32 = x33 = -A` gave `0` under revision 12 and gives `NaN` now;
+    - `x0 = x32 = A, x1 = x33 = -A` gave `NaN` under revision 12 and gives `0` now.
+
+    `tests/gpu_reduce.rs::pass1_overflow_follows_the_revision_13_grouping` pins both. It fails
+    on the revision-12 kernel.
+- The NaN of the first witness is not a defect of empty or padding lanes:
+  - With `A = 1`, the same placement sums to exactly `0`.
+  - Two tests pin that nothing outside a lane's own groups and tail contributes: guard NaNs
+    around the view, and a single `1.0` at every chunk position.
+  - An empty axis never reaches the kernels: the planner refuses it, and the caller supplies
+    the identity (0 for a sum).
+- The topology depends only on `len`, `W`, the element type and the operation. Results are
+  reproducible for a given input, layout, plan and build, wherever the input sits.
+- Consumers' compiled-module caches key on the composed source, which contains
+  `T4A_CUDA_ABI_REVISION`, so they invalidate. A consumer that records the revision (the
+  tenferro-rs pin note) moves from 12 to 13 when it adopts this.
 
 ## 4. Correctness matrix (frozen)
 
@@ -124,7 +142,7 @@ against a CPU `f64` reference, every op of §3 × F32/F64/I32/I64 where the op s
 - Per-partial checks against the CPU sum of each chunk (pass 1 alone, sentinel-filled
   partials), so a lane that reads a vector twice, or skips one, fails at the partial rather than
   being averaged away.
-- `MAX`/`MIN` with a NaN in the vector body, in the head and in the tail; `SUM_SQUARES` seeds.
+- `MAX`/`MIN` with a NaN in the first group, in the body and in the tail; `SUM_SQUARES` seeds.
 - `PROD` partials bit-identical to a CPU emulation of the scalar lane-strided walk plus the xor
   tree (the topology must not change).
 - A strided axis stays on the scalar walk, which the existing strided tests cover.
@@ -241,6 +259,11 @@ loads together. The whole campaign was then repeated, and the tables are from th
     instructions. This covers tenferro's 1M and 16M full reductions.
   - A chunk that starts off the boundary now uses element loads. `reduce-sum-f32-full-10000000`
     measures 1.034x the previous head, and is still 0.77x the original baseline.
-- **Not changed, pending the maintainer's decision on point 3.** The numerical-contract text in
-  `docs/abi/c-kernel-abi.md`, including its description of the head elements, which no longer
-  exist.
+- **Point 3 (the lane assignment widens revision 12's contract).** This is resolved by
+  revision 13, with the ABI text rewritten to the implementation (§3, "ABI: revision 13").
+- **Restoring revision-12 lanes with warp shuffles was not done.**
+  - Lane `t` would need elements `t + 32j`, which sit in four different lanes' vectors. That
+    is about four shuffles and selects per element, and roughly 10-15 µs at 16M on a 50 µs
+    pass.
+  - It would give up a quarter of the 16M gain, only to keep the old near-overflow
+    classification, which can flip in either direction.

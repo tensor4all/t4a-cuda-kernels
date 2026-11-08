@@ -25,8 +25,8 @@ namespace {
 // A fold seeds the accumulator from the axis' first element, so the seed is the
 // operation's own identity applied to that element (sum-of-squares must square
 // it, unlike the others). `kRegroup` says whether pass 1 may combine a lane's
-// elements in an order other than the serial lane-strided one (ABI revision 12,
-// "Reassociation"); `PROD` may not.
+// elements in an order other than the serial lane-strided one (ABI revision 13,
+// "Pass-1 lane assignment"); `PROD` may not.
 struct SumFold {
   static constexpr bool kRegroup = true;
   template <typename T>

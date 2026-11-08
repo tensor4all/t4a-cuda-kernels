@@ -135,7 +135,7 @@ pub mod source {
 /// device memory, selected through [`RankVariant`].
 pub const MAX_RANK: usize = 8;
 /// Version of the C ABI described by this crate.
-pub const ABI_REVISION: u32 = 12;
+pub const ABI_REVISION: u32 = 13;
 /// Threads per block for the flat (element-wise) entries.
 pub const FLAT_BLOCK: u32 = 256;
 /// Lanes per block for the plane-reduction entries: one 32-lane plane per block.

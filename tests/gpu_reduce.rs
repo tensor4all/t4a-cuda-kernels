@@ -2061,7 +2061,7 @@ fn check_walk<T: WalkValue>(session: &Session, ops: &[ReduceOp]) {
     );
     for &len in &WALK_LENGTHS {
         // Offsets 1..3 move the first element off the 16-byte grid by 4/8/12 bytes (F32/I32)
-        // or 8/0/8 bytes (F64/I64), so the head is empty, partial or a whole vector short.
+        // or 8/0/8 bytes (F64/I64), so groups load as one 16-byte vector or as elements.
         for (offset, plane_width) in
             (0..4i64).flat_map(|offset| [(offset, 8u32), (offset, 16), (offset, 32)])
         {
@@ -2110,12 +2110,12 @@ fn vector_walk_folds_every_element_once_for_every_op_and_dtype() {
 }
 
 #[test]
-fn vector_walk_propagates_a_nan_from_the_head_the_body_and_the_tail() {
-    // 1028 = 4 chunks of 257: with offset 1 every chunk start is off the 16-byte grid, so
-    // each chunk has head elements, whole vectors and tail elements. A NaN at a chunk's first
-    // element lands in its head (or its first vector), one in the middle in a vector, and one
-    // at its last element in its tail (or last vector); every placement must reach that
-    // chunk's partial and the result, and no other partial.
+fn vector_walk_propagates_a_nan_from_the_first_group_the_body_and_the_tail() {
+    // 1028 = 4 chunks of 257 elements: 64 groups of four and a one-element tail (F32), and
+    // with offsets 1..3 the chunk starts are off the 16-byte grid. A NaN at a chunk's first
+    // element lands in its first group, one in the middle in a body group, and one at its
+    // last element in its tail; every placement must reach that chunk's partial and the
+    // result, and no other partial.
     let session = Session::new("reduce");
     let len = 1_028i64;
     for offset in [0i64, 1, 2, 3] {
@@ -2432,6 +2432,168 @@ fn pass1_reads_broadcast_and_reversed_axes_inside_their_allocation() {
             (got - expected).abs() <= 1e-4 * expected.abs().max(1.0),
             "stride {:?}: {got} vs {expected}",
             layout.strides()
+        );
+    }
+}
+
+#[test]
+fn pass1_folds_nothing_outside_its_chunk() {
+    // NaN guards on both sides of the view: a lane that folds a predicated-off batch entry, a
+    // tail element it does not own, or an element of a neighbouring chunk or of the padding
+    // would turn the result (or that chunk's partial) into NaN. Every partial must equal its
+    // own chunk's reference, so no lane without work contributes anything.
+    let session = Session::new("reduce");
+    let guard = 64usize;
+    for &len in &[512usize, 515, 1_028, 1_031, 4_099, 65_549, 917_507] {
+        let f32_view: Vec<f32> = (0..len as i64).map(f32::from_index).collect();
+        let f64_view: Vec<f64> = (0..len as i64).map(f64::from_index).collect();
+        for lead in [0usize, 1] {
+            let mut f32_host = vec![f32::NAN; guard + lead];
+            f32_host.extend_from_slice(&f32_view);
+            f32_host.extend(std::iter::repeat_n(f32::NAN, guard));
+            let mut f64_host = vec![f64::NAN; guard + lead];
+            f64_host.extend_from_slice(&f64_view);
+            f64_host.extend(std::iter::repeat_n(f64::NAN, guard));
+            let f32_src = upload(&session, &f32_host);
+            let f64_src = upload(&session, &f64_host);
+            let widened32: Vec<f64> = f32_view.iter().map(|&v| f64::from(v)).collect();
+            for plane_width in [8u32, 16, 32] {
+                for op in [ReduceOp::Sum, ReduceOp::Max, ReduceOp::Min] {
+                    let offset = (guard + lead) as i64;
+                    let (partials, split, total) = run_walk::<f32>(
+                        &session,
+                        &f32_src,
+                        f32_host.len() as i64,
+                        offset,
+                        len as i64,
+                        op,
+                        plane_width,
+                    );
+                    let context = format!("F32 {op:?} len {len} lead {lead} plane {plane_width}");
+                    assert!(walk_matches(total, &widened32, op), "{context}: {total}");
+                    if let Some((splits, chunk_len)) = split {
+                        for (chunk, &got) in partials.iter().enumerate() {
+                            let start = chunk * chunk_len as usize;
+                            let end = if chunk as i64 + 1 == splits {
+                                len
+                            } else {
+                                start + chunk_len as usize
+                            };
+                            assert!(
+                                walk_matches(got, &widened32[start..end], op),
+                                "{context}: partial {chunk} is {got}"
+                            );
+                        }
+                    }
+                    let (_, _, total) = run_walk::<f64>(
+                        &session,
+                        &f64_src,
+                        f64_host.len() as i64,
+                        offset,
+                        len as i64,
+                        op,
+                        plane_width,
+                    );
+                    assert!(
+                        walk_matches(total, &f64_view, op),
+                        "F64 {op:?} len {len} lead {lead} plane {plane_width}: {total}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn pass1_adds_exactly_the_one_nonzero_element() {
+    // All zeros except one 1.0, moved through the first group, a group interior, the last
+    // whole group and the tail of a chunk: the sum is exactly 1, the partial of the chunk that
+    // holds the element is exactly 1 and every other partial is exactly +0.0. An empty lane or
+    // an unloaded batch slot that contributed anything would break the zeros.
+    let session = Session::new("reduce");
+    let len = 1_031usize; // 4 chunks: 257, 257, 257, 260 elements.
+    for lead in [0usize, 1, 2, 3] {
+        for position in [
+            0usize, 1, 3, 4, 127, 252, 255, 256, 257, 770, 1_027, 1_028, 1_030,
+        ] {
+            let mut host = vec![0.0f32; lead + len];
+            host[lead + position] = 1.0;
+            let src = upload(&session, &host);
+            let (partials, split, total) = run_walk::<f32>(
+                &session,
+                &src,
+                host.len() as i64,
+                lead as i64,
+                len as i64,
+                ReduceOp::Sum,
+                32,
+            );
+            let (_, chunk_len) = split.expect("1031 elements split");
+            let owner = (position / chunk_len as usize).min(partials.len() - 1);
+            let context = format!("lead {lead} position {position}");
+            assert_eq!(
+                total.to_bits(),
+                1.0f32.to_bits(),
+                "{context}: result {total}"
+            );
+            for (chunk, value) in partials.iter().enumerate() {
+                let want = if chunk == owner { 1.0f32 } else { 0.0 };
+                assert_eq!(
+                    value.to_bits(),
+                    want.to_bits(),
+                    "{context}: partial {chunk}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn an_empty_reduction_axis_is_refused_before_any_launch() {
+    // The kernels seed from the axis' first element and have no identity value, so an empty
+    // axis never reaches them: the plan is refused, and the caller supplies the identity (0
+    // for a sum; tenferro-rs does this as `EmptyFoldUnit::Zero`).
+    let in_layout = Layout::compact(&[0, 4]).unwrap();
+    let out_layout = Layout::compact(&[1, 4]).unwrap();
+    for op in [ReduceOp::Sum, ReduceOp::Max] {
+        assert!(
+            plan_reduction(DType::F32, op, &out_layout, 4, &in_layout, 0, 0, 32).is_err(),
+            "{op:?}: an empty axis must not plan a launch"
+        );
+    }
+}
+
+#[test]
+fn pass1_overflow_follows_the_revision_13_grouping() {
+    // The two documented witnesses of c-kernel-abi.md "Pass-1 lane assignment (revision
+    // 13)": F32 SUM of 1024 elements at plane width 32, A = 2^127, everything else zero.
+    // Which pairs overflow depends on which elements share a lane, so these pin the
+    // revision-13 grouping (groups of four consecutive elements) against the revision-12 one
+    // (elements 32 apart), in both directions. The result is the same at every input lead.
+    let session = Session::new("reduce");
+    let big = 2f32.powi(127);
+    let witness = |placement: [(usize, f32); 4]| {
+        let mut values = vec![0.0f32; 1_024];
+        for (index, value) in placement {
+            values[index] = value;
+        }
+        values
+    };
+    // Same-group pairs overflow: A + A in group 0, -A + -A in group 8.
+    let same_group = witness([(0, big), (1, big), (32, -big), (33, -big)]);
+    // Same-group pairs cancel: A + -A in groups 0 and 8 (revision 12 put A with A).
+    let cancelling = witness([(0, big), (1, -big), (32, big), (33, -big)]);
+    for lead in 0..4 {
+        let (_, total) = reduce_at_lead(&session, &same_group, lead, ReduceOp::Sum, 32);
+        assert!(
+            total.is_nan(),
+            "lead {lead}: same-group overflow gives NaN, got {total}"
+        );
+        let (_, total) = reduce_at_lead(&session, &cancelling, lead, ReduceOp::Sum, 32);
+        assert_eq!(
+            total.to_bits(),
+            0.0f32.to_bits(),
+            "lead {lead}: cancelling groups give +0"
         );
     }
 }

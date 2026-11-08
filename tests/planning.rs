@@ -3686,73 +3686,116 @@ fn pass1_checks_the_axis_stride_before_forming_a_chunk_pointer() {
     // reduction, `start` is a logical position, and the pointer can land outside the
     // allocation (for example `in + 256` for a one-element input broadcast to 512). Forming
     // such a pointer is undefined behaviour even if it is never dereferenced, so the pass-1
-    // dispatch must test the stride first and form the chunk pointer only inside that branch.
+    // dispatch must form the chunk pointer only once the stride is known to be 1.
     //
-    // Text order is not enough: hoisting `const T* chunk = in + in_base + start;` above an
-    // `if (contiguous && ...)` keeps the stride test first in the file and still forms the
-    // pointer unconditionally. So every `in + ...` pointer expression in the dispatch must sit
-    // inside a block opened by an `if` whose condition has `axis_stride == 1` as a top-level
-    // `&&` conjunct, with code comments stripped first.
+    // The device cannot observe that UB, and a text check passes a hoisted pointer. So this
+    // test executes the dispatch itself: the actual `t4a_cuda_partials_walk` definition from
+    // `reduce.cu`, compiled as host C++ with only its `in` parameter retyped to a pointer that
+    // records every `+` landing outside its allocation. Its callees are stubs that report
+    // which walk was chosen. The two review witnesses must form no out-of-range pointer and
+    // take the serial walk; a contiguous chunk must take the vector walk.
     let source = include_str!("../cuda/src/reduce.cu");
-    let body = strip_line_comments(function_body(
-        source,
-        "__forceinline__ T t4a_cuda_partials_walk(",
-    ));
-    let pointers: Vec<usize> = body.match_indices("in + ").map(|(at, _)| at).collect();
-    assert!(
-        !pointers.is_empty(),
-        "the pass-1 dispatch forms the chunk pointer:\n{body}"
+    let signature = "template <typename Fold, typename T>\n\
+                     __device__ __forceinline__ T t4a_cuda_partials_walk(";
+    let start = source
+        .find(signature)
+        .expect("the pass-1 dispatch definition");
+    let body = function_body(&source[start..], signature);
+    let end = source[start..]
+        .find(body)
+        .expect("body inside the definition")
+        + body.len();
+    let definition = &source[start..start + end];
+    assert_eq!(
+        definition.matches("const T* in,").count(),
+        1,
+        "the dispatch takes `const T* in`:\n{definition}"
     );
-    for at in pointers {
-        let guarded = enclosing_block_headers(&body, at).iter().any(|header| {
-            header
-                .trim()
-                .strip_prefix("if")
-                .map(str::trim)
-                .and_then(|cond| cond.strip_prefix('('))
-                .and_then(|cond| cond.strip_suffix(')'))
-                .is_some_and(|cond| {
-                    !cond.contains("||")
-                        && cond
-                            .split("&&")
-                            .any(|term| term.trim() == "axis_stride == 1")
-                })
-        });
-        assert!(
-            guarded,
-            "a pointer `in + ...` at byte {at} is formed outside an `if (axis_stride == 1 && ...)` \
-             block:\n{body}"
-        );
-    }
-}
+    let definition = definition
+        .replacen("__device__ __forceinline__", "inline", 1)
+        .replacen("const T* in,", "CheckedPtr<T> in,", 1);
 
-/// `source` with every `//` comment removed, so prose cannot satisfy a source contract.
-fn strip_line_comments(source: &str) -> String {
-    source
-        .lines()
-        .map(|line| line.split("//").next().unwrap_or(""))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
+    let program = format!(
+        r#"#include <cstdio>
+static int violations = 0;
+template <typename T> struct CheckedPtr {{
+  const T* base;
+  long long len;
+  long long offset;
+  CheckedPtr operator+(long long n) const {{
+    CheckedPtr next{{base, len, offset + n}};
+    if (next.offset < 0 || next.offset > len) {{
+      ++violations;
+      std::printf("formed in + %lld over an allocation of %lld\n", next.offset, len);
+    }}
+    return next;
+  }}
+  operator const T*() const {{
+    return offset < 0 || offset > len ? nullptr : base + offset;
+  }}
+}};
+struct Fold {{}};
+template <typename F, typename T> constexpr bool t4a_cuda_vector_walk_enabled() {{ return true; }}
+template <typename T> bool t4a_cuda_vector_walk_applies(long long, int) {{ return true; }}
+template <typename F, typename T, bool A, typename... Args>
+T t4a_cuda_partials_walk_vector(Args...) {{ return T(1); }}
+template <typename F, typename T, typename... Args>
+T t4a_cuda_partials_walk_scalar(Args...) {{ return T(2); }}
 
-/// The headers (the text between the previous `;`, `{` or `}` and the opening `{`) of every
-/// block that encloses byte `at` of `body`, innermost first.
-fn enclosing_block_headers(body: &str, at: usize) -> Vec<&str> {
-    let bytes = body.as_bytes();
-    let mut headers = Vec::new();
-    let mut depth = 0usize;
-    for open in (0..at).rev() {
-        match bytes[open] {
-            b'}' => depth += 1,
-            b'{' if depth > 0 => depth -= 1,
-            b'{' => {
-                let start = body[..open]
-                    .rfind([';', '{', '}'])
-                    .map_or(0, |boundary| boundary + 1);
-                headers.push(&body[start..open]);
-            }
-            _ => {}
-        }
-    }
-    headers
+{definition}
+
+int main() {{
+  float one[1] = {{0.0f}};
+  float many[512] = {{}};
+  int wrong = 0;
+  // extents=[512], strides=[0] over one element; second of two splits.
+  if (t4a_cuda_partials_walk<Fold, float>(CheckedPtr<float>{{one, 1, 0}}, 0, 0, 256, 512, 32,
+                                          Fold{{}}) != 2.0f) {{
+    std::printf("broadcast axis did not take the serial walk\n");
+    ++wrong;
+  }}
+  // extents=[512], strides=[-1], offset=511; second of two splits.
+  if (t4a_cuda_partials_walk<Fold, float>(CheckedPtr<float>{{many, 512, 0}}, 511, -1, 256, 512,
+                                          32, Fold{{}}) != 2.0f) {{
+    std::printf("reversed axis did not take the serial walk\n");
+    ++wrong;
+  }}
+  // A contiguous chunk takes the vector walk, so the probe is not vacuous.
+  if (t4a_cuda_partials_walk<Fold, float>(CheckedPtr<float>{{many, 512, 0}}, 0, 1, 256, 512, 32,
+                                          Fold{{}}) != 1.0f) {{
+    std::printf("contiguous chunk did not take the vector walk\n");
+    ++wrong;
+  }}
+  std::printf("out-of-range pointers formed: %d\n", violations);
+  return wrong != 0 || violations != 0;
+}}
+"#
+    );
+
+    let dir = std::env::temp_dir().join(format!("t4a-pass1-pointer-guard-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch directory");
+    let cpp = dir.join("probe.cpp");
+    let exe = dir.join("probe");
+    std::fs::write(&cpp, &program).expect("write the probe");
+    let cxx = std::env::var("CXX").unwrap_or_else(|_| "c++".to_string());
+    let compiled = std::process::Command::new(&cxx)
+        .args(["-std=c++17", "-o"])
+        .arg(&exe)
+        .arg(&cpp)
+        .output()
+        .unwrap_or_else(|err| panic!("{cxx} (a host C++ compiler) is required: {err}"));
+    assert!(
+        compiled.status.success(),
+        "the dispatch probe does not compile:\n{}\n{program}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let ran = std::process::Command::new(&exe)
+        .output()
+        .expect("run the dispatch probe");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        ran.status.success(),
+        "the pass-1 dispatch forms an out-of-range chunk pointer or picks the wrong walk:\n{}",
+        String::from_utf8_lossy(&ran.stdout)
+    );
 }

@@ -1,0 +1,28 @@
+name: PR verification section
+
+# #24 item 3: a pull request must state how the change was verified. The check
+# itself lives in the organization's `.github` repository, so this is the whole
+# of it — no per-repository copy of the logic.
+#
+# `edited` is in the list on purpose. A required workflow run by an organization
+# ruleset fires only on opened/synchronize/reopened, so a description fixed after
+# a failure stays red and a description whose evidence was deleted stays green.
+# This repository's own workflow does subscribe to `edited`. Observed on
+# tensor4all-rs today: `body / body` failed at 12:39 and passed at 12:41 after an
+# edit, with no commit in between.
+#
+# Kept as a separate job so a description fix costs ~10 s rather than rebuilding
+# the CUDA toolkit.
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+  merge_group:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  body:
+    uses: tensor4all/.github/.github/workflows/pr-verification.yml@main

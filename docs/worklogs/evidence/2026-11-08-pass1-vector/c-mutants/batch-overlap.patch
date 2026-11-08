@@ -1,0 +1,13 @@
+diff --git a/cuda/src/reduce.cu b/cuda/src/reduce.cu
+index d580701..8b296e8 100644
+--- a/cuda/src/reduce.cu
++++ b/cuda/src/reduce.cu
+@@ -413,7 +413,7 @@ __device__ __noinline__ T t4a_cuda_partials_walk_vector(const T* chunk,
+   for (; index + (B - 1) * stride < groups; index += B * stride) {
+ #pragma unroll
+     for (int b = 0; b < B; ++b) {
+-      batch[b] = t4a_cuda_load_group<T, V, Aligned>(chunk, index + b * stride);
++      batch[b] = t4a_cuda_load_group<T, V, Aligned>(chunk, index + b);
+     }
+     const T low = fold.combine(t4a_cuda_vector_value<Fold, T, V>(batch[0], fold),
+                                t4a_cuda_vector_value<Fold, T, V>(batch[1], fold));

@@ -1,0 +1,116 @@
+diff --git a/cuda/src/reduce.cu b/cuda/src/reduce.cu
+index d580701..fb8d915 100644
+--- a/cuda/src/reduce.cu
++++ b/cuda/src/reduce.cu
+@@ -442,6 +442,57 @@ __device__ __noinline__ T t4a_cuda_partials_walk_vector(const T* chunk,
+   return acc;
+ }
+ 
++// PROTOTYPE (not for merge): revision-12 lane ownership with 16-byte loads. Lane `t` of a
++// 32-lane block owns chunk elements `t + 32k` in order, as in the serial walk; each lane loads
++// the 16-byte vector `stripe * 32 + lane` and the owner receives its element through
++// `__shfl_sync`, `V` shuffles per owned element (one per component, kept when it matches).
++// Requires a 16-byte-aligned chunk, plane width 32 and `len % (32 * V) == 0`.
++template <typename Fold, typename T>
++__device__ __noinline__ T t4a_proto_shuffle_walk(const T* chunk, long long len, Fold fold) {
++  constexpr int V = t4a_cuda_vector_lanes<T>::value;
++  constexpr int B = t4a_cuda_vector_batch;
++  using Vector = t4a_cuda_vector<T, V>;
++  const int lane = static_cast<int>(threadIdx.x);
++  const Vector* body = reinterpret_cast<const Vector*>(chunk);
++  const long long stripes = len / (32 * V);
++  const int part = lane % V;
++  const int source = lane / V;
++  T acc{};
++  bool seeded = false;
++  for (long long first = 0; first < stripes; first += B) {
++    Vector batch[B];
++#pragma unroll
++    for (int b = 0; b < B; ++b) {
++      if (first + b < stripes) {
++        batch[b] = body[(first + b) * 32 + lane];
++      }
++    }
++#pragma unroll
++    for (int b = 0; b < B; ++b) {
++      if (first + b < stripes) {
++#pragma unroll
++        for (int j = 0; j < V; ++j) {
++          T value{};
++#pragma unroll
++          for (int c = 0; c < V; ++c) {
++            const T got = __shfl_sync(0xFFFFFFFFu, batch[b].lane[c], source + (32 / V) * j);
++            if (c == part) {
++              value = got;
++            }
++          }
++          if (seeded) {
++            acc = fold(acc, value);
++          } else {
++            acc = fold.seed(value);
++            seeded = true;
++          }
++        }
++      }
++    }
++  }
++  return acc;
++}
++
+ // One lane's fold over its share of the chunk `[start, end)` of the axis at `in_base`.
+ template <typename Fold, typename T>
+ __device__ __forceinline__ T t4a_cuda_partials_walk(const T* in,
+@@ -455,16 +506,12 @@ __device__ __forceinline__ T t4a_cuda_partials_walk(const T* in,
+     // The stride comes first: `in + in_base + start` is an address inside the input only on
+     // a contiguous axis (a broadcast or reversed axis can put it outside the allocation, and
+     // forming such a pointer is undefined behaviour).
+-    if (axis_stride == 1 && t4a_cuda_vector_walk_applies<T>(end - start, plane_width)) {
++    constexpr int V = t4a_cuda_vector_lanes<T>::value;
++    if (axis_stride == 1 && plane_width == 32 && (end - start) % (32 * V) == 0) {
+       const T* chunk = in + in_base + start;
+-      // INVARIANT: element pointers are aligned to their dtype (c-kernel-abi.md, "Types");
+-      // the 16-byte test only selects the load instruction, never the topology.
+       if ((reinterpret_cast<unsigned long long>(chunk) & 15ull) == 0) {
+-        return t4a_cuda_partials_walk_vector<Fold, T, true>(chunk, end - start, plane_width,
+-                                                            fold);
++        return t4a_proto_shuffle_walk<Fold, T>(chunk, end - start, fold);
+       }
+-      return t4a_cuda_partials_walk_vector<Fold, T, false>(chunk, end - start, plane_width,
+-                                                           fold);
+     }
+   }
+   return t4a_cuda_partials_walk_scalar<Fold, T>(in, in_base, axis_stride, start, end,
+diff --git a/tests/gpu_reduce.rs b/tests/gpu_reduce.rs
+index 4c92d54..3b598f7 100644
+--- a/tests/gpu_reduce.rs
++++ b/tests/gpu_reduce.rs
+@@ -2597,3 +2597,29 @@ fn pass1_overflow_follows_the_revision_13_grouping() {
+         );
+     }
+ }
++
++#[test]
++fn zz_dump_partials_for_topology_comparison() {
++    let Ok(path) = std::env::var("T4A_DUMP_PARTIALS") else {
++        return;
++    };
++    let session = Session::new("reduce");
++    let mut out = String::new();
++    for len in [1usize << 20, 1 << 24] {
++        let f32_values: Vec<f32> = (0..len as i64).map(f32::from_index).collect();
++        let f64_values: Vec<f64> = (0..len as i64).map(f64::from_index).collect();
++        let src32 = upload(&session, &f32_values);
++        let src64 = upload(&session, &f64_values);
++        for op in [ReduceOp::Sum, ReduceOp::Max, ReduceOp::SumSquares] {
++            let (partials, _, total) =
++                run_walk::<f32>(&session, &src32, len as i64, 0, len as i64, op, 32);
++            let bits: Vec<String> = partials.iter().map(|v| format!("{:08x}", v.to_bits())).collect();
++            out += &format!("f32 {op:?} {len} total {:08x} partials {}\n", total.to_bits(), bits.join(","));
++            let (partials, _, total) =
++                run_walk::<f64>(&session, &src64, len as i64, 0, len as i64, op, 32);
++            let bits: Vec<String> = partials.iter().map(|v| format!("{:016x}", v.to_bits())).collect();
++            out += &format!("f64 {op:?} {len} total {:016x} partials {}\n", total.to_bits(), bits.join(","));
++        }
++    }
++    std::fs::write(path, out).unwrap();
++}

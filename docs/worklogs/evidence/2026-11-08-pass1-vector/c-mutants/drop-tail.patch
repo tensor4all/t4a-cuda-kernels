@@ -1,0 +1,14 @@
+diff --git a/cuda/src/reduce.cu b/cuda/src/reduce.cu
+index d580701..05d2314 100644
+--- a/cuda/src/reduce.cu
++++ b/cuda/src/reduce.cu
+@@ -436,9 +436,6 @@ __device__ __noinline__ T t4a_cuda_partials_walk_vector(const T* chunk,
+     }
+   }
+   const long long tail_start = groups * V;
+-  if (lane < len - tail_start) {
+-    acc = fold(acc, chunk[tail_start + lane]);
+-  }
+   return acc;
+ }
+ 

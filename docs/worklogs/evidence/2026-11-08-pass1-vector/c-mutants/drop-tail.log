@@ -1,0 +1,94 @@
+# commit 65a74d5de849aca37dbbbf778a168224b9c8c034 + c-mutants/drop-tail.patch
+# $ cargo test -j 4 --release --features gpu-tests --no-fail-fast --test gpu_reduce --test gpu_dynamic_rank -- vector_walk rank_nine_contiguous product_partials pass1_
+   Compiling t4a-cuda-kernels v0.1.1 (/home/shinaoka/tensor4all/t4a-cuda-kernels-pass1)
+    Finished `release` profile [optimized] target(s) in 0.69s
+     Running tests/gpu_dynamic_rank.rs (target/release/deps/gpu_dynamic_rank-22a243ebf3c59b3b)
+
+running 1 test
+/home/shinaoka/tensor4all/t4a-cuda-kernels-pass1/cuda/src/reduce.cu(438): warning #177-D: variable "tail_start" was declared but never referenced
+    const long long tail_start = groups * V;
+                    ^
+          detected during:
+            instantiation of "T <unnamed>::t4a_cuda_partials_walk(const T *, long long, long long, long long, long long, int, Fold) [with Fold=<unnamed>::SumFold, T=float]" at line 515
+            instantiation of "void <unnamed>::partials_body<Fold,T>(const void *, void *, const t4a_cuda_layout &, const t4a_cuda_layout &, int, long long, long long, long long, Fold) [with Fold=<unnamed>::SumFold, T=float]" at line 714
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+test rank_nine_contiguous_split_takes_the_vector_walk_through_the_general_twin ... FAILED
+
+failures:
+
+---- rank_nine_contiguous_split_takes_the_vector_walk_through_the_general_twin stdout ----
+
+thread 'rank_nine_contiguous_split_takes_the_vector_walk_through_the_general_twin' (2779406) panicked at tests/gpu_dynamic_rank.rs:3199:17:
+Sum output 0 partial 3: -0.9038654
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    rank_nine_contiguous_split_takes_the_vector_walk_through_the_general_twin
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 22 filtered out; finished in 8.39s
+
+error: test failed, to rerun pass `--test gpu_dynamic_rank`
+     Running tests/gpu_reduce.rs (target/release/deps/gpu_reduce-652123b6ba646ae6)
+
+running 9 tests
+/home/shinaoka/tensor4all/t4a-cuda-kernels-pass1/cuda/src/reduce.cu(438): warning #177-D: variable "tail_start" was declared but never referenced
+    const long long tail_start = groups * V;
+                    ^
+          detected during:
+            instantiation of "T <unnamed>::t4a_cuda_partials_walk(const T *, long long, long long, long long, long long, int, Fold) [with Fold=<unnamed>::SumFold, T=float]" at line 515
+            instantiation of "void <unnamed>::partials_body<Fold,T>(const void *, void *, const t4a_cuda_layout &, const t4a_cuda_layout &, int, long long, long long, long long, Fold) [with Fold=<unnamed>::SumFold, T=float]" at line 714
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+test vector_walk_keeps_a_negative_zero_sum ... ok
+test pass1_reads_broadcast_and_reversed_axes_inside_their_allocation ... ok
+test product_partials_keep_the_serial_lane_walk_bit_for_bit ... ok
+test pass1_adds_exactly_the_one_nonzero_element ... FAILED
+test vector_walk_propagates_a_nan_from_the_first_group_the_body_and_the_tail ... FAILED
+test pass1_overflow_follows_the_revision_13_grouping ... ok
+test pass1_folds_nothing_outside_its_chunk ... FAILED
+test vector_walk_folds_every_element_once_for_every_op_and_dtype ... FAILED
+test pass1_topology_does_not_depend_on_the_input_address ... ok
+
+failures:
+
+---- pass1_adds_exactly_the_one_nonzero_element stdout ----
+
+thread 'pass1_adds_exactly_the_one_nonzero_element' (2779899) panicked at tests/gpu_reduce.rs:2534:13:
+assertion `left == right` failed: lead 0 position 256: result 0
+  left: 0
+ right: 1065353216
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- vector_walk_propagates_a_nan_from_the_first_group_the_body_and_the_tail stdout ----
+
+thread 'vector_walk_propagates_a_nan_from_the_first_group_the_body_and_the_tail' (2779907) panicked at tests/gpu_reduce.rs:2144:21:
+Max offset 0 chunk 0 position 256: result drops the NaN
+
+---- pass1_folds_nothing_outside_its_chunk stdout ----
+
+thread 'pass1_folds_nothing_outside_its_chunk' (2779900) panicked at tests/gpu_reduce.rs:2473:21:
+F32 Sum len 515 lead 0 plane 8: -0.3211102
+
+---- vector_walk_folds_every_element_once_for_every_op_and_dtype stdout ----
+
+thread 'vector_walk_folds_every_element_once_for_every_op_and_dtype' (2779905) panicked at tests/gpu_reduce.rs:2084:25:
+F32 Sum len 511 offset 0 plane 8: partial 0 of 7 is 0.4202178
+
+
+failures:
+    pass1_adds_exactly_the_one_nonzero_element
+    pass1_folds_nothing_outside_its_chunk
+    vector_walk_folds_every_element_once_for_every_op_and_dtype
+    vector_walk_propagates_a_nan_from_the_first_group_the_body_and_the_tail
+
+test result: FAILED. 5 passed; 4 failed; 0 ignored; 0 measured; 19 filtered out; finished in 8.30s
+
+error: test failed, to rerun pass `--test gpu_reduce`
+error: 2 targets failed:
+    `--test gpu_dynamic_rank`
+    `--test gpu_reduce`
+# exit 101

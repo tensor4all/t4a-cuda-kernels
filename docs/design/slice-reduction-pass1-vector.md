@@ -204,11 +204,12 @@ agent stands in, and the substitution is stated in the PR.
 **Adopted.**
 - The primary metric (§5) is **0.609**, against the ≤ 0.95 rule. It is the median over the six
   `n16777216` cells of the direct-arm ratio through tenferro, drift-normalised.
-- The native paired campaign's worst case is **1.007x**: `reduce-sum-f32-4096sq-axis1`, the
-  strided sentinel. The limit is 1.03x.
+- The native paired campaign's worst case is **1.009x** (`reduce-prod-f64-full-1048576`), against
+  the 1.03x limit.
 - Pass 1 at 16M reaches 70-79 % of the A100's 1935 GB/s, up from 23-74 %. For example,
-  `max` f32 goes from 149.4 µs to 49.6 µs, and from 449 GB/s to 1354 GB/s.
-- `PROD`, strided and complex cells are unchanged within noise (0.998-1.007).
+  `max` f32 goes from 149.3 µs to 49.2 µs, and from 450 GB/s to 1363 GB/s.
+- `PROD`, strided and complex cells are unchanged within noise (0.994-1.009).
+- All of these are measured on code `65a74d5` (revision 13).
 
 The tables, commands and environment are in
 [../worklogs/2026-11-08-reduction-pass1-vector.md](../worklogs/2026-11-08-reduction-pass1-vector.md).
@@ -267,3 +268,20 @@ loads together. The whole campaign was then repeated, and the tables are from th
     pass.
   - It would give up a quarter of the 16M gain, only to keep the old near-overflow
     classification, which can flip in either direction.
+
+## 10. Restoring the revision-12 lanes with warp shuffles: measured, not adopted
+
+A prototype was built to answer this; it is not on this branch.
+- **Design.** 16-byte loads, with every element shuffled back to its revision-12 lane.
+- **Bit identity.** It is bit-identical to the revision-12 serial walk at 1M and 16M.
+- **Cost.** **+5.6 to +7.8 µs per call** of 16M pass-1 device time over the vector walk for
+  F32/F64 `SUM`/`MAX`/`MIN` (`SUM` f64 +2.9 µs), which is 12-16 %. It is close to nothing at
+  1M.
+- **Why not adopted.**
+  - It buys only bit compatibility with a topology that is not more accurate: the two
+    documented witnesses flip in opposite directions.
+  - It would still need code for chunks that start off a 16-byte boundary and for narrow
+    planes.
+
+The patch, the bit-identity dumps and the timings are in the worklog's §7 and its evidence
+folder.

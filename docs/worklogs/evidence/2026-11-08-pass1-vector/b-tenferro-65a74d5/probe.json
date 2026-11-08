@@ -1,0 +1,221 @@
+{
+ "schema_version": 1,
+ "suite_id": "gpu/isolated_ops",
+ "backends": [
+  "tenferro-cuda-direct",
+  "tenferro-cuda-eager",
+  "pytorch-cuda"
+ ],
+ "cases": [
+  {
+   "id": "reduce_sum_full_f32_n1048576",
+   "op": "reduce_sum",
+   "dtype": "f32",
+   "n": 1048576,
+   "shape": [
+    1048576
+   ],
+   "issue": 155,
+   "issues": [
+    2406
+   ],
+   "full_reduction": true,
+   "excluded": {}
+  },
+  {
+   "id": "reduce_sum_full_f64_n1048576",
+   "op": "reduce_sum",
+   "dtype": "f64",
+   "n": 1048576,
+   "shape": [
+    1048576
+   ],
+   "issue": 155,
+   "issues": [
+    2406
+   ],
+   "full_reduction": true,
+   "excluded": {}
+  },
+  {
+   "id": "reduce_prod_full_f32_n1048576",
+   "op": "reduce_prod",
+   "dtype": "f32",
+   "n": 1048576,
+   "shape": [
+    1048576
+   ],
+   "issue": 155,
+   "issues": [
+    2406
+   ],
+   "full_reduction": true,
+   "excluded": {}
+  },
+  {
+   "id": "reduce_prod_full_f64_n1048576",
+   "op": "reduce_prod",
+   "dtype": "f64",
+   "n": 1048576,
+   "shape": [
+    1048576
+   ],
+   "issue": 155,
+   "issues": [
+    2406
+   ],
+   "full_reduction": true,
+   "excluded": {}
+  },
+  {
+   "id": "reduce_max_full_f32_n1048576",
+   "op": "reduce_max",
+   "dtype": "f32",
+   "n": 1048576,
+   "shape": [
+    1048576
+   ],
+   "issue": 155,
+   "issues": [
+    2406
+   ],
+   "full_reduction": true,
+   "excluded": {}
+  },
+  {
+   "id": "reduce_max_full_f64_n1048576",
+   "op": "reduce_max",
+   "dtype": "f64",
+   "n": 1048576,
+   "shape": [
+    1048576
+   ],
+   "issue": 155,
+   "issues": [
+    2406
+   ],
+   "full_reduction": true,
+   "excluded": {}
+  },
+  {
+   "id": "reduce_min_full_f32_n1048576",
+   "op": "reduce_min",
+   "dtype": "f32",
+   "n": 1048576,
+   "shape": [
+    1048576
+   ],
+   "issue": 155,
+   "issues": [
+    2406
+   ],
+   "full_reduction": true,
+   "excluded": {}
+  },
+  {
+   "id": "reduce_min_full_f64_n1048576",
+   "op": "reduce_min",
+   "dtype": "f64",
+   "n": 1048576,
+   "shape": [
+    1048576
+   ],
+   "issue": 155,
+   "issues": [
+    2406
+   ],
+   "full_reduction": true,
+   "excluded": {}
+  },
+  {
+   "id": "reduce_sum_full_f32_n16777216",
+   "op": "reduce_sum",
+   "dtype": "f32",
+   "n": 16777216,
+   "shape": [
+    16777216
+   ],
+   "issue": 155,
+   "issues": [
+    2406
+   ],
+   "full_reduction": true,
+   "excluded": {}
+  },
+  {
+   "id": "reduce_sum_full_f64_n16777216",
+   "op": "reduce_sum",
+   "dtype": "f64",
+   "n": 16777216,
+   "shape": [
+    16777216
+   ],
+   "issue": 155,
+   "issues": [
+    2406
+   ],
+   "full_reduction": true,
+   "excluded": {}
+  },
+  {
+   "id": "reduce_max_full_f32_n16777216",
+   "op": "reduce_max",
+   "dtype": "f32",
+   "n": 16777216,
+   "shape": [
+    16777216
+   ],
+   "issue": 155,
+   "issues": [
+    2406
+   ],
+   "full_reduction": true,
+   "excluded": {}
+  },
+  {
+   "id": "reduce_max_full_f64_n16777216",
+   "op": "reduce_max",
+   "dtype": "f64",
+   "n": 16777216,
+   "shape": [
+    16777216
+   ],
+   "issue": 155,
+   "issues": [
+    2406
+   ],
+   "full_reduction": true,
+   "excluded": {}
+  },
+  {
+   "id": "reduce_min_full_f32_n16777216",
+   "op": "reduce_min",
+   "dtype": "f32",
+   "n": 16777216,
+   "shape": [
+    16777216
+   ],
+   "issue": 155,
+   "issues": [
+    2406
+   ],
+   "full_reduction": true,
+   "excluded": {}
+  },
+  {
+   "id": "reduce_min_full_f64_n16777216",
+   "op": "reduce_min",
+   "dtype": "f64",
+   "n": 16777216,
+   "shape": [
+    16777216
+   ],
+   "issue": 155,
+   "issues": [
+    2406
+   ],
+   "full_reduction": true,
+   "excluded": {}
+  }
+ ]
+}

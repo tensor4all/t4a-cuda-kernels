@@ -1,0 +1,44 @@
+# commit 65a74d5de849aca37dbbbf778a168224b9c8c034 + c-mutants/prod-regrouped.patch
+# $ cargo test -j 4 --release --features gpu-tests --no-fail-fast --test gpu_reduce --test gpu_dynamic_rank -- vector_walk rank_nine_contiguous product_partials pass1_
+   Compiling t4a-cuda-kernels v0.1.1 (/home/shinaoka/tensor4all/t4a-cuda-kernels-pass1)
+    Finished `release` profile [optimized] target(s) in 0.49s
+     Running tests/gpu_dynamic_rank.rs (target/release/deps/gpu_dynamic_rank-22a243ebf3c59b3b)
+
+running 1 test
+test rank_nine_contiguous_split_takes_the_vector_walk_through_the_general_twin ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 22 filtered out; finished in 8.75s
+
+     Running tests/gpu_reduce.rs (target/release/deps/gpu_reduce-652123b6ba646ae6)
+
+running 9 tests
+test product_partials_keep_the_serial_lane_walk_bit_for_bit ... FAILED
+test vector_walk_keeps_a_negative_zero_sum ... ok
+test pass1_reads_broadcast_and_reversed_axes_inside_their_allocation ... ok
+test pass1_overflow_follows_the_revision_13_grouping ... ok
+test pass1_adds_exactly_the_one_nonzero_element ... ok
+test pass1_topology_does_not_depend_on_the_input_address ... ok
+test vector_walk_propagates_a_nan_from_the_first_group_the_body_and_the_tail ... ok
+test pass1_folds_nothing_outside_its_chunk ... ok
+test vector_walk_folds_every_element_once_for_every_op_and_dtype ... ok
+
+failures:
+
+---- product_partials_keep_the_serial_lane_walk_bit_for_bit stdout ----
+
+thread 'product_partials_keep_the_serial_lane_walk_bit_for_bit' (2782534) panicked at tests/gpu_reduce.rs:2240:13:
+assertion `left == right` failed: len 1028 offset 1 partial 0: 0.9993241 vs 0.99932384
+  left: 1065341876
+ right: 1065341872
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    product_partials_keep_the_serial_lane_walk_bit_for_bit
+
+test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 13.07s
+
+error: test failed, to rerun pass `--test gpu_reduce`
+error: 1 target failed:
+    `--test gpu_reduce`
+# exit 101

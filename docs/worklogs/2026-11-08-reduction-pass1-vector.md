@@ -3,166 +3,245 @@
 Date: 2026-11-08. Plan and outcome:
 [slice-reduction-pass1-vector.md](../design/slice-reduction-pass1-vector.md).
 
-## 1. Environment
+The raw evidence for every table below is in
+[evidence/2026-11-08-pass1-vector/](evidence/2026-11-08-pass1-vector/).
+
+## 1. Revisions and environment
 
 | Item | Value |
 | --- | --- |
+| Measured candidate | **code at `65a74d5`** (ABI revision 13). Later commits on this branch touch only `docs/`. |
+| Baseline | `31b734e`: library `e1f56e4` plus this branch's harness-only commit |
+| Through tenferro | tenferro-rs `a09c8d724dfd897ba85de0c06c293b3f8f8d7238`, tenferro-benchmark `c3cc78394667c1e1a99621777db13d7c23ec4232`, PyTorch 2.12.0+cu130 |
 | GPU | NVIDIA A100 80GB PCIe, compute capability 8.0, driver 580.178.04 |
 | Toolkit | CUDA 12.6 (`nvcc` V12.6.85); kernels compiled with `-std=c++17 -arch=sm_80`; no fast math, no FTZ |
 | Host | primerose; measured processes pinned to CPUs 0-7, one GPU job at a time under the host's bench-slot lock, GPU otherwise idle |
-| Baseline | `31b734e`: library `e1f56e4` plus this branch's harness-only commit |
-| Candidate | this branch |
-| Through tenferro | tenferro-rs `a09c8d72` (`origin/main`), tenferro-benchmark `c3cc783`, PyTorch 2.12.0+cu130 |
 
-**Theoretical bandwidth.** 1935 GB/s, the A100 80GB PCIe's HBM2e specification.
-
-**Bench binaries.** The bench binary compiles `cuda/src/*.cu` at run time from its own crate
-directory, so each arm was built in its own worktree. Copying a binary would have run the
-other side's kernels.
+- **Theoretical bandwidth:** 1935 GB/s, the A100 80GB PCIe's HBM2e specification.
+- **Bench binaries:** the bench binary compiles `cuda/src/*.cu` at run time from its own crate
+  directory, so each arm was built in its own worktree. Copying a binary would have run the
+  other side's kernels. The tenferro candidate binary was checked to embed the revision-13
+  source (`T4A_CUDA_ABI_REVISION 13`, `t4a_cuda_load_group`), and the base binary embeds
+  neither.
+- **Earlier tables:** the tables in this branch's earlier commits were measured on `3718481`.
+  They are superseded by the ones below.
 
 ## 2. Pass 1 alone: device time (nsys)
 
 - Each process ran 100 launches in the profiled region, and the table reports the median kernel
   time.
 - Bandwidth is the input bytes divided by the pass-1 time.
-- Command per case:
-  `nsys profile -t cuda --capture-range=cudaProfilerApi --capture-range-end=stop <bench_kernels> <case>`,
-  followed by `nsys stats --report cuda_gpu_kern_sum`.
+- Command per case: `scripts/knsys.sh` in the evidence folder, which runs
+  `nsys profile -t cuda --capture-range=cudaProfilerApi --capture-range-end=stop <bench_kernels> <case>`
+  and then `nsys stats --report cuda_gpu_kern_sum`.
+- Raw data: `b-nsys-65a74d5/{baseline-31b734e,candidate-65a74d5}.csv`.
 
 | case | pass 1 before µs | GB/s | pass 1 after µs | GB/s | ratio | after / 1935 GB/s |
 |---|---:|---:|---:|---:|---:|---:|
-| `reduce-sum-f32-full-1048576` | 8.9 | 471 | 8.1 | 518 | 0.910 | 27 % |
-| `reduce-max-f32-full-1048576` | 10.5 | 401 | 8.9 | 470 | 0.853 | 24 % |
-| `reduce-min-f32-full-1048576` | 10.4 | 402 | 8.9 | 470 | 0.856 | 24 % |
-| `reduce-sum-f64-full-1048576` | 9.0 | 933 | 8.4 | 1004 | 0.929 | 52 % |
-| `reduce-max-f64-full-1048576` | 10.5 | 798 | 8.9 | 943 | 0.846 | 49 % |
-| `reduce-min-f64-full-1048576` | 11.0 | 762 | 9.0 | 928 | 0.821 | 48 % |
-| `reduce-sum-f32-full-16777216` | 60.9 | 1102 | 46.7 | 1438 | 0.766 | 74 % |
-| `reduce-max-f32-full-16777216` | 149.4 | 449 | 49.6 | 1354 | 0.332 | 70 % |
-| `reduce-min-f32-full-16777216` | 148.9 | 451 | 49.2 | 1363 | 0.331 | 70 % |
-| `reduce-sum-f64-full-16777216` | 94.3 | 1424 | 87.5 | 1534 | 0.928 | 79 % |
-| `reduce-max-f64-full-16777216` | 163.3 | 822 | 90.2 | 1487 | 0.553 | 77 % |
-| `reduce-min-f64-full-16777216` | 163.7 | 820 | 90.3 | 1486 | 0.552 | 77 % |
+| `reduce-sum-f32-full-1048576` | 8.9 | 471 | 8.1 | 516 | 0.914 | 27 % |
+| `reduce-max-f32-full-1048576` | 10.5 | 401 | 8.8 | 477 | 0.841 | 25 % |
+| `reduce-min-f32-full-1048576` | 10.4 | 402 | 8.9 | 471 | 0.853 | 24 % |
+| `reduce-sum-f64-full-1048576` | 9.0 | 935 | 8.5 | 989 | 0.945 | 51 % |
+| `reduce-max-f64-full-1048576` | 10.4 | 807 | 8.8 | 953 | 0.846 | 49 % |
+| `reduce-min-f64-full-1048576` | 11.0 | 763 | 8.8 | 953 | 0.801 | 49 % |
+| `reduce-sum-f32-full-16777216` | 61.0 | 1100 | 46.6 | 1441 | 0.763 | 74 % |
+| `reduce-max-f32-full-16777216` | 149.3 | 450 | 49.2 | 1363 | 0.330 | 70 % |
+| `reduce-min-f32-full-16777216` | 148.9 | 451 | 49.4 | 1359 | 0.332 | 70 % |
+| `reduce-sum-f64-full-16777216` | 94.4 | 1422 | 87.7 | 1530 | 0.929 | 79 % |
+| `reduce-max-f64-full-16777216` | 163.5 | 821 | 90.6 | 1481 | 0.554 | 77 % |
+| `reduce-min-f64-full-16777216` | 163.7 | 820 | 90.6 | 1481 | 0.554 | 77 % |
 
-Pass 2 (`t4a_cuda_reduce`) is unchanged: 5.2-6.5 µs at 1M on both sides. At 1M, pass 1 is
-L2-resident and short (2 to 4 vectors per lane), so it is latency-bound, and the gain there is
-1.1-1.2 µs.
+Pass 2 (`t4a_cuda_reduce`) is unchanged on both sides (same CSVs).
 
 ## 3. Native/native paired campaign
 
 - Runner: `bench/run-native-pair.sh`, with `REPS=3 CPUS=0-7`.
-- Size: 24 cases, 3 repetitions and 2 sides, in AB/BA order, with no failed process.
-- Noise: the largest IQR/median is 2.7 %, below the 5 % invalid threshold.
-- Metric: host ns per operation over a 100-iteration region, median of the three repetitions.
+- Size: 24 cases, 3 repetitions and 2 sides, in AB/BA order.
+- Metric: host ns per operation over a 100-iteration region, median of three.
+- Raw samples: `b-native-65a74d5-run2/records.jsonl`.
+
+**Run 1 was invalid and is kept, not used.** The baseline side of `reduce-sum-f32-4096sq-axis0`
+had an IQR/median of 7.0 %, above the protocol's 5 % threshold, so the whole campaign was
+repeated. Run 1's raw data is in `b-native-65a74d5-run1-invalid/`.
+
+Run 2 had no failed process, and its largest IQR/median is 2.2 %:
 
 | case | base µs (IQR%) | cand µs (IQR%) | ratio |
 |---|---:|---:|---:|
-| `reduce-sum-f32-full-1048576` | 15.40 (1.8) | 14.72 (0.3) | 0.956 |
-| `reduce-max-f32-full-1048576` | 18.34 (1.2) | 16.52 (1.9) | 0.901 |
-| `reduce-min-f32-full-1048576` | 18.12 (0.9) | 16.72 (1.9) | 0.923 |
-| `reduce-sum-f64-full-1048576` | 15.84 (1.9) | 15.05 (2.1) | 0.950 |
-| `reduce-max-f64-full-1048576` | 18.88 (1.3) | 17.44 (0.9) | 0.924 |
-| `reduce-min-f64-full-1048576` | 19.14 (0.3) | 17.54 (1.7) | 0.917 |
-| `reduce-sum-f32-full-16777216` | 67.78 (0.5) | 54.00 (0.5) | 0.797 |
-| `reduce-max-f32-full-16777216` | 157.89 (0.1) | 59.11 (0.4) | 0.374 |
-| `reduce-min-f32-full-16777216` | 156.91 (0.1) | 58.97 (0.5) | 0.376 |
-| `reduce-sum-f64-full-16777216` | 101.85 (0.3) | 94.86 (0.3) | 0.931 |
-| `reduce-max-f64-full-16777216` | 172.52 (0.1) | 100.90 (0.3) | 0.585 |
-| `reduce-min-f64-full-16777216` | 172.78 (0.3) | 100.70 (0.2) | 0.583 |
-| `reduce-prod-f32-full-1048576` | 21.67 (1.2) | 21.69 (0.7) | 1.001 |
-| `reduce-prod-f64-full-1048576` | 22.14 (2.0) | 22.11 (1.9) | 0.998 |
-| `reduce-sumsquares-f32-full-1048576` | 15.69 (0.8) | 14.54 (1.1) | 0.926 |
-| `reduce-sum-f32-4096sq-axis1` | 191.66 (2.1) | 193.07 (1.3) | 1.007 |
-| `reduce-max-f32-4x131072-axis1` | 14.46 (1.2) | 14.49 (0.9) | 1.002 |
-| `reduce-sum-f32-axis-600` | 15.76 (2.7) | 15.47 (1.2) | 0.981 |
-| `reduce-sum-f32-4096sq-axis0` | 85.63 (0.1) | 65.17 (0.8) | 0.761 |
-| `reduce-sum-f64-4096sq-axis0` | 99.60 (0.6) | 93.67 (0.1) | 0.940 |
-| `reduce-max-i32-4096sq-axis0` | 86.78 (0.1) | 66.53 (0.3) | 0.767 |
-| `reduce-sum-c64-4096sq-axis0` | 176.83 (0.0) | 176.87 (0.8) | 1.000 |
-| `reduce-sum-f32-full-1000000` | 15.33 (2.3) | 14.06 (2.5) | 0.918 |
-| `reduce-sum-f32-full-10000000` | 51.06 (0.3) | 38.18 (1.1) | 0.748 |
+| `reduce-sum-f32-full-1048576` | 15.60 (1.6) | 14.72 (1.7) | 0.944 |
+| `reduce-max-f32-full-1048576` | 18.44 (1.5) | 16.92 (0.1) | 0.917 |
+| `reduce-min-f32-full-1048576` | 18.09 (0.8) | 16.69 (2.0) | 0.922 |
+| `reduce-sum-f64-full-1048576` | 16.00 (1.8) | 15.61 (1.1) | 0.976 |
+| `reduce-max-f64-full-1048576` | 18.87 (1.2) | 17.82 (1.2) | 0.944 |
+| `reduce-min-f64-full-1048576` | 19.16 (0.4) | 17.31 (1.4) | 0.903 |
+| `reduce-sum-f32-full-16777216` | 67.89 (0.5) | 54.06 (0.3) | 0.796 |
+| `reduce-max-f32-full-16777216` | 157.97 (0.2) | 59.57 (0.4) | 0.377 |
+| `reduce-min-f32-full-16777216` | 156.99 (0.2) | 58.42 (0.2) | 0.372 |
+| `reduce-sum-f64-full-16777216` | 101.74 (0.3) | 95.40 (0.2) | 0.938 |
+| `reduce-max-f64-full-16777216` | 172.42 (0.0) | 101.14 (0.1) | 0.587 |
+| `reduce-min-f64-full-16777216` | 172.59 (0.2) | 100.57 (0.2) | 0.583 |
+| `reduce-prod-f32-full-1048576` | 21.67 (1.1) | 21.75 (2.2) | 1.004 |
+| `reduce-prod-f64-full-1048576` | 21.97 (0.7) | 22.16 (0.3) | 1.009 |
+| `reduce-sumsquares-f32-full-1048576` | 15.46 (1.5) | 14.57 (1.0) | 0.943 |
+| `reduce-sum-f32-4096sq-axis1` | 193.77 (2.2) | 193.05 (1.1) | 0.996 |
+| `reduce-max-f32-4x131072-axis1` | 14.38 (0.3) | 14.30 (1.9) | 0.994 |
+| `reduce-sum-f32-axis-600` | 15.71 (1.7) | 15.50 (1.8) | 0.986 |
+| `reduce-sum-f32-4096sq-axis0` | 85.55 (0.2) | 63.35 (0.1) | 0.740 |
+| `reduce-sum-f64-4096sq-axis0` | 99.81 (1.0) | 94.68 (0.1) | 0.949 |
+| `reduce-max-i32-4096sq-axis0` | 86.79 (0.5) | 64.07 (0.7) | 0.738 |
+| `reduce-sum-c64-4096sq-axis0` | 176.85 (0.1) | 176.67 (0.1) | 0.999 |
+| `reduce-sum-f32-full-1000000` | 15.31 (1.9) | 14.29 (0.7) | 0.934 |
+| `reduce-sum-f32-full-10000000` | 50.97 (0.3) | 39.42 (0.3) | 0.773 |
 
-Rule check: the worst case is 1.007x (the strided `4096sq-axis1`), within the 1.03x limit.
-`PROD`, complex and strided cells sit at 0.998-1.007.
+**Rule check.**
+- The worst case is 1.009x (`reduce-prod-f64-full-1048576`), within the 1.03x limit.
+- `PROD`, complex and strided cells sit at 0.994-1.009.
 
-The first campaign did not pass that rule:
-- `reduce-sum-f32-axis-600` was 1.053x and `reduce-sum-f64-full-1048576` was 1.029x;
-- the cause was serial loads for short chunks (design §8);
-- the slice was adjusted, and the whole campaign was repeated.
+**History.** The first campaign of this branch, on `e46e22a` before amendment, did not pass the
+rule. `reduce-sum-f32-axis-600` measured 1.053x because short chunks issued serial loads; that
+is fixed by the predicated first and last batch.
 
 ## 4. Through tenferro: `gpu/isolated_ops` contract, paired, one session
 
 - **Contract:** 15 samples, 3 warmups, a 2 ms target batch, host API plus device synchronize,
   no download, CPUs 0-7.
-- **Probe:** the 8 published `reduce_*_full_*_n1048576` cells plus 6 cells at `n16777216`.
+- **Probe:** `b-tenferro-65a74d5/probe.json` (the 8 published `reduce_*_full_*_n1048576` cells
+  plus 6 cells at `n16777216`).
 - **Builds:** both arms from the same tenferro-rs commit. The candidate overrides the kernels
-  with `cargo build --release --features cuda --bin benchmark_gpu_public_api --config 'patch."https://github.com/tensor4all/t4a-cuda-kernels".t4a-cuda-kernels.path="<this branch>"'`.
-  The candidate binary embeds the new `reduce.cu` source, and the base binary does not.
+  with `cargo build --release --features cuda --bin benchmark_gpu_public_api --config 'patch."https://github.com/tensor4all/t4a-cuda-kernels".t4a-cuda-kernels.path="<this branch at 65a74d5>"'`.
 - **Order:** base, cand, base, cand.
-- **Ratio:** the mean of the two adjacent-pair ratios (individual pairs in parentheses).
-- **PyTorch drift:** the same ratio for the `pytorch-cuda` arm.
-- **Normalised:** ratio ÷ drift.
+- **Raw records:** `b-tenferro-65a74d5/{tf1-base,tf2-cand,tf3-base,tf4-cand}/*.jsonl`. Each
+  record holds every sample's `batch_ms` and `operations_per_sample`.
+- **Summary:** produced by `scripts/tfsumm.py`. The ratio is the mean of the two adjacent-pair
+  ratios (individual pairs in parentheses).
+- **PyTorch drift:** the same ratio for the `pytorch-cuda` arm. "Normalised" is ratio ÷ drift.
 
 | cell | direct base µs | direct cand µs | direct ratio | PyTorch drift | normalised | eager ratio | PyTorch µs |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `reduce_sum_full_f32_n1048576` | 28.01 | 27.09 | 0.967 (0.960/0.974) | 1.000 | 0.967 | 0.978 | 9.65 |
-| `reduce_sum_full_f64_n1048576` | 28.18 | 27.77 | 0.986 (0.976/0.995) | 1.001 | 0.985 | 0.985 | 11.02 |
-| `reduce_prod_full_f32_n1048576` | 34.30 | 34.23 | 0.998 (0.992/1.004) | 1.001 | 0.997 | 1.001 | 9.64 |
-| `reduce_prod_full_f64_n1048576` | 34.63 | 34.53 | 0.997 (0.990/1.004) | 1.000 | 0.996 | 0.997 | 11.04 |
-| `reduce_max_full_f32_n1048576` | 30.81 | 29.52 | 0.958 (0.953/0.963) | 1.001 | 0.957 | 0.966 | 10.23 |
-| `reduce_max_full_f64_n1048576` | 31.92 | 29.63 | 0.929 (0.918/0.939) | 1.001 | 0.927 | 0.950 | 11.56 |
-| `reduce_min_full_f32_n1048576` | 30.50 | 29.01 | 0.951 (0.945/0.957) | 1.002 | 0.949 | 0.971 | 10.23 |
-| `reduce_min_full_f64_n1048576` | 31.95 | 29.69 | 0.929 (0.918/0.941) | 1.000 | 0.930 | 0.946 | 11.56 |
-| `reduce_sum_full_f32_n16777216` | 81.15 | 66.43 | 0.819 (0.815/0.822) | 1.001 | 0.818 | 0.946 | 50.99 |
-| `reduce_sum_full_f64_n16777216` | 114.68 | 108.37 | 0.945 (0.948/0.942) | 1.000 | 0.945 | 0.981 | 87.89 |
-| `reduce_max_full_f32_n16777216` | 171.28 | 72.20 | 0.422 (0.422/0.421) | 1.000 | 0.421 | 0.703 | 51.63 |
-| `reduce_max_full_f64_n16777216` | 186.19 | 113.14 | 0.608 (0.607/0.608) | 1.000 | 0.608 | 0.852 | 88.68 |
-| `reduce_min_full_f32_n16777216` | 169.83 | 71.06 | 0.418 (0.418/0.419) | 1.000 | 0.419 | 0.705 | 51.66 |
-| `reduce_min_full_f64_n16777216` | 186.34 | 113.52 | 0.609 (0.609/0.610) | 0.998 | 0.610 | 0.848 | 88.66 |
-primary (6 x n16777216, direct): median raw 0.608 median normalised 0.609
-worst max_error_over_tolerance 0.9873446488113121 worst IQR%  3.5
+| `reduce_sum_full_f32_n1048576` | 27.84 | 27.06 | 0.972 (0.967/0.976) | 1.000 | 0.971 | 0.975 | 9.65 |
+| `reduce_sum_full_f64_n1048576` | 27.97 | 27.72 | 0.991 (0.983/0.999) | 1.000 | 0.991 | 0.981 | 11.03 |
+| `reduce_prod_full_f32_n1048576` | 34.26 | 34.13 | 0.996 (0.991/1.002) | 1.000 | 0.997 | 0.997 | 9.65 |
+| `reduce_prod_full_f64_n1048576` | 34.45 | 34.48 | 1.001 (0.995/1.007) | 1.000 | 1.001 | 1.001 | 11.04 |
+| `reduce_max_full_f32_n1048576` | 30.64 | 29.28 | 0.956 (0.949/0.963) | 1.000 | 0.955 | 0.957 | 10.24 |
+| `reduce_max_full_f64_n1048576` | 31.67 | 29.43 | 0.929 (0.926/0.932) | 1.001 | 0.928 | 0.951 | 11.57 |
+| `reduce_min_full_f32_n1048576` | 30.15 | 29.33 | 0.973 (0.970/0.976) | 1.001 | 0.971 | 0.965 | 10.23 |
+| `reduce_min_full_f64_n1048576` | 31.75 | 29.44 | 0.927 (0.922/0.933) | 1.000 | 0.928 | 0.945 | 11.57 |
+| `reduce_sum_full_f32_n16777216` | 81.01 | 67.07 | 0.828 (0.830/0.826) | 1.002 | 0.826 | 0.948 | 50.97 |
+| `reduce_sum_full_f64_n16777216` | 114.33 | 107.81 | 0.943 (0.942/0.944) | 0.998 | 0.945 | 0.983 | 87.95 |
+| `reduce_max_full_f32_n16777216` | 170.90 | 71.82 | 0.420 (0.419/0.421) | 1.000 | 0.420 | 0.701 | 51.70 |
+| `reduce_max_full_f64_n16777216` | 185.53 | 113.78 | 0.613 (0.612/0.615) | 1.000 | 0.613 | 0.852 | 88.68 |
+| `reduce_min_full_f32_n16777216` | 169.62 | 71.54 | 0.422 (0.420/0.424) | 1.001 | 0.421 | 0.706 | 51.67 |
+| `reduce_min_full_f64_n16777216` | 186.21 | 112.84 | 0.606 (0.605/0.607) | 1.001 | 0.606 | 0.849 | 88.65 |
+primary (6 x n16777216, direct): median raw 0.61 median normalised 0.609
+worst max_error_over_tolerance 0.9873446488113121 worst IQR%  1.5
 
-Verification: every cell of every arm passes `max_error_over_tolerance < 1` against the
+Verification: every cell of every arm has `max_error_over_tolerance < 1` against the
 NumPy/SciPy `f64` reference.
 - tenferro's worst is 0.745, on `reduce_prod_full_f32_n1048576`. It is identical before and
-  after, because `PROD` keeps its walk.
+  after.
 - The 0.987 maximum is PyTorch's own `prod` f32.
-- `reduce_sum_full_f32_n16777216` goes from 0.070 to below 0.05 of tolerance.
 
-**Gate.** The primary metric (design §5) is 0.609, against the ≤ 0.95 rule, so the slice is
-adopted.
+**Gate.** The primary metric (design §5) is **0.609**, against the ≤ 0.95 rule.
 
-## 5. Correctness and mutation evidence
+## 5. Correctness, mutation and instruction evidence (all at code `65a74d5`)
 
-- `cargo test -j 8 --release --features gpu-tests`: all 15 GPU test binaries pass.
-- `cargo test -j 8`, `cargo fmt --check` and `cargo clippy -j 8 --all-targets -- -D warnings`
-  are clean.
-- The new GPU tests add no clippy hit. The gpu-tests feature set has pre-existing clippy
-  failures in other files.
+**(a) Which commands run the GPU tests.**
+- `cargo test` and `cargo clippy` without features build no GPU test binary.
+  - `Cargo.toml` gives each `gpu_*` test `required-features = ["gpu-tests"]`.
+  - `a-cargo-test-default.log` shows only `unittests src/lib.rs`, `tests/fusion.rs` and
+    `tests/planning.rs` running.
+  - `a-cargo-clippy-default.log` exits 0.
+- The changed GPU tests were therefore run with the feature:
+  - `a-cargo-test-gpu-tests.log`: `cargo test -j 4 --release --features gpu-tests
+    --no-fail-fast`. All 15 test binaries pass and the command exits 0. `gpu_reduce` has 28
+    tests and `gpu_dynamic_rank` 23.
+  - `a-cargo-clippy-gpu-tests.log`: `cargo clippy -j 4 --keep-going --all-targets --features
+    gpu-tests -- -D warnings`. It exits 101 on lints that were already present in other files,
+    and in `tests/gpu_dynamic_rank.rs` below line 3030; none is in code this branch adds.
+    `tests/gpu_reduce.rs` and `tests/planning.rs` have no hit.
 
-Mutation check: each mutant was applied to `reduce.cu`, the new tests were run, and the
-original was restored.
+**(c) Mutation.** Each mutant patch was applied to `reduce.cu`, the walk tests ran, and the
+original was restored and its sha256 checked. Patches and full logs are in `c-mutants/<name>.{patch,log}`,
+and the driver is `scripts/gpu-evidence.sh`.
 
-| mutant | caught by |
+| mutant | result |
 | --- | --- |
-| drop the tail fold | `vector_walk_folds_every_element_once…`, `…propagates_a_nan…`, rank-9 twin |
-| drop the head fold | same three |
-| batch loads `index + b` instead of `index + b*W` | `vector_walk_folds_every_element_once…` |
-| first batch folds one vector too few | 2 tests |
-| last partial batch folds one vector too few | `vector_walk_folds_every_element_once…` (needs the 4M + 5 length or an 8-lane plane) |
-| head ignored (misaligned 16-byte loads) | `CUDA_ERROR_MISALIGNED_ADDRESS` in every walk test |
-| `PROD` allowed to regroup | `product_partials_keep_the_serial_lane_walk_bit_for_bit` |
+| `drop-tail` | 5 tests FAILED |
+| `batch-overlap` (whole-batch loads `index + b`) | 2 FAILED |
+| `first-batch-short` | 2 FAILED |
+| `last-batch-short` | 2 FAILED (reached by the 917 507-element case) |
+| `aligned-test-too-weak` (16-byte loads on 4-byte-aligned chunks) | `CUDA_ERROR_MISALIGNED_ADDRESS` in 4 places |
+| `scalar-group-load-wrong` | 6 FAILED |
+| `prod-regrouped` | 1 FAILED (`product_partials_keep_the_serial_lane_walk_bit_for_bit`) |
 
-In the first test version, two mutants survived: the whole-batch loop and the 3-left partial
-batch never ran on ~256-element chunks. The 4M + 5 length and 8- and 16-lane planes were added
-for that.
+**(c) Instructions.**
+- `c-sass-diff.log` is the raw `scripts/sass-diff.sh 31b734e` output: 92 entries identical, and
+  only `t4a_cuda_reduce_partials` and `t4a_cuda_reduce_partials_any` differ.
+- `c-ptxas.log` has the `ptxas -v` output for both trees: registers per entry and zero spill
+  bytes.
 
-## 6. Review
+**Not runnable here.** `gpt_review.sh`, the external GPT review driver, is not installed on
+this host, and the review states it runs on a Darwin host. It has to be run there.
 
-- The repository's `independent-review` skill (`openai/gpt-6.1-sol`) is not installed on this
-  host.
-- A fresh-context reviewer agent was given the diff and `docs/review-checklist.md` instead.
-- It found no correctness bug.
-- Its two test notes were fixed: a wrong alignment comment in the rank-9 test, and plane
-  width 16.
-- It confirmed that `c-kernel-abi.md`'s bump rules do not require a revision change.
+## 6. Review witnesses (GPT-6.1-sol review of #23)
+
+- **Point 1, the stride checked after the pointer is formed.**
+  `tests/planning.rs::pass1_checks_the_axis_stride_before_forming_a_chunk_pointer` fails on
+  `3718481` and passes from `469284f`. The GPU test of the review's two layouts (stride 0 over
+  one element, stride -1 at offset 511) passes on both: the UB is not observable.
+- **Point 2, a topology that depends on the address.**
+  `gpu_reduce.rs::pass1_topology_does_not_depend_on_the_input_address` failed on `3718481`
+  with `0 vs NaN` and passes from `469284f`.
+- **Point 3, the lane assignment.**
+  - `gpu_reduce.rs::pass1_overflow_follows_the_revision_13_grouping` fails on the
+    revision-12 kernel (`31b734e`) and passes from `65a74d5`.
+  - The NaN of `x0 = x1 = A, x32 = x33 = -A` is the `A + A` overflow in one group: with
+    `A = 1` the same placement sums to exactly `0`.
+  - `pass1_folds_nothing_outside_its_chunk` (NaN guards) and
+    `pass1_adds_exactly_the_one_nonzero_element` pin that no empty lane or unloaded batch slot
+    contributes.
+  - `an_empty_reduction_axis_is_refused_before_any_launch` pins the empty axis.
+
+## 7. Restoring the revision-12 lanes with warp shuffles: measured, not adopted
+
+**What was built.** The prototype is `d-shuffle-prototype/prototype.patch`, against `65a74d5`
+and not on this branch.
+- Lane `t` of a 32-lane block keeps owning chunk elements `t + 32k` in order.
+- Each lane loads the 16-byte vector `stripe * 32 + lane`.
+- Each owner receives its element through `__shfl_sync`, `V` shuffles per element.
+- It covers a 16-byte-aligned chunk, plane width 32 and `len % (32V) == 0`, which is every
+  measured full-reduction cell. Every other case uses the serial walk.
+
+**Bit identity.** Its partials and results are bit-identical to the revision-12 serial walk
+(`31b734e`) for F32/F64 `SUM`, `MAX` and `SUM_SQUARES` at 1M and 16M.
+- `d-shuffle-prototype/partials-{prototype,serial-31b734e}.txt.gz` are the 4096-partial dumps.
+- `cmp` reports them identical, and `partials.sha256` holds the hashes.
+
+**Timing.** Pass-1 device time, nsys, with all three variants measured in the same session:
+
+| case | serial walk, `31b734e` µs | vector walk, `65a74d5` µs | shuffle prototype µs | shuffle − vector |
+|---|---:|---:|---:|---:|
+| `reduce-sum-f32-full-1048576` | 8.9 | 8.1 | 8.7 | +0.5 µs |
+| `reduce-max-f32-full-1048576` | 10.5 | 8.8 | 8.9 | +0.0 µs |
+| `reduce-sum-f64-full-1048576` | 9.0 | 8.5 | 8.4 | -0.1 µs |
+| `reduce-max-f64-full-1048576` | 10.4 | 8.8 | 9.8 | +0.9 µs |
+| `reduce-sum-f32-full-16777216` | 61.0 | 46.7 | 52.4 | +5.6 µs |
+| `reduce-max-f32-full-16777216` | 149.3 | 49.0 | 55.3 | +6.3 µs |
+| `reduce-min-f32-full-16777216` | 148.9 | 49.3 | 55.3 | +6.0 µs |
+| `reduce-sum-f64-full-16777216` | 94.4 | 87.3 | 90.2 | +2.9 µs |
+| `reduce-max-f64-full-16777216` | 163.5 | 90.6 | 98.3 | +7.8 µs |
+| `reduce-min-f64-full-16777216` | 163.7 | 90.6 | 98.4 | +7.8 µs |
+
+**Conclusion: not worth it.**
+- **Cost:** keeping the revision-12 topology costs **+5.6 to +7.8 µs per call at 16M** for
+  F32/F64 `SUM`/`MAX`/`MIN` (`SUM` f64 +2.9 µs). That is 12-16 % of the vector walk's pass 1.
+  It is under the 10-15 µs estimated beforehand, and close to nothing at 1M.
+- **What it would buy:** bit compatibility with revision 12 only. Revision 12's topology is not
+  more accurate: the two documented witnesses flip classification in opposite directions.
+- **What it would also need:**
+  - more code for chunks that start off a 16-byte boundary, for plane widths 8 and 16, and for
+    lengths that do not fill a stripe;
+  - a fourth shuffle-dependent fold order, alongside the serial, group and combine folds, to
+    keep tested.
+
+Revision 13 keeps the cheaper topology and states it.

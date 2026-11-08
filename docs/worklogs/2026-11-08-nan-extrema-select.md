@@ -205,3 +205,38 @@ Median [Q1-Q3] over 6 rounds, µs. Device time is nsys `Avg` per launch; host ti
   fixed before the final push (a parenthetical claiming one line annotation per instruction, and
   a stale cross-reference in the provenance caveat). Two earlier rounds on the same file found
   the missing section extents and the incomplete loop; those are what the excerpts now carry.
+
+### 5. Evidence re-checked on this branch (2026-11-09)
+
+This branch (`3999c3f`) changes only `docs/` on top of `18e061c`. `cuda/`, `examples/` and
+`bit-identity.cu` are byte-identical to `18e061c`, so the GPU evidence of "Review follow-up" §1
+and §2 applies to it. Two re-checks follow, both on primerose (A100 80GB PCIe, driver
+580.178.04, CUDA 12.6), under `flock /tmp/gpu-slot.lock`, with `taskset -c 0-7` and cores 0-7
+idle.
+
+- **Failure-path determinism** (`bit-identity-determinism.log`, tree `3999c3f`). Each of three
+  programs ran three times, and the three outputs, with their exit codes, are byte-identical:
+  - `bit-identity.cu`: `compared 67109120, mismatches 0` per type, exit 0
+  - the injected mismatch (`if (true)` in the kernel): `mismatches 67109120` per type, exit 1
+  - the review's reproduction (that, plus the final download into `nullptr`): `CUDA failure at
+    ...inject-download.cu:60: cudaMemcpy(nullptr, dcounters, ...) -> invalid argument`, exit 2.
+    No mismatch line is printed.
+
+  The injected copies were made with `sed` (their diffs are in the log) and deleted before the
+  runs.
+- **Elementwise `MAX`/`MIN` re-run** (`elementwise-merged/`). This is a second paired campaign of
+  `3c8d82c` against a bench whose `cuda/` and `examples/` are byte-identical to this branch: 4
+  rounds, all complete, 96 runs, every one `check=ok`.
+  - **About the "merged" side.** `stop.log` calls it "merged = tree 10969e5". That tree was a
+    local merge of #27's earlier head with `18e061c`; it was never pushed, and #27 was rebuilt
+    on `18e061c` instead. Its `cuda/` and `examples/` are the ones here.
+  - **Device time.** Lower than `3c8d82c` in all 12 cells, with disjoint IQRs: 2.08-2.14 µs vs
+    2.13-2.18 at 1000, 7.63-9.25 vs 7.80-9.34 at 1M, 138.71-250.94 vs 139.23-251.12 at 16M.
+    Every median is within 0.06 µs of §2's.
+  - **Host time.** From 1M up, every host ratio is 0.967-1.000. The launch-bound 1000-element
+    cells are not settled either way:
+    - `max` f32 1000 reads 1.161 and `max` f64 1000 reads 1.291, both with overlapping IQRs.
+    - The merged side's IQR is wide: 3.73-6.07 µs for f64.
+    - The same cells read 0.833 and 0.965 in §2.
+
+  `elementwise-merged/table.md` has the full median [Q1-Q3] table and the per-round values.

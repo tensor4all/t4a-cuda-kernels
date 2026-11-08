@@ -13,9 +13,10 @@
 # Run on evo2 (Ryzen AI MAX+ 395, no NVIDIA device, no driver): compiling and disassembling
 # need no GPU, so this file is a per-instruction claim only. It measures nothing.
 #
-# Excerpts keep LDG/DSETP/FSETP/FSEL/FMNMX/BSSY/BSYNC/BRA and the line markers, and drop the
-# address arithmetic and register moves between them. Registers (`.sectioninfo`): both trees
-# report SHI_REGISTERS=40 for `t4a_cuda_reduce` and 38 for `t4a_cuda_binary`.
+# Each excerpt starts with the raw `.section`/`.sectioninfo` header nvdisasm prints for the
+# enclosing section, so the symbol it belongs to travels with the instructions. After the header,
+# the excerpt keeps LDG/DSETP/FSETP/FSEL/FMNMX/BSSY/BSYNC/BRA and the line markers, and drops the
+# address arithmetic and register moves between them.
 #
 # abi.cuh, this branch -> 3c8d82c:
 #   t4a_cuda_nan_max(float)   748-751 -> 745-751
@@ -28,6 +29,10 @@
 ##    This is the entry the PR's pass-2 number comes from.
 
 ### 3c8d82c: one load per fold, behind a branch on the accumulator
+	.section	.text.t4a_cuda_reduce,"ax",@progbits
+	.sectionflags	@"SHF_BARRIERS=1"
+	.sectioninfo	@"SHI_REGISTERS=40"
+.text.t4a_cuda_reduce:
         /*39f30*/                   DSETP.NAN.AND P2, PT, R20, R20, PT ;
 	//## src/reduce.cu:252
         /*39f50*/                   BSSY B2, `(.L_x_5342) ;
@@ -66,6 +71,10 @@
 	//## include/t4a/abi.cuh:775
 
 ### this branch: the loads are issued ahead of the folds, no branch on the accumulator
+	.section	.text.t4a_cuda_reduce,"ax",@progbits
+	.sectionflags	@"SHF_BARRIERS=1"
+	.sectioninfo	@"SHI_REGISTERS=40"
+.text.t4a_cuda_reduce:
 	//## src/reduce.cu:253
         /*3bb00*/                   LDG.E.64 R2, [R2.64] ;
 	//## include/t4a/abi.cuh:767
@@ -109,6 +118,10 @@
 ##    745-751 at 3c8d82c) and 0x1310 the float `MIN` arm.
 
 ### 3c8d82c: two branches per element pair
+	.section	.text.t4a_cuda_binary,"ax",@progbits
+	.sectioninfo	@"SHI_REGISTERS=38"
+        .global         t4a_cuda_binary
+.text.t4a_cuda_binary:
         /*1290*/                   BSYNC B0 ;
         /*12a0*/                   BRA `(.L_x_267) ;
 	//## include/t4a/abi.cuh:745
@@ -140,6 +153,10 @@
         /*1490*/                   BSSY B2, `(.L_x_276) ;
 
 ### this branch: no branch, two selects per element pair
+	.section	.text.t4a_cuda_binary,"ax",@progbits
+	.sectioninfo	@"SHI_REGISTERS=38"
+        .global         t4a_cuda_binary
+.text.t4a_cuda_binary:
         /*1290*/                   BSYNC B0 ;
         /*12a0*/                   BRA `(.L_x_267) ;
 	//## include/t4a/abi.cuh:750

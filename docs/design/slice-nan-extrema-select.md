@@ -21,9 +21,10 @@ When the accumulator is NaN, `rhs` is unused, so the compiler is free to sink th
 produces `rhs` under a branch on the accumulator. In the strided loop of
 `plane_reduce_body` (`cuda/src/reduce.cu`, the combine pass), every load then waits for the
 previous fold: the SASS is `FSETP.NAN acc` → `@P BRA` → `LDG` → `FMNMX`, once per element.
-`SUM` unrolls the same loop four times and issues four `LDG`s before its `FADD`s.
-(`sass-plane-loop.log` shows both in a probe kernel; `sass-production.log` shows them on the
-entries themselves, `t4a_cuda_reduce` at `reduce.cu:252-253` and `t4a_cuda_binary`.)
+`SUM` unrolls the same loop four times and issues four `LDG`s before its `FADD`s — stated
+here as the contrast, not shown in the logs. The extrema loop itself is in both:
+`sass-plane-loop.log` in a probe kernel, `sass-production.log` on the entries,
+`t4a_cuda_reduce` at `reduce.cu:252-253` (double `MIN`) and `t4a_cuda_binary`.
 
 ## Change
 
@@ -36,8 +37,10 @@ return lhs != lhs ? lhs : right;
 ```
 
 - Same result for every input: a NaN `lhs` wins, then a NaN `rhs`, then the ordered value,
-  including NaN payloads and signed zeros (bit-identity checked on the GPU against the old form
-  over all pairs of 16 special values and 2^26 random bit patterns per type).
+  including NaN payloads and signed zeros (compared on the GPU against the old form over all
+  pairs of 16 special values and 2^26 random bit patterns per type). That comparison was the
+  2026-11-08 harness, which ignored every CUDA return value; the checked re-run is still
+  outstanding (worklog, "Correctness").
 - No change to the ABI, the plan, launch geometry, symbols, signatures, structs or the ABI
   revision. Integer extrema are untouched.
 - Affected entries (`scripts/sass-diff.sh 3c8d82c`): `t4a_cuda_reduce`, `t4a_cuda_reduce_any`,

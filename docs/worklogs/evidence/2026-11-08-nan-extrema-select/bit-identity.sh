@@ -28,7 +28,7 @@ run() { # run <label> [args...]
     printf '\n## %s\n$ ./bit-identity %s\n%s\n# exit %d\n' "$label" "$*" "$out" "$code"
 }
 
-run "same values, checked" 
-run "copy one element past the allocation, checked" --bad-copy
+run "same values, checked"
+run "copy from a null host pointer, checked" --copy-fails
 run "allocation the device cannot satisfy (160 GB on an 80 GB card), checked" --n 40000000000
-run "copy one element past the allocation, every return value ignored (the pre-fix harness)" --legacy --bad-copy
+run "copy from a null host pointer, every return value ignored (the pre-fix harness)" --legacy --copy-fails

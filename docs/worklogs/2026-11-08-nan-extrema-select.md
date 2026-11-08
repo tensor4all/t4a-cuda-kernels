@@ -12,8 +12,9 @@ Both were built with `cargo build -j 8 --release --features gpu-tests --example
 bench_kernels`, and the two binaries ran alternately, three rounds (main, fix) × 3, with
 `knsys.sh` (`nsys profile` over 100 launches, `nsys stats --report cuda_gpu_kern_sum`).
 Nothing else was running on the GPU. Every bench run reports `check=ok`. The measured
-candidate tree is exactly this branch's commit: the diff against `3c8d82c` is `abi.cuh` plus
-`docs/`.
+candidate tree is `3eb8376`: the diff against `3c8d82c` is `abi.cuh` plus `docs/`. (The branch
+head has moved since, and the later commits touch only `docs/`, the evidence programs and
+`examples/bench_kernels.rs`.)
 
 The evidence revision of 2026-11-09 (checked `bit-identity.cu`, `sass-production.log`, the
 `elementwise-max-f32` bench cases) was produced on evo2 (Ryzen AI MAX+ 395, no NVIDIA device,
@@ -64,23 +65,22 @@ pass 1 + pass 2, no host wait). The per-round values are in `nsys/table.md`.
 
 ## Correctness
 
-- `bit-identity.log` Part 1: the new and old functions, compiled into one GPU program, agree
-  bit for bit for `max` and `min` over 67 109 120 pairs per type. The pairs are all 16 × 16
-  pairs of special values (±0, ±1, ±Inf, ±smallest subnormal, ±largest finite, and quiet,
-  signalling and negative NaNs with distinct payloads), plus 2^26 random bit patterns, one
-  third of them pairs of neighbouring values. That harness ignored every CUDA return value,
-  which is what #26 reports: on a host where the copy fails it still printed `mismatches 0`
-  and exited 0 (`bit-identity.log` Part 2, last block).
-- `bit-identity.log` Part 2: the checked harness (`CUDA_CHECK` around every call, device
+- `bit-identity.log` Part 1, **unchecked harness**: a zero-mismatch *observation* for `max`
+  and `min` over 67 109 120 pairs per type, from a run whose every CUDA return value was
+  ignored. The pairs are all 16 × 16 pairs of special values (±0, ±1, ±Inf, ±smallest
+  subnormal, ±largest finite, and quiet, signalling and negative NaNs with distinct payloads),
+  plus 2^26 random bit patterns, one third of them pairs of neighbouring values. Because the
+  harness is what #26 reports, this is not a bit-identity proof: on a host where the copy fails
+  it prints the same `mismatches 0` and exits 0 (Part 2, last block).
+- `bit-identity.log` Part 2, checked harness (`CUDA_CHECK` around every call, device
   allocations before host ones so a failed `cudaMalloc` is not followed by an uninitialised
   pointer). `./bit-identity.sh` records the exit code of four runs.
-  - With a device: `./bit-identity` exits 0 with `total mismatches 0`; `--bad-copy` (a copy
-    one element past the allocation) and `--n 40000000000` (160 GB on an 80 GB card) each
-    exit 2 with the failing call and the error on stderr. **Not yet taken: this revision was
-    built on a host without a device.**
+  - **Checked bit identity on a device is not measured.** That is the one gap this revision
+    leaves: it was built on a host without a device (`--copy-fails`, a null host pointer, is
+    the copy failure; `cudaMemcpy` rejects it without reading anything).
   - Without a device (evo2): every checked run exits 2 at `cudaMalloc` with the driver error
-    on stderr, and `--legacy --bad-copy` — the pre-fix behaviour — prints `mismatches 0` and
-    exits 0 with no comparison made. Both are in Part 2.
+    on stderr, and `--legacy --copy-fails` — the pre-fix behaviour — prints `mismatches 0`
+    and exits 0 with no comparison made. Both are in Part 2.
 - `cargo-test-gpu-tests.log` (run on `3eb8376`, the code of this branch): `cargo test -j 4 --release --features gpu-tests
   --no-fail-fast` passes (all 15 test binaries and the doc-tests, `# exit 0`). This includes
   `binary_extrema_pow_rem_and_scalar_division`, which checks that the lhs NaN payload

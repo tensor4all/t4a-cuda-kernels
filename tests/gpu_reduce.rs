@@ -2506,8 +2506,9 @@ fn pass1_folds_nothing_outside_its_chunk() {
 
 #[test]
 fn pass1_adds_exactly_the_one_nonzero_element() {
-    // All zeros except one 1.0, moved through the first group, a group interior, the last
-    // whole group and the tail of a chunk: the sum is exactly 1, the partial of the chunk that
+    // All zeros except one 1.0, placed at 13 chosen positions (F32, plane width 32, input
+    // leads 0-3; not an exhaustive sweep) that cover the first group, a group interior, the
+    // last whole group and the tail of a chunk: the sum is exactly 1, the partial of the chunk that
     // holds the element is exactly 1 and every other partial is exactly +0.0. An empty lane or
     // an unloaded batch slot that contributed anything would break the zeros.
     let session = Session::new("reduce");

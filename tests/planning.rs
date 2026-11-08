@@ -3687,16 +3687,72 @@ fn pass1_checks_the_axis_stride_before_forming_a_chunk_pointer() {
     // allocation (for example `in + 256` for a one-element input broadcast to 512). Forming
     // such a pointer is undefined behaviour even if it is never dereferenced, so the pass-1
     // dispatch must test the stride first and form the chunk pointer only inside that branch.
+    //
+    // Text order is not enough: hoisting `const T* chunk = in + in_base + start;` above an
+    // `if (contiguous && ...)` keeps the stride test first in the file and still forms the
+    // pointer unconditionally. So every `in + ...` pointer expression in the dispatch must sit
+    // inside a block opened by an `if` whose condition has `axis_stride == 1` as a top-level
+    // `&&` conjunct, with code comments stripped first.
     let source = include_str!("../cuda/src/reduce.cu");
-    let body = function_body(source, "__forceinline__ T t4a_cuda_partials_walk(");
-    let stride_check = body
-        .find("axis_stride == 1")
-        .expect("the pass-1 dispatch tests the axis stride itself");
-    let pointer = body
-        .find("const T* chunk = in + in_base + start;")
-        .expect("the pass-1 dispatch forms the chunk pointer");
+    let body = strip_line_comments(function_body(
+        source,
+        "__forceinline__ T t4a_cuda_partials_walk(",
+    ));
+    let pointers: Vec<usize> = body.match_indices("in + ").map(|(at, _)| at).collect();
     assert!(
-        stride_check < pointer,
-        "the chunk pointer is formed before the stride check:\n{body}"
+        !pointers.is_empty(),
+        "the pass-1 dispatch forms the chunk pointer:\n{body}"
     );
+    for at in pointers {
+        let guarded = enclosing_block_headers(&body, at).iter().any(|header| {
+            header
+                .trim()
+                .strip_prefix("if")
+                .map(str::trim)
+                .and_then(|cond| cond.strip_prefix('('))
+                .and_then(|cond| cond.strip_suffix(')'))
+                .is_some_and(|cond| {
+                    !cond.contains("||")
+                        && cond
+                            .split("&&")
+                            .any(|term| term.trim() == "axis_stride == 1")
+                })
+        });
+        assert!(
+            guarded,
+            "a pointer `in + ...` at byte {at} is formed outside an `if (axis_stride == 1 && ...)` \
+             block:\n{body}"
+        );
+    }
+}
+
+/// `source` with every `//` comment removed, so prose cannot satisfy a source contract.
+fn strip_line_comments(source: &str) -> String {
+    source
+        .lines()
+        .map(|line| line.split("//").next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The headers (the text between the previous `;`, `{` or `}` and the opening `{`) of every
+/// block that encloses byte `at` of `body`, innermost first.
+fn enclosing_block_headers(body: &str, at: usize) -> Vec<&str> {
+    let bytes = body.as_bytes();
+    let mut headers = Vec::new();
+    let mut depth = 0usize;
+    for open in (0..at).rev() {
+        match bytes[open] {
+            b'}' => depth += 1,
+            b'{' if depth > 0 => depth -= 1,
+            b'{' => {
+                let start = body[..open]
+                    .rfind([';', '{', '}'])
+                    .map_or(0, |boundary| boundary + 1);
+                headers.push(&body[start..open]);
+            }
+            _ => {}
+        }
+    }
+    headers
 }

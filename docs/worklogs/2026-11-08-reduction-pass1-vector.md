@@ -10,7 +10,7 @@ The raw evidence for every table below is in
 
 | Item | Value |
 | --- | --- |
-| Measured candidate | **code at `65a74d5`** (ABI revision 13). Later commits on this branch touch only `docs/`. |
+| Measured candidate | **code at `65a74d5`** (ABI revision 13). The kernel and library sources (`cuda/`, `src/`) are unchanged after it. Tests changed in `3b65e03` (`tests/planning.rs`, a comment in `tests/gpu_reduce.rs`) and `01dc9b0` (`tests/planning.rs`); every other later commit touches only `docs/`. The GPU suite was re-run on `3b65e03` (§8) and `3d9847e` (§9), which includes both test changes. |
 | Baseline | `31b734e`: library `e1f56e4` plus this branch's harness-only commit |
 | Through tenferro | tenferro-rs `a09c8d724dfd897ba85de0c06c293b3f8f8d7238`, tenferro-benchmark `c3cc78394667c1e1a99621777db13d7c23ec4232`, PyTorch 2.12.0+cu130 |
 | GPU | NVIDIA A100 80GB PCIe, compute capability 8.0, driver 580.178.04 |
@@ -282,6 +282,7 @@ Revision 13 keeps the cheaper topology and states it.
 | `or-guard` (`axis_stride == 1 \|\| ...`) | `FAILED. 0 passed; 1 failed` | the same two, and both witnesses take the vector walk |
 | `no-stride-check` | `FAILED. 0 passed; 1 failed` | the same |
 | `var-guard` (pointer inside `if (contiguous && ...)`, which is safe) | `ok. 1 passed` | none |
+| `negated-guard` (15:30Z review: `if (!(false && axis_stride == 1 && ...))`) | `FAILED. 0 passed; 1 failed` | `formed in + 256 over an allocation of 1`, `formed in + 767 over an allocation of 512` |
 
 - The probe stubs the walks, so it proves where the pointer is formed, not what the walks
   compute; the GPU tests cover that.
@@ -340,3 +341,15 @@ Median `t4a_cuda_reduce_partials` time, mean of the two runs, with each run in p
 Every cell agrees with §2 (measured on `65a74d5`) to within 0.1 µs, except the baseline of
 `reduce-sum-f64-full-16777216` (94.2 µs, was 94.4). The two runs of one side differ by at most
 0.61 % (`reduce-max-f64-full-1048576` baseline).
+
+## 10. GPT-6.1-sol review of 2026-11-08T15:30Z (read head `a01544f`)
+
+- **Point 1, the `&&`-split guard check.** The finding is correct for `a01544f`: the negated
+  condition `if (!(false && axis_stride == 1 && ...))` passes that text check
+  (`g-pointer-guard-mutants/negated-guard-a01544f-test.log`: `ok. 1 passed`). Since `01dc9b0`
+  the test runs the dispatch rather than parsing its condition (§8), and the same mutant fails it
+  (`negated-guard.log`: `FAILED. 0 passed; 1 failed`, both witnesses form an out-of-range
+  pointer and take the vector walk).
+- **Point 2, provenance.** §1 claimed that every commit after `65a74d5` touches only `docs/`.
+  It now says that the kernel and library sources are unchanged after `65a74d5` and names the two
+  commits that changed tests.

@@ -1,0 +1,14 @@
+diff --git a/cuda/src/reduce.cu b/cuda/src/reduce.cu
+index d580701..6524759 100644
+--- a/cuda/src/reduce.cu
++++ b/cuda/src/reduce.cu
+@@ -455,7 +455,8 @@ __device__ __forceinline__ T t4a_cuda_partials_walk(const T* in,
+     // The stride comes first: `in + in_base + start` is an address inside the input only on
+     // a contiguous axis (a broadcast or reversed axis can put it outside the allocation, and
+     // forming such a pointer is undefined behaviour).
+-    if (axis_stride == 1 && t4a_cuda_vector_walk_applies<T>(end - start, plane_width)) {
++    if (!(false && axis_stride == 1 &&
++          t4a_cuda_vector_walk_applies<T>(end - start, plane_width))) {
+       const T* chunk = in + in_base + start;
+       // INVARIANT: element pointers are aligned to their dtype (c-kernel-abi.md, "Types");
+       // the 16-byte test only selects the load instruction, never the topology.

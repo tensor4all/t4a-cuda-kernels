@@ -18,7 +18,7 @@ These are raw outputs, as produced. The worklog
 | `h-cargo-test-gpu-tests-3d9847e.log` | the same GPU test command re-run on `3d9847e` |
 | `i-nsys-3d9847e/` | pass-1 nsys re-measurement, `31b734e` against `3d9847e`, two interleaved runs |
 | `f-sass-ldg128.log` | `cuobjdump --dump-sass` of the pass-1 build: `LDG.E.128` counts per entry on both trees and an instruction excerpt |
-| `g-pointer-guard-mutants/*.{patch,log}` | the executed pointer-guard probe against five mutants, and the old text-order test against both review mutants |
+| `g-pointer-guard-mutants/*.{patch,log}` | the executed pointer-guard probe against six mutants, and the earlier text checks against the review mutants |
 | `scripts/` | the drivers that produced the above |
 
 The scripts carry the absolute paths of the session that ran them: a scratch directory, and

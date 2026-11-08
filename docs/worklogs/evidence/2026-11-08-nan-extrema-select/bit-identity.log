@@ -1,0 +1,5 @@
+# $ nvcc -std=c++17 -arch=sm_80 -o eq bit-identity.cu && ./eq   (CUDA 12.6, A100 80GB PCIe, driver 580.178.04)
+f32: 67109120 pairs (16 special^2 + 67108864 random), mismatches 0, cuda no error
+f64: 67109120 pairs (16 special^2 + 67108864 random), mismatches 0, cuda no error
+total mismatches 0
+# exit 0

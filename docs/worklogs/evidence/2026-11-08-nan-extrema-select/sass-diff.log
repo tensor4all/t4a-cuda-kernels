@@ -1,0 +1,9 @@
+Preparing worktree (detached HEAD 3c8d82c)
+symbols present in both trees: 94
+identical: 89
+added by this branch: 0
+DIFFERS  elementwise.txt: t4a_cuda_binary -- SASS differs
+DIFFERS  reduce.txt: t4a_cuda_reduce -- SASS differs
+DIFFERS  reduce.txt: t4a_cuda_reduce_any -- SASS differs
+DIFFERS  reduce.txt: t4a_cuda_reduce_partials -- SASS differs
+DIFFERS  reduce.txt: t4a_cuda_reduce_partials_any -- SASS differs

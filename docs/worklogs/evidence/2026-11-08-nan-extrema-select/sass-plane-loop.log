@@ -1,0 +1,65 @@
+# plane_reduce_body<MaxFold, float> (the combine pass's loop, reduce.cu) compiled alone in a probe kernel
+# $ nvcc -std=c++17 -cubin -arch=sm_80 -I <tree>/cuda/include probe.cu; cuobjdump --dump-sass -fun probe_max probe.cubin | grep -E "LDG|FMNMX|FSETP|FSEL|BRA"
+# CUDA 12.6 (Build cuda_12.6.r12.6/compiler.35059454_0)
+
+## main 3c8d82c (early-return form)
+        /*17a0*/              @!P0 BRA 0x19a0 ;
+        /*1870*/                   FSETP.NAN.AND P2, PT, R0, R0, PT ;
+        /*18e0*/               @P2 BRA 0x1950 ;
+        /*1900*/                   LDG.E R23, [R16.64] ;
+        /*1920*/                   FSETP.NAN.AND P2, PT, R23, R23, PT ;
+        /*1940*/              @!P2 FMNMX R0, R23, R6, !PT ;
+        /*1990*/               @P0 BRA 0x1870 ;
+        /*19d0*/              @!P0 BRA 0x1df0 ;
+        /*1ae0*/                   FSETP.NAN.AND P0, PT, R0, R0, PT ;
+        /*1b20*/               @P0 BRA 0x1b70 ;
+        /*1b40*/                   LDG.E R6, [R2.64] ;
+        /*1b50*/                   FSETP.NAN.AND P0, PT, R6, R6, PT ;
+        /*1b60*/              @!P0 FMNMX R6, R6, R0, !PT ;
+        /*1b80*/                   FSETP.NAN.AND P1, PT, R6, R6, PT ;
+        /*1bd0*/               @P1 BRA 0x1c10 ;
+        /*1be0*/                   LDG.E R0, [R14.64] ;
+        /*1bf0*/                   FSETP.NAN.AND P1, PT, R0, R0, PT ;
+        /*1c00*/              @!P1 FMNMX R0, R0, R6, !PT ;
+        /*1c20*/                   FSETP.NAN.AND P1, PT, R0, R0, PT ;
+        /*1c70*/               @P1 BRA 0x1cb0 ;
+        /*1c80*/                   LDG.E R6, [R2.64] ;
+        /*1c90*/                   FSETP.NAN.AND P0, PT, R6, R6, PT ;
+        /*1ca0*/              @!P0 FMNMX R6, R6, R0, !PT ;
+        /*1cc0*/                   FSETP.NAN.AND P0, PT, R6, R6, PT ;
+        /*1d00*/               @P0 BRA 0x1d40 ;
+        /*1d10*/                   LDG.E R0, [R14.64] ;
+        /*1d20*/                   FSETP.NAN.AND P0, PT, R0, R0, PT ;
+        /*1d30*/              @!P0 FMNMX R0, R0, R6, !PT ;
+        /*1de0*/              @!P0 BRA 0x1ae0 ;
+
+## this branch (select form)
+        /*17d0*/              @!P1 BRA 0x1990 ;
+        /*18b0*/                   LDG.E R19, [R14.64] ;
+        /*1930*/                   FSETP.NAN.AND P3, PT, R0, R0, PT ;
+        /*1950*/                   FSETP.NAN.AND P2, PT, R19, R19, PT ;
+        /*1960*/              @!P2 FMNMX R19, R19, R0, !PT ;
+        /*1970*/                   FSEL R0, R0, R19, P3 ;
+        /*1980*/               @P1 BRA 0x18a0 ;
+        /*19a0*/              @!P0 BRA 0x1d10 ;
+        /*1ae0*/                   LDG.E R3, [R2.64] ;
+        /*1b10*/                   LDG.E R21, [R14.64] ;
+        /*1b30*/                   LDG.E R23, [R16.64] ;
+        /*1b60*/                   LDG.E R27, [R18.64] ;
+        /*1b70*/                   FSETP.NAN.AND P2, PT, R0, R0, PT ;
+        /*1b90*/                   FSETP.NAN.AND P0, PT, R3, R3, PT ;
+        /*1ba0*/                   FSETP.NAN.AND P1, PT, R21, R21, PT ;
+        /*1bb0*/              @!P0 FMNMX R3, R3, R0, !PT ;
+        /*1bc0*/                   FSETP.NAN.AND P0, PT, R23, R23, PT ;
+        /*1bd0*/                   FSEL R0, R0, R3, P2 ;
+        /*1bf0*/                   FSETP.NAN.AND P4, PT, R0.reuse, R0, PT ;
+        /*1c00*/              @!P1 FMNMX R21, R0, R21, !PT ;
+        /*1c10*/                   FSETP.NAN.AND P1, PT, R27, R27, PT ;
+        /*1c20*/                   FSEL R0, R0, R21, P4 ;
+        /*1c50*/              @!P0 FMNMX R23, R0, R23, !PT ;
+        /*1c80*/                   FSETP.NAN.AND P2, PT, R0.reuse, R0, PT ;
+        /*1ca0*/                   FSEL R0, R0, R23, P2 ;
+        /*1cc0*/                   FSETP.NAN.AND P2, PT, R0, R0, PT ;
+        /*1cd0*/              @!P1 FMNMX R27, R0, R27, !PT ;
+        /*1cf0*/                   FSEL R0, R0, R27, P2 ;
+        /*1d00*/              @!P0 BRA 0x1ab0 ;

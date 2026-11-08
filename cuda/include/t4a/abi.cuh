@@ -740,45 +740,33 @@ __device__ __forceinline__ t4a_cuda_c64 t4a_cuda_shfl_xor(t4a_cuda_c64 value, in
   return result;
 }
 
-// NaN-propagating extrema: a NaN operand wins, otherwise the ordered maximum.
+// NaN-propagating extrema: a NaN operand wins (the left one if both are NaN), otherwise the
+// ordered maximum. Written as selects over values that are all computed, not as early
+// returns: with `if (lhs != lhs) return lhs;` the compiler may sink the load that produces
+// `rhs` under a branch on the accumulator, so each load in a reduction loop waits for the
+// previous fold and L2/DRAM latency is paid once per element.
 __device__ __forceinline__ float t4a_cuda_nan_max(float lhs, float rhs) {
-  if (lhs != lhs) {
-    return lhs;
-  }
-  if (rhs != rhs) {
-    return rhs;
-  }
-  return fmaxf(lhs, rhs);
+  const float ordered = fmaxf(lhs, rhs);
+  const float right = rhs != rhs ? rhs : ordered;
+  return lhs != lhs ? lhs : right;
 }
 
 __device__ __forceinline__ double t4a_cuda_nan_max(double lhs, double rhs) {
-  if (lhs != lhs) {
-    return lhs;
-  }
-  if (rhs != rhs) {
-    return rhs;
-  }
-  return fmax(lhs, rhs);
+  const double ordered = fmax(lhs, rhs);
+  const double right = rhs != rhs ? rhs : ordered;
+  return lhs != lhs ? lhs : right;
 }
 
 __device__ __forceinline__ float t4a_cuda_nan_min(float lhs, float rhs) {
-  if (lhs != lhs) {
-    return lhs;
-  }
-  if (rhs != rhs) {
-    return rhs;
-  }
-  return fminf(lhs, rhs);
+  const float ordered = fminf(lhs, rhs);
+  const float right = rhs != rhs ? rhs : ordered;
+  return lhs != lhs ? lhs : right;
 }
 
 __device__ __forceinline__ double t4a_cuda_nan_min(double lhs, double rhs) {
-  if (lhs != lhs) {
-    return lhs;
-  }
-  if (rhs != rhs) {
-    return rhs;
-  }
-  return fmin(lhs, rhs);
+  const double ordered = fmin(lhs, rhs);
+  const double right = rhs != rhs ? rhs : ordered;
+  return lhs != lhs ? lhs : right;
 }
 
 // Integer extrema: plain ordering.

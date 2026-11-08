@@ -176,12 +176,32 @@ Median [Q1-Q3] over 6 rounds, µs. Device time is nsys `Avg` per launch; host ti
     and the script exited 1. That left `kern.csv` from run 1 next to the log of run 2: the
     mismatch the review described, reached by a different route.
 
-### Not addressed here
+### 4. SASS on the production entry
 
-- **The review's "unverified" item.** The combine-loop explanation (`FSETP.NAN` → `BRA` → `LDG`
-  per element) rests on a standalone probe kernel (`sass-plane-loop.log`), not on the production
-  `t4a_cuda_reduce` entry. I did not disassemble the production entry for this follow-up, so the
-  explanation is **not established for the production code**. The measured reduction timings
-  above do not depend on it.
-- **The `gpt-6.1-sol` independent review** of this follow-up has not run. `gpt_review.sh` is not
-  available in this session.
+- **What the review found.** The combine-loop explanation (`FSETP.NAN` → `BRA` → `LDG` per
+  element) rested on a standalone probe kernel (`sass-plane-loop.log`), not on the production
+  entry, so it was not established for shipped code.
+- **What is now there.** `sass-production.log`: `nvcc -lineinfo` + `nvdisasm -g` on `reduce.cu`
+  and `elementwise.cu`, both trees, with the section header, the section's address range and a
+  contiguous, labelled run of instructions for each excerpt.
+  - `t4a_cuda_reduce` (`reduce.cu:657`), the fold at `reduce.cu:252-253` in `plane_reduce_body`:
+    `3c8d82c` runs `DSETP.NAN` → `@P2 BRA` → one `LDG.E.64` → `DSETP.MIN` per fold, with the
+    label the branch skips to in view; this branch issues four `LDG.E.64` before the folds and
+    has no branch on the accumulator.
+  - `t4a_cuda_binary` (`elementwise.cu:371`), at `0x12b0`: two `@P0 BRA` per element pair at
+    `3c8d82c`, `FSETP.NAN` → `FMNMX` → `FSEL` straight-line here.
+  - Registers unchanged: `SHI_REGISTERS=40` for `t4a_cuda_reduce` and `38` for `t4a_cuda_binary`
+    in both trees.
+- **What it is not.** Step counts, timing or a measurement: it was taken on evo2, which has no
+  NVIDIA device. Which compiler built the timed binaries was not recorded either, so this is
+  code generation from the source, not the disassembly of those binaries. `sass-diff.log` also
+  carries a re-run of `scripts/sass-diff.sh 3c8d82c` on the same host and CUDA 12.6 build: 94
+  symbols, 89 identical, the same five differing entries.
+
+### Review
+
+- **The `gpt-6.1-sol` independent review** of this section ran on the branch head `84be777`
+  (read-only `pi --print`, `openai/gpt-6.1-sol`): no blocking finding, two wording findings, both
+  fixed before the final push (a parenthetical claiming one line annotation per instruction, and
+  a stale cross-reference in the provenance caveat). Two earlier rounds on the same file found
+  the missing section extents and the incomplete loop; those are what the excerpts now carry.

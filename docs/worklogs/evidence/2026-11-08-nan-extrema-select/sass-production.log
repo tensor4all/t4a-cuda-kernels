@@ -1,0 +1,295 @@
+# SASS of the *production* entry points, both trees, with source-line attribution.
+#
+# The review of #26 found that the loop explanation rested on `sass-plane-loop.log`, which is
+# `plane_reduce_body<MaxFold, float>` compiled alone in a probe kernel called `probe_max`. This
+# file takes the same claim on the global entry points themselves.
+#
+# $ nvcc -std=c++17 -cubin -arch=sm_80 -lineinfo -I cuda/include -o reduce.cubin cuda/src/reduce.cu
+# $ nvcc -std=c++17 -cubin -arch=sm_80 -lineinfo -I cuda/include -o elementwise.cubin cuda/src/elementwise.cu
+# $ nvdisasm -g -c -sf <cubin>        # -g adds the source line of the instructions it has one for
+# CUDA 12.6 (Build cuda_12.6.r12.6/compiler.35059454_0). The base side is the same commands in a
+# worktree of 3c8d82c. Which compiler built the 2026-11-08 timing binaries was not recorded, so
+# this is code generation from the source, not the disassembly of the timed binaries.
+#
+# Taken on evo2 (Ryzen AI MAX+ 395, no NVIDIA device, no driver): compiling and disassembling
+# need no GPU, so nothing in this file measures anything.
+#
+# Reading: each excerpt starts with the `.section`/`.sectioninfo`/`.text.<entry>` header nvdisasm
+# prints for the enclosing section, then the section's address range. The reduction excerpts are
+# one complete iteration of the fold loop: its head label, its body, and the branch back to the
+# head. The `t4a_cuda_binary` excerpts are the arm the entry dispatches to at 0x12b0, including
+# the labels its NaN tests skip to (`.L_x_273` / `.L_x_275`); the arms' join, `.L_x_267`, belongs
+# to the dispatch further down the entry and is outside the excerpt. Only the trailing hex
+# encoding and the `//## File` path prefix are stripped; no instruction is removed.
+#
+# abi.cuh per tree, definition line to closing brace, this branch -> 3c8d82c:
+#   t4a_cuda_nan_max(float)   748-752 -> 744-752
+#   t4a_cuda_nan_max(double)  754-758 -> 754-762
+#   t4a_cuda_nan_min(float)   760-764 -> 764-772
+#   t4a_cuda_nan_min(double)  766-770 -> 774-782
+
+## 1. `t4a_cuda_reduce` (cuda/src/reduce.cu:657), the combine pass's strided fold at
+##    reduce.cu:252-253 inside plane_reduce_body (reduce.cu:251 loads the seed).
+##    This is the entry the pass-2 numbers come from.
+
+### 3c8d82c: one iteration. The load sits behind a branch on the accumulator; the head label
+### `.L_x_5344` and the branch back to it are both in view.
+	.section	.text.t4a_cuda_reduce,"ax",@progbits
+	.sectionflags	@"SHF_BARRIERS=1"
+	.sectioninfo	@"SHI_REGISTERS=40"
+.text.t4a_cuda_reduce:
+# section extent 0x0 .. 0x69df0 (last instruction before the next section)
+.L_x_5344:
+        /*39f30*/                   DSETP.NAN.AND P2, PT, R20, R20, PT ;
+	//## src/reduce.cu:252
+        /*39f40*/                   IADD3 R14, P0, R14, -0x1, RZ ;
+        /*39f50*/                   BSSY B2, `(.L_x_5342) ;
+        /*39f60*/                   IADD3 R19, P1, R19, c[0x0][0x0], RZ ;
+        /*39f70*/                   IADD3.X R28, R28, -0x1, RZ, P0, !PT ;
+        /*39f80*/                   ISETP.NE.U32.AND P0, PT, R14, RZ, PT ;
+        /*39f90*/                   ISETP.NE.AND.EX P0, PT, R28, RZ, PT, P0 ;
+	//## include/t4a/abi.cuh:775
+        /*39fa0*/               @P2 BRA `(.L_x_5343) ;
+	//## src/reduce.cu:253
+        /*39fb0*/                   IMAD.MOV.U32 R2, RZ, RZ, R0 ;
+        /*39fc0*/                   MOV R3, R9 ;
+        /*39fd0*/                   LDG.E.64 R6, [R2.64] ;
+	//## include/t4a/abi.cuh:775
+        /*39fe0*/                   IMAD.MOV.U32 R2, RZ, RZ, R20 ;
+        /*39ff0*/                   IMAD.MOV.U32 R3, RZ, RZ, R21 ;
+	//## include/t4a/abi.cuh:778
+        /*3a000*/                   DSETP.NAN.AND P2, PT, R6, R6, PT ;
+        /*3a010*/                   IMAD.MOV.U32 R21, RZ, RZ, R7 ;
+	//## include/t4a/abi.cuh:781
+        /*3a020*/              @!P2 DSETP.MIN.AND P3, P4, R6, R2, PT ;
+        /*3a030*/              @!P2 MOV R20, R2 ;
+        /*3a040*/              @!P2 IMAD.MOV.U32 R2, RZ, RZ, R7 ;
+        /*3a050*/              @!P2 FSEL R27, R2, R3, P3 ;
+        /*3a060*/              @!P2 IMAD.MOV.U32 R2, RZ, RZ, R6 ;
+        /*3a070*/              @!P2 LOP3.LUT R3, R3, 0x80000, RZ, 0xfc, !PT ;
+        /*3a080*/              @!P2 SEL R2, R2, R20, P3 ;
+	//## include/t4a/abi.cuh:778
+        /*3a090*/                   MOV R20, R6 ;
+	//## include/t4a/abi.cuh:781
+        /*3a0a0*/              @!P2 SEL R21, R3, R27, P4 ;
+        /*3a0b0*/              @!P2 IMAD.MOV.U32 R20, RZ, RZ, R2 ;
+.L_x_5343:
+        /*3a0c0*/                   BSYNC B2 ;
+.L_x_5342:
+	//## src/reduce.cu:252
+        /*3a0d0*/                   LEA R0, P2, R10, R0, 0x3 ;
+        /*3a0e0*/                   IADD3.X R24, R25, R24, RZ, P1, !PT ;
+        /*3a0f0*/                   IMAD.X R9, R9, 0x1, R26, P2 ;
+        /*3a100*/               @P0 BRA `(.L_x_5344) ;
+.L_x_5341:
+
+### this branch: one iteration of the same loop. Four `LDG.E.64` are issued before the first
+### fold, no branch tests the accumulator, and the body branches back to `.L_x_4294`.
+	.section	.text.t4a_cuda_reduce,"ax",@progbits
+	.sectionflags	@"SHF_BARRIERS=1"
+	.sectioninfo	@"SHI_REGISTERS=40"
+.text.t4a_cuda_reduce:
+# section extent 0x0 .. 0x6e270
+.L_x_4294:
+        /*3bdb0*/                   IMAD.MOV.U32 R2, RZ, RZ, R4 ;
+        /*3bdc0*/                   MOV R3, R22 ;
+        /*3bdd0*/                   LDG.E.64 R2, [R2.64] ;
+        /*3bde0*/                   IADD3 R4, P0, R4, R14, RZ ;
+        /*3bdf0*/                   IMAD.X R5, R22, 0x1, R9, P0 ;
+        /*3be00*/                   LDG.E.64 R6, [R4.64] ;
+        /*3be10*/                   IADD3 R4, P0, R14, R4, RZ ;
+        /*3be20*/                   IMAD.X R5, R9, 0x1, R5, P0 ;
+        /*3be30*/                   LDG.E.64 R10, [R4.64] ;
+        /*3be40*/                   IADD3 R22, P0, R14, R4, RZ ;
+        /*3be50*/                   IADD3.X R23, R9, R5, RZ, P0, !PT ;
+        /*3be60*/                   LDG.E.64 R18, [R22.64] ;
+	//## include/t4a/abi.cuh:767
+        /*3be70*/                   IMAD.MOV.U32 R5, RZ, RZ, R13 ;
+        /*3be80*/                   MOV R4, R12 ;
+        /*3be90*/                   DSETP.MIN.AND P0, P1, R2, R12, PT ;
+        /*3bea0*/                   IMAD.MOV.U32 R0, RZ, RZ, R3 ;
+        /*3beb0*/                   FSEL R17, R0, R5, P0 ;
+        /*3bec0*/                   IMAD.MOV.U32 R0, RZ, RZ, R2 ;
+        /*3bed0*/                   SEL R4, R0, R4, P0 ;
+	//## include/t4a/abi.cuh:768
+        /*3bee0*/                   DSETP.NAN.AND P0, PT, R2, R2, PT ;
+	//## include/t4a/abi.cuh:767
+        /*3bef0*/               @P1 LOP3.LUT R17, R5, 0x80000, RZ, 0xfc, !PT ;
+	//## include/t4a/abi.cuh:769
+        /*3bf00*/                   DSETP.NAN.AND P1, PT, R12, R12, PT ;
+	//## include/t4a/abi.cuh:767
+        /*3bf10*/                   IMAD.MOV.U32 R5, RZ, RZ, R17 ;
+	//## include/t4a/abi.cuh:768
+        /*3bf20*/                   FSEL R0, R2, R4, P0 ;
+	//## include/t4a/abi.cuh:767
+        /*3bf30*/                   IMAD.MOV.U32 R4, RZ, RZ, R7 ;
+	//## include/t4a/abi.cuh:768
+        /*3bf40*/                   FSEL R2, R3, R5, P0 ;
+	//## include/t4a/abi.cuh:769
+        /*3bf50*/                   FSEL R12, R12, R0, P1 ;
+        /*3bf60*/                   FSEL R13, R13, R2, P1 ;
+        /*3bf70*/                   MOV R2, R12 ;
+        /*3bf80*/                   IMAD.MOV.U32 R3, RZ, RZ, R13 ;
+	//## include/t4a/abi.cuh:767
+        /*3bf90*/                   MOV R0, R3 ;
+        /*3bfa0*/                   DSETP.MIN.AND P0, P2, R2, R6, PT ;
+	//## include/t4a/abi.cuh:769
+        /*3bfb0*/                   DSETP.NAN.AND P1, PT, R2, R2, PT ;
+	//## include/t4a/abi.cuh:767
+        /*3bfc0*/                   FSEL R5, R0, R4, P0 ;
+        /*3bfd0*/                   IMAD.MOV.U32 R0, RZ, RZ, R6 ;
+        /*3bfe0*/                   SEL R2, R2, R0, P0 ;
+	//## include/t4a/abi.cuh:768
+        /*3bff0*/                   DSETP.NAN.AND P0, PT, R6, R6, PT ;
+	//## include/t4a/abi.cuh:767
+        /*3c000*/               @P2 LOP3.LUT R5, R4, 0x80000, RZ, 0xfc, !PT ;
+        /*3c010*/                   IMAD.MOV.U32 R4, RZ, RZ, R11 ;
+        /*3c020*/                   IMAD.MOV.U32 R3, RZ, RZ, R5 ;
+	//## include/t4a/abi.cuh:768
+        /*3c030*/              @!P1 FSEL R12, R6, R2, P0 ;
+        /*3c040*/              @!P1 FSEL R13, R7, R3, P0 ;
+	//## include/t4a/abi.cuh:769
+        /*3c050*/                   MOV R2, R12 ;
+        /*3c060*/                   IMAD.MOV.U32 R3, RZ, RZ, R13 ;
+	//## include/t4a/abi.cuh:767
+        /*3c070*/                   MOV R0, R3 ;
+        /*3c080*/                   DSETP.MIN.AND P0, P2, R2, R10, PT ;
+	//## include/t4a/abi.cuh:769
+        /*3c090*/                   DSETP.NAN.AND P1, PT, R2, R2, PT ;
+	//## include/t4a/abi.cuh:767
+        /*3c0a0*/                   FSEL R5, R0, R4, P0 ;
+        /*3c0b0*/                   IMAD.MOV.U32 R0, RZ, RZ, R10 ;
+        /*3c0c0*/                   SEL R2, R2, R0, P0 ;
+	//## include/t4a/abi.cuh:768
+        /*3c0d0*/                   DSETP.NAN.AND P0, PT, R10, R10, PT ;
+	//## include/t4a/abi.cuh:767
+        /*3c0e0*/               @P2 LOP3.LUT R5, R4, 0x80000, RZ, 0xfc, !PT ;
+	//## src/reduce.cu:252
+        /*3c0f0*/                   MOV R4, c[0x0][0x0] ;
+	//## include/t4a/abi.cuh:767
+        /*3c100*/                   IMAD.MOV.U32 R3, RZ, RZ, R5 ;
+	//## include/t4a/abi.cuh:768
+        /*3c110*/              @!P1 FSEL R12, R10, R2, P0 ;
+        /*3c120*/              @!P1 FSEL R13, R11, R3, P0 ;
+	//## include/t4a/abi.cuh:769
+        /*3c130*/                   IMAD.MOV.U32 R2, RZ, RZ, R12 ;
+	//## src/reduce.cu:252
+        /*3c140*/                   IADD3 R0, P0, P2, R4, c[0x0][0x0], R24 ;
+	//## include/t4a/abi.cuh:769
+        /*3c150*/                   IMAD.MOV.U32 R3, RZ, RZ, R13 ;
+	//## src/reduce.cu:252
+        /*3c160*/                   IADD3 R24, P3, P4, R4, c[0x0][0x0], R0 ;
+	//## include/t4a/abi.cuh:767
+        /*3c170*/                   MOV R4, R2 ;
+        /*3c180*/                   IMAD.MOV.U32 R0, RZ, RZ, R3 ;
+        /*3c190*/                   DSETP.MIN.AND P5, P6, R2, R18, PT ;
+	//## include/t4a/abi.cuh:769
+        /*3c1a0*/                   DSETP.NAN.AND P1, PT, R2, R2, PT ;
+	//## include/t4a/abi.cuh:767
+        /*3c1b0*/                   IMAD.MOV.U32 R3, RZ, RZ, R19 ;
+        /*3c1c0*/                   MOV R2, R18 ;
+        /*3c1d0*/                   FSEL R5, R0, R3, P5 ;
+	//## src/reduce.cu:252
+        /*3c1e0*/                   IADD3.X R0, R26, R25, R26.reuse, P0, P2 ;
+	//## include/t4a/abi.cuh:768
+        /*3c1f0*/                   DSETP.NAN.AND P2, PT, R18, R18, PT ;
+	//## src/reduce.cu:252
+        /*3c200*/                   ISETP.GE.U32.AND P0, PT, R24, R20, PT ;
+        /*3c210*/                   IADD3.X R25, R26, R0, R26, P3, P4 ;
+	//## include/t4a/abi.cuh:767
+        /*3c220*/               @P6 LOP3.LUT R5, R3, 0x80000, RZ, 0xfc, !PT ;
+	//## src/reduce.cu:252
+        /*3c230*/                   ISETP.GE.AND.EX P0, PT, R25, R21, PT, P0 ;
+	//## include/t4a/abi.cuh:767
+        /*3c240*/                   SEL R2, R4, R2, P5 ;
+        /*3c250*/                   IMAD.MOV.U32 R3, RZ, RZ, R5 ;
+	//## src/reduce.cu:253
+        /*3c260*/                   IADD3 R4, P3, R14, R22, RZ ;
+	//## include/t4a/abi.cuh:768
+        /*3c270*/              @!P1 FSEL R12, R18, R2, P2 ;
+        /*3c280*/              @!P1 FSEL R13, R19, R3, P2 ;
+	//## src/reduce.cu:253
+        /*3c290*/                   IMAD.X R22, R9, 0x1, R23, P3 ;
+	//## src/reduce.cu:252
+        /*3c2a0*/              @!P0 BRA `(.L_x_4294) ;
+.L_x_4287:
+
+## 2. `t4a_cuda_binary` (cuda/src/elementwise.cu:371), the entry whose float `MAX`/`MIN` arms the
+##    `sass-diff.sh` list names. The dispatched arm starts at 0x12b0 in both trees: float `MAX`
+##    (abi.cuh:749-751 here, 745-751 at 3c8d82c). Float `MIN` starts at 0x1310 here and 0x1350 at
+##    3c8d82c, because the base's `MAX` arm is longer.
+
+### 3c8d82c: two conditional exits per element pair, both on a NaN test
+	.section	.text.t4a_cuda_binary,"ax",@progbits
+	.sectioninfo	@"SHI_REGISTERS=38"
+        .global         t4a_cuda_binary
+.text.t4a_cuda_binary:
+# section extent 0x0 .. 0xe270
+.L_x_762:
+        /*12b0*/                   FSETP.NAN.AND P0, PT, R0, R0, PT ;
+        /*12c0*/                   BSSY B0, `(.L_x_272) ;
+        /*12d0*/                   IMAD.MOV.U32 R7, RZ, RZ, R0 ;
+        /*12e0*/               @P0 BRA `(.L_x_273) ;
+	//## include/t4a/abi.cuh:748
+        /*12f0*/                   FSETP.NAN.AND P0, PT, R5, R5, PT ;
+        /*1300*/                   IMAD.MOV.U32 R7, RZ, RZ, R5 ;
+        /*1310*/               @P0 BRA `(.L_x_273) ;
+	//## include/t4a/abi.cuh:751
+        /*1320*/                   FMNMX R7, R0, R5, !PT ;
+.L_x_273:
+        /*1330*/                   BSYNC B0 ;
+.L_x_272:
+        /*1340*/                   BRA `(.L_x_267) ;
+.L_x_763:
+	//## include/t4a/abi.cuh:765
+        /*1350*/                   FSETP.NAN.AND P0, PT, R0, R0, PT ;
+        /*1360*/                   BSSY B0, `(.L_x_274) ;
+        /*1370*/                   IMAD.MOV.U32 R7, RZ, RZ, R0 ;
+        /*1380*/               @P0 BRA `(.L_x_275) ;
+	//## include/t4a/abi.cuh:768
+        /*1390*/                   FSETP.NAN.AND P0, PT, R5, R5, PT ;
+        /*13a0*/                   IMAD.MOV.U32 R7, RZ, RZ, R5 ;
+        /*13b0*/               @P0 BRA `(.L_x_275) ;
+	//## include/t4a/abi.cuh:771
+        /*13c0*/                   FMNMX R7, R0, R5, PT ;
+.L_x_275:
+        /*13d0*/                   BSYNC B0 ;
+.L_x_274:
+        /*13e0*/                   BRA `(.L_x_267) ;
+.L_x_266:
+	//## src/elementwise.cu:184
+        /*13f0*/                   IADD3 R4, R6, -0x3, RZ ;
+
+### this branch: the same pair through two selects, with no NaN-dependent branch
+	.section	.text.t4a_cuda_binary,"ax",@progbits
+	.sectioninfo	@"SHI_REGISTERS=38"
+        .global         t4a_cuda_binary
+.text.t4a_cuda_binary:
+# section extent 0x0 .. 0xe1f0
+.L_x_755:
+        /*12b0*/                   FSETP.NAN.AND P0, PT, R5.reuse, R5.reuse, PT ;
+	//## include/t4a/abi.cuh:749
+        /*12c0*/                   FMNMX R4, R0.reuse, R5, !PT ;
+	//## include/t4a/abi.cuh:751
+        /*12d0*/                   FSETP.NAN.AND P1, PT, R0, R0, PT ;
+	//## include/t4a/abi.cuh:750
+        /*12e0*/                   FSEL R5, R5, R4, P0 ;
+	//## include/t4a/abi.cuh:751
+        /*12f0*/                   FSEL R7, R0, R5, P1 ;
+        /*1300*/                   BRA `(.L_x_267) ;
+.L_x_756:
+	//## include/t4a/abi.cuh:762
+        /*1310*/                   FSETP.NAN.AND P0, PT, R5.reuse, R5.reuse, PT ;
+	//## include/t4a/abi.cuh:761
+        /*1320*/                   FMNMX R4, R0.reuse, R5, PT ;
+	//## include/t4a/abi.cuh:763
+        /*1330*/                   FSETP.NAN.AND P1, PT, R0, R0, PT ;
+	//## include/t4a/abi.cuh:762
+        /*1340*/                   FSEL R5, R5, R4, P0 ;
+	//## include/t4a/abi.cuh:763
+        /*1350*/                   FSEL R7, R0, R5, P1 ;
+	//## src/elementwise.cu:190
+        /*1360*/                   BRA `(.L_x_267) ;
+.L_x_266:
+	//## src/elementwise.cu:184
+        /*1370*/                   IADD3 R4, R6, -0x3, RZ ;

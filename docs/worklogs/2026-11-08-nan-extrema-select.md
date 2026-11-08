@@ -63,7 +63,7 @@ pass 1 + pass 2, no host wait). The per-round values are in `nsys/table.md`.
   special values (±0, ±1, ±Inf, ±smallest subnormal, ±largest finite, and quiet,
   signalling and negative NaNs with distinct payloads), plus 2^26 random bit patterns, one
   third of them pairs of neighbouring values.
-- `cargo-test-gpu-tests.log`: `cargo test -j 4 --release --features gpu-tests
+- `cargo-test-gpu-tests.log` (run on `3eb8376`, the code of this branch): `cargo test -j 4 --release --features gpu-tests
   --no-fail-fast` passes (all 15 test binaries and the doc-tests, `# exit 0`). This includes
   `binary_extrema_pow_rem_and_scalar_division`, which checks that the lhs NaN payload
   survives.

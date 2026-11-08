@@ -670,6 +670,130 @@ fn bench_div_c64(case: &str, len: usize, filter: &[String]) {
     emit_meta(case, &meta, observed, host_time);
 }
 
+/// The real types `bench_binary_extrema` runs: F32 and F64.
+trait ExtremaReal: Copy + PartialOrd {
+    const DTYPE: DType;
+    fn random(rng: &mut Rng) -> Self;
+    /// A quiet NaN whose payload carries `tag`, so a result keeps or loses it visibly.
+    fn tagged_nan(tag: u32) -> Self;
+    fn is_nan(self) -> bool;
+    fn bits(self) -> u64;
+}
+
+impl ExtremaReal for f32 {
+    const DTYPE: DType = DType::F32;
+    fn random(rng: &mut Rng) -> f32 {
+        rng.f32()
+    }
+    fn tagged_nan(tag: u32) -> f32 {
+        f32::from_bits(0x7fc0_0000 | (tag & 0x003f_ffff))
+    }
+    fn is_nan(self) -> bool {
+        f32::is_nan(self)
+    }
+    fn bits(self) -> u64 {
+        u64::from(self.to_bits())
+    }
+}
+
+impl ExtremaReal for f64 {
+    const DTYPE: DType = DType::F64;
+    fn random(rng: &mut Rng) -> f64 {
+        rng.f64()
+    }
+    fn tagged_nan(tag: u32) -> f64 {
+        f64::from_bits(0x7ff8_0000_0000_0000 | u64::from(tag))
+    }
+    fn is_nan(self) -> bool {
+        f64::is_nan(self)
+    }
+    fn bits(self) -> u64 {
+        self.to_bits()
+    }
+}
+
+/// Elementwise `MAX`/`MIN` through `t4a_cuda_binary` (both operands full length). About one
+/// element in a thousand of each operand is a payload-tagged NaN, so the NaN-propagation
+/// selects run on real data; the reference check covers every element, bit for bit on NaN.
+fn bench_binary_extrema<T: ExtremaReal>(case: &str, op: BinaryOp, len: usize, filter: &[String]) {
+    if !wanted(case, filter) {
+        return;
+    }
+    assert!(matches!(op, BinaryOp::Max | BinaryOp::Min));
+    let session = Session::new("elementwise");
+    let function = session.function(Entry::Binary.name());
+    let plan = plan_binary(op, T::DTYPE, ScalarSide::Both, len as i64).unwrap();
+    let mut rng = Rng::new(0x5555_6666 ^ len as u64);
+    let lhs: Vec<T> = (0..len)
+        .map(|index| {
+            let value = T::random(&mut rng);
+            if index % 997 == 3 {
+                T::tagged_nan(index as u32 | 1)
+            } else {
+                value
+            }
+        })
+        .collect();
+    let rhs: Vec<T> = (0..len)
+        .map(|index| {
+            let value = T::random(&mut rng);
+            if index % 991 == 5 {
+                T::tagged_nan(index as u32 | 2)
+            } else {
+                value
+            }
+        })
+        .collect();
+    record_input_digest(&[gpu::as_bytes(&lhs), gpu::as_bytes(&rhs)]);
+    let lhs_buf = upload_counted(&session, &lhs);
+    let rhs_buf = upload_counted(&session, &rhs);
+    // `err` is only written by the checked integer tags; supplied so the arguments match the ABI.
+    let err = alloc(&session, 4);
+    let out = alloc(&session, len * std::mem::size_of::<T>());
+    let mut run = || {
+        let mut slots = [
+            Slot::ptr(&out),
+            Slot::ptr(&lhs_buf),
+            Slot::ptr(&rhs_buf),
+            Slot::i32(T::DTYPE.tag()),
+            Slot::i32(op.tag()),
+            Slot::i32(ScalarSide::Both.tag()),
+            Slot::i64(len as i64),
+            Slot::ptr(&err),
+        ];
+        launch_async(function, &plan, session.stream(), &mut slots);
+    };
+    run();
+    sync(&session);
+    let got = read_counted::<T>(&session, &out, len);
+    checked(
+        case,
+        (0..len).all(|index| {
+            let (a, b, value) = (lhs[index], rhs[index], got[index]);
+            if a.is_nan() {
+                value.bits() == a.bits()
+            } else if b.is_nan() {
+                value.bits() == b.bits()
+            } else {
+                let expected = match (op, a < b) {
+                    (BinaryOp::Max, true) | (BinaryOp::Min, false) => b,
+                    _ => a,
+                };
+                // `==`, not bits: the order of equal signed zeros is not part of the check.
+                value == expected
+            }
+        }),
+    );
+    let meta = Meta {
+        kernels: Entry::Binary.name(),
+        launches: 1,
+        scratch_bytes: 0,
+        check: "ok",
+    };
+    let (observed, host_time) = measure(case, &session, &meta, &mut run);
+    emit_meta(case, &meta, observed, host_time);
+}
+
 // ---------------------------------------------------------------------------
 // Layout / transpose / window
 // ---------------------------------------------------------------------------
@@ -2919,6 +3043,12 @@ fn main() {
     bench_exp_f32("elementwise-exp-f32-10000000", 10_000_000, &filter);
     bench_mul_c64("elementwise-mul-c64-10000000", 10_000_000, &filter);
     bench_div_c64("elementwise-div-c64-10000000", 10_000_000, &filter);
+    for &len in &[1_000usize, 1_048_576, 16_777_216] {
+        for (op, name) in [(BinaryOp::Max, "max"), (BinaryOp::Min, "min")] {
+            bench_binary_extrema::<f32>(&format!("elementwise-{name}-f32-{len}"), op, len, &filter);
+            bench_binary_extrema::<f64>(&format!("elementwise-{name}-f64-{len}"), op, len, &filter);
+        }
+    }
 
     bench_fused(fused_chain_f32(1_000), &filter);
     bench_fused(fused_chain_f32(10_000_000), &filter);

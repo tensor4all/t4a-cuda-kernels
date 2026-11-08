@@ -1,0 +1,47 @@
+# bit-identity.cu after the PR #26 review (checked CUDA calls), on primerose, run under flock /tmp/gpu-slot.lock.
+# Script: the passing run, then two injections made in scratch copies with sed and deleted afterwards
+# (the diff of each copy against bit-identity.cu is printed before its run).
+# Exit codes: 0 = every pair compared and none differed, 1 = mismatch, 2 = CUDA failure or incomplete comparison.
+## guard: gpu-apps=[] load: 0.72 0.33 0.32 1/1943 3075358
+avg:   CPU    %usr   %nice    %sys %iowait    %irq   %soft  %steal  %guest  %gnice   %idle
+avg:     0    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00  100.00
+avg:     1    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00  100.00
+avg:     2    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00  100.00
+avg:     3    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00  100.00
+avg:     4    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00  100.00
+avg:     5    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00  100.00
+avg:     6    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00  100.00
+avg:     7    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00  100.00
+## 2026-11-08T18:14:24Z NVIDIA A100 80GB PCIe, 580.178.04 Build cuda_12.6.r12.6/compiler.35059454_0
+### eq
+$ nvcc -std=c++17 -arch=sm_80 -o eq.bin bit-identity.cu && taskset -c 0-7 ./eq.bin
+f32: 67109120 pairs (16 special^2 + 67108864 random), compared 67109120, mismatches 0
+f64: 67109120 pairs (16 special^2 + 67108864 random), compared 67109120, mismatches 0
+total mismatches 0
+# exit 0
+36c36
+<     if (y[0] != y[1] || y[2] != y[3]) atomicAdd(&counters[0], 1ull);
+---
+>     if (true) atomicAdd(&counters[0], 1ull);
+### inject-mismatch
+$ nvcc -std=c++17 -arch=sm_80 -o inject-mismatch.bin inject-mismatch.cu && taskset -c 0-7 ./inject-mismatch.bin
+f32: 67109120 pairs (16 special^2 + 67108864 random), compared 67109120, mismatches 67109120
+f64: 67109120 pairs (16 special^2 + 67108864 random), compared 67109120, mismatches 67109120
+total mismatches 134218240
+# exit 1
+36c36
+<     if (y[0] != y[1] || y[2] != y[3]) atomicAdd(&counters[0], 1ull);
+---
+>     if (true) atomicAdd(&counters[0], 1ull);
+60c60
+<   CUDA_CHECK(cudaMemcpy(counters, dcounters, sizeof(counters), cudaMemcpyDeviceToHost));
+---
+>   CUDA_CHECK(cudaMemcpy(nullptr, dcounters, sizeof(counters), cudaMemcpyDeviceToHost));
+### inject-download
+$ nvcc -std=c++17 -arch=sm_80 -o inject-download.bin inject-download.cu && taskset -c 0-7 ./inject-download.bin
+CUDA failure at inject-download.cu:60: cudaMemcpy(nullptr, dcounters, sizeof(counters), cudaMemcpyDeviceToHost) -> invalid argument
+# exit 2
+ M bit-identity.cu
+ M knsys.sh
+?? elementwise-pair.sh
+?? elementwise-table.py

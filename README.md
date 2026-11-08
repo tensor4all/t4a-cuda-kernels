@@ -102,6 +102,25 @@ and `tests/gpu_fusion.rs` for the reference consumer with observed NVRTC counts.
 Device compilation/testing is explicit; the default build and its tests do not
 initialize CUDA. Published on crates.io as [`t4a-cuda-kernels`](https://crates.io/crates/t4a-cuda-kernels).
 
+## Continuous integration
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push to `main`
+and every pull request, on GitHub-hosted runners, never on a GPU.
+
+| Job | What it proves |
+| --- | --- |
+| `rust` | `cargo fmt --check`, `cargo clippy --all-targets -D warnings`, the host test lane (`cargo test`), and that the device test suites still build (`cargo test --features gpu-tests --no-run`) |
+| `kernel-compile` | every `cuda/src/*.cu` compiles with `nvcc -std=c++17 -cubin -arch=sm_80 -I cuda/include`, using the CUDA 12.6.3 toolkit installed by `Jimver/cuda-toolkit` (installer cached between runs) on `ubuntu-22.04` |
+
+The host test lane is exactly the test set that needs no CUDA: each `tests/gpu_*.rs`
+target declares `required-features = ["gpu-tests"]`, so a default `cargo test` runs
+`tests/planning.rs` (88 host-planning tests) and `tests/fusion.rs` (7 emitter
+tests) and nothing that touches a device. The `gpu-tests` feature binds `cudarc`
+and its suites need a real device, so CI only compiles them. Numerical validation of
+the kernels runs on the maintainer's local A100 (`cargo test --features gpu-tests`)
+and is recorded in `docs/worklogs/`; this repository has no hosted GPU gate, by
+design rather than by omission.
+
 ## Related repositories
 
 - [t4a-gpu-backend](https://github.com/tensor4all/t4a-gpu-backend): execution foundations, including t4a-cuda-runtime.

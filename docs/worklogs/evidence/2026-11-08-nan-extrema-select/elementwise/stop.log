@@ -1,0 +1,5 @@
+# flock /tmp/gpu-slot.lock bash -c "elementwise-pair.sh bins/main bins/fix ep1 9" (taskset -c 0-7 inside knsys.sh)
+start 2026-11-08T18:16:59Z
+--- stderr/stdout of the campaign:
+cores 0-7 busy: 6.0%
+--- exit 3 2026-11-08T18:32:57Z 

@@ -1,0 +1,45 @@
+# knsys.sh idempotency (PR #26 review item 3), plus the 8c3423d knsys.sh and bit-identity.cu for contrast.
+# primerose, A100 80GB PCIe, driver 580.178.04, CUDA 12.6, nsys 2024.2.3.38, under flock /tmp/gpu-slot.lock.
+# The bench binary is this branch's bench_kernels (release, --features gpu-tests).
+## guard: gpu-apps=[] load: 0.61 0.34 0.33 1/1952 3075858
+## 2026-11-08T18:14:55Z
+### new knsys.sh, run 1
+# exit 0
+2
+dac7f716116953c1
+kern.csv
+reduce-sum-f32-full-1048576.log
+reduce-sum-f32-full-1048576.nsys-rep
+reduce-sum-f32-full-1048576.sqlite
+### new knsys.sh, run 2 into the same directory
+knsys.sh: refusing to reuse /home/shinaoka/work/t4a-pr26-scratch/new: it is not empty; start each run in a fresh directory
+# exit 2
+2
+dac7f716116953c1
+kern.csv
+reduce-sum-f32-full-1048576.log
+reduce-sum-f32-full-1048576.nsys-rep
+reduce-sum-f32-full-1048576.sqlite
+### new knsys.sh, a case listed twice
+knsys.sh: a case is listed twice
+# exit 2
+ls: 'dup' にアクセスできません: そのようなファイルやディレクトリはありません
+### old knsys.sh (8c3423d), run 1
+# exit 0
+2
+### old knsys.sh (8c3423d), run 2 into the same directory
+# exit 1
+2
+reduce-sum-f32-full-1048576,100,8115.3,t4a_cuda_reduce_partials
+reduce-sum-f32-full-1048576,100,5379.3,t4a_cuda_reduce
+### old bit-identity.cu (8c3423d) with the review reproduction
+13:  if (true) atomicAdd(bad, 1ull);
+22:  check<T, U><<<(n + 255) / 256, 256>>>(da, db, n, dbad); cudaMemcpy(nullptr, dbad, 8, cudaMemcpyDeviceToHost);
+f32: 67109120 pairs (16 special^2 + 67108864 random), mismatches 0, cuda invalid argument
+f64: 67109120 pairs (16 special^2 + 67108864 random), mismatches 0, cuda invalid argument
+total mismatches 0
+# exit 0
+### state of old/ after the second old run (ls -l; host time in the log)
+kern.csv 03:15:18 (run 1) | reduce-sum-f32-full-1048576.log 03:15:29 (run 2, host_ns_per_op=16219.390) | .nsys-rep 03:15:29 (run 2) | .sqlite 03:15:18 (run 1)
+nsys stats on the rewritten report: 'WARNING: Existing SQLite export found ... File is older than input file ... Use --force-export=true'
+-> the old script's second run overwrote the report and the log, then failed on the stale export without appending, so kern.csv (run 1) and the log (run 2) describe different executions.

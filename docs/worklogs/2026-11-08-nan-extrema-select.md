@@ -228,7 +228,8 @@ idle.
   `3c8d82c` against a bench whose `cuda/` and `examples/` are byte-identical to this branch: 4
   rounds, all complete, 96 runs, every one `check=ok`.
   - **About the "merged" side.** `stop.log` calls it "merged = tree 10969e5". That tree was a
-    local merge of #27's earlier head with `18e061c`; it was never pushed, and #27 was rebuilt
+    local merge of #27's earlier head with `18e061c`; it was not pushed at the time (now preserved as tag
+    `evidence-2026-11-08-elementwise-merged`), and #27 was rebuilt
     on `18e061c` instead. Its `cuda/` and `examples/` are the ones here. The identity is checkable from the local
     object: `git rev-parse 10969e5:cuda` = `bddb952e89f1e44dfdcb3a2b68ee14e2fed7b7c2` and
     `10969e5:examples` = `18b387b143e9fc52ce107ceb1b174e7f8e607c59`, the same tree IDs as

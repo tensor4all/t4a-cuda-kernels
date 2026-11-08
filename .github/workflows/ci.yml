@@ -1,0 +1,70 @@
+# Hosted CPU-only CI: no GPU anywhere. Both lanes and what they cover are
+# described in README.md ("Continuous integration"); the numbers here are the
+# pinned versions.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add rustfmt and clippy
+        run: rustup component add rustfmt clippy
+
+      # The crate has no mandatory dependencies, but `gpu-tests` brings in cudarc.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - run: cargo fmt --check
+
+      - run: cargo clippy -j 4 --all-targets -- -D warnings
+
+      - name: Host tests (no CUDA)
+        run: cargo test -j 4
+
+      - name: Compile the device test suites (no device needed)
+        run: cargo test -j 4 --features gpu-tests --no-run
+
+  kernel-compile:
+    # 22.04: the distribution CUDA 12.6.3 ships an installer for.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the CUDA toolkit
+        uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: 12.6.3
+          # Skip the samples; the installer itself is cached between runs.
+          linux-local-args: '["--toolkit"]'
+
+      - name: Compile every kernel source with nvcc
+        run: |
+          set -eu
+          mkdir -p /tmp/cubins
+          for src in cuda/src/*.cu; do
+            name="$(basename "$src" .cu)"
+            nvcc -std=c++17 -cubin -arch=sm_80 -I cuda/include \
+              -o "/tmp/cubins/$name.cubin" "$src"
+            echo "compiled $src"
+          done

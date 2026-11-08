@@ -37,13 +37,20 @@ jobs:
 
       - run: cargo fmt --check
 
-      - run: cargo clippy -j 4 --all-targets -- -D warnings
+      # `--locked` on every lane: without it a stale `Cargo.lock` builds fine
+      # here and fails for anyone who builds with `--locked` or `--frozen`.
+      # That is exactly what happened when 0.1.1 -> 0.1.2 bumped the manifest
+      # and left the lock behind (`cargo metadata --locked` exited 101).
+      - name: The committed lockfile is current
+        run: cargo metadata --locked --offline --format-version 1 > /dev/null
+
+      - run: cargo clippy -j 4 --locked --all-targets -- -D warnings
 
       - name: Host tests (no CUDA)
-        run: cargo test -j 4
+        run: cargo test -j 4 --locked
 
       - name: Compile the device test suites (no device needed)
-        run: cargo test -j 4 --features gpu-tests --no-run
+        run: cargo test -j 4 --locked --features gpu-tests --no-run
 
   kernel-compile:
     # 22.04: the distribution CUDA 12.6.3 ships an installer for.

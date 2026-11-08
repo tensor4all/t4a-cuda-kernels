@@ -11,7 +11,9 @@ at `3c8d82c` (#23 merged); the candidate is the same tree plus this branch's `ab
 Both were built with `cargo build -j 8 --release --features gpu-tests --example
 bench_kernels`, and the two binaries ran alternately, three rounds (main, fix) × 3, with
 `knsys.sh` (`nsys profile` over 100 launches, `nsys stats --report cuda_gpu_kern_sum`).
-Nothing else was running on the GPU. Every bench run reports `check=ok`.
+Nothing else was running on the GPU. Every bench run reports `check=ok`. The measured
+candidate tree is exactly this branch's commit: the diff against `3c8d82c` is `abi.cuh` plus
+`docs/`.
 
 ## Results
 
@@ -42,9 +44,13 @@ pass 1 + pass 2, no host wait). The per-round values are in `nsys/table.md`.
 - **Controls.** These cells run code whose source did not change, but they share the entry,
   and the entry's code changed around them.
   - Worst host ratio: `reduce-sum-f32-full-16777216` at **1.014** (1.018 / 1.014 / 0.996).
-  - Its pass 2 is 6.30 → 7.23 µs in two rounds and 6.43 µs in the third.
-  - `t4a_cuda_reduce` uses 40 registers in both trees (`ptxas.log`). **The cause of this
-    `sum` pass-2 change is not established.**
+  - Its pass 2 is 6.29-6.30 µs on main and 7.23 / 7.23 / 6.43 µs on the fix.
+  - The value looks bimodal, about 6.3 or about 7.2 µs, in both trees. An earlier two-round
+    campaign (`nsys-campaign1/`) gave main 7.26 / fix 7.23 in round 1 and main 6.30 / fix 6.30
+    in round 2. That campaign is not used for the table: an `nvcc` build ran on the host
+    during it.
+  - `t4a_cuda_reduce` uses 40 registers in both trees (`ptxas.log`).
+  - **Whether the change makes the slower mode more likely is not established.**
   - Smaller pass-2 increases: `sum` f32 1M +0.13 µs, `max` f32 `4x131072` axis 1 +0.13 µs,
     `prod` f32 1M +0.07 µs.
 - **Registers.** The pass-1 entries go from 50 to 54, with no spills (`ptxas.log`). Pass 1

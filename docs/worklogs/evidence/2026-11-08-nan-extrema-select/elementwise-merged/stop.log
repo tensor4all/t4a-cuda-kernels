@@ -1,0 +1,6 @@
+# flock /tmp/gpu-slot.lock bash -c "elementwise-pair.sh bins/main bins/merged ep2 4" (merged = tree 10969e5; taskset -c 0-7 inside knsys.sh)
+start 2026-11-08T18:50:06Z
+--- campaign output:
+--- exit 0 2026-11-08T18:59:24Z 
+309283cc1ee73c5074ce5b782f236b0e2c10ee0f5d6943ddbea31f4546bac050  /home/shinaoka/work/t4a-pr26-bins/main
+3e556866fc45ec5ef84292ec690fd9c19862c4b1f4952843d9f0bf1af5daa8e9  /home/shinaoka/work/t4a-pr26-bins/merged

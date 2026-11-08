@@ -176,12 +176,73 @@ Median [Q1-Q3] over 6 rounds, µs. Device time is nsys `Avg` per launch; host ti
     and the script exited 1. That left `kern.csv` from run 1 next to the log of run 2: the
     mismatch the review described, reached by a different route.
 
-### Not addressed here
+### 4. SASS on the production entry
 
-- **The review's "unverified" item.** The combine-loop explanation (`FSETP.NAN` → `BRA` → `LDG`
-  per element) rests on a standalone probe kernel (`sass-plane-loop.log`), not on the production
-  `t4a_cuda_reduce` entry. I did not disassemble the production entry for this follow-up, so the
-  explanation is **not established for the production code**. The measured reduction timings
-  above do not depend on it.
-- **The `gpt-6.1-sol` independent review** of this follow-up has not run. `gpt_review.sh` is not
-  available in this session.
+- **What the review found.** The combine-loop explanation (`FSETP.NAN` → `BRA` → `LDG` per
+  element) rested on a standalone probe kernel (`sass-plane-loop.log`), not on the production
+  entry, so it was not established for shipped code.
+- **What is now there.** `sass-production.log`: `nvcc -lineinfo` + `nvdisasm -g` on `reduce.cu`
+  and `elementwise.cu`, both trees, with the section header, the section's address range and a
+  contiguous, labelled run of instructions for each excerpt.
+  - `t4a_cuda_reduce` (`reduce.cu:657`), the fold at `reduce.cu:252-253` in `plane_reduce_body`:
+    `3c8d82c` runs `DSETP.NAN` → `@P2 BRA` → one `LDG.E.64` → `DSETP.MIN` per fold, with the
+    label the branch skips to in view; this branch issues four `LDG.E.64` before the folds and
+    has no branch on the accumulator.
+  - `t4a_cuda_binary` (`elementwise.cu:371`), at `0x12b0`: two `@P0 BRA` per element pair at
+    `3c8d82c`, `FSETP.NAN` → `FMNMX` → `FSEL` straight-line here.
+  - Registers unchanged: `SHI_REGISTERS=40` for `t4a_cuda_reduce` and `38` for `t4a_cuda_binary`
+    in both trees.
+- **What it is not.** Step counts, timing or a measurement: it was taken on evo2, which has no
+  NVIDIA device. Which compiler built the timed binaries was not recorded either, so this is
+  code generation from the source, not the disassembly of those binaries. `sass-diff.log` also
+  carries a re-run of `scripts/sass-diff.sh 3c8d82c` on the same host and CUDA 12.6 build: 94
+  symbols, 89 identical, the same five differing entries.
+
+### Review
+
+- **The `gpt-6.1-sol` independent review** of this section ran on the branch head `84be777`
+  (read-only `pi --print`, `openai/gpt-6.1-sol`): no blocking finding, two wording findings, both
+  fixed before the final push (a parenthetical claiming one line annotation per instruction, and
+  a stale cross-reference in the provenance caveat). Two earlier rounds on the same file found
+  the missing section extents and the incomplete loop; those are what the excerpts now carry.
+
+### 5. Evidence re-checked on this branch (2026-11-09)
+
+This branch (`3999c3f`) changes only `docs/` on top of `18e061c`. `cuda/`, `examples/` and
+`bit-identity.cu` are byte-identical to `18e061c`, so the GPU evidence of "Review follow-up" §1
+and §2 applies to it. Two re-checks follow, both on primerose (A100 80GB PCIe, driver
+580.178.04, CUDA 12.6), under `flock /tmp/gpu-slot.lock`, with `taskset -c 0-7` and cores 0-7
+idle.
+
+- **Failure-path determinism** (`bit-identity-determinism.log`, tree `3999c3f`). Each of three
+  programs ran three times, and the three outputs, with their exit codes, are byte-identical:
+  - `bit-identity.cu`: `compared 67109120, mismatches 0` per type, exit 0
+  - the injected mismatch (`if (true)` in the kernel): `mismatches 67109120` per type, exit 1
+  - the review's reproduction (that, plus the final download into `nullptr`): `CUDA failure at
+    ...inject-download.cu:60: cudaMemcpy(nullptr, dcounters, ...) -> invalid argument`, exit 2.
+    No mismatch line is printed.
+
+  The injected copies were made with `sed` (their diffs are in the log) and deleted before the
+  runs.
+- **Elementwise `MAX`/`MIN` re-run** (`elementwise-merged/`). This is a second paired campaign of
+  `3c8d82c` against a bench whose `cuda/` and `examples/` are byte-identical to this branch: 4
+  rounds, all complete, 96 runs, every one `check=ok`.
+  - **About the "merged" side.** `stop.log` calls it "merged = tree 10969e5". That tree was a
+    local merge of #27's earlier head with `18e061c`; it was not pushed at the time (now preserved as tag
+    `evidence-2026-11-08-elementwise-merged`), and #27 was rebuilt
+    on `18e061c` instead. Its `cuda/` and `examples/` are the ones here. The identity is checkable from the tag
+    `git rev-parse 10969e5:cuda` = `bddb952e89f1e44dfdcb3a2b68ee14e2fed7b7c2` and
+    `10969e5:examples` = `18b387b143e9fc52ce107ceb1b174e7f8e607c59`, the same tree IDs as
+    `6fb610c:cuda` and `6fb610c:examples`. The other two inputs the bench compiles match too:
+    `10969e5:tests/gpu` = `0e094d2d55094badd57d51e297ad2443584b3e37` and `10969e5:src` =
+    `bf37e753bac50e676ae3d9de34e37295c5dc5a8a`, identical to `6fb610c`.
+  - **Device time.** Lower than `3c8d82c` in all 12 cells, with disjoint IQRs: 2.08-2.14 µs vs
+    2.13-2.18 at 1000, 7.63-9.25 vs 7.80-9.34 at 1M, 138.71-250.94 vs 139.23-251.12 at 16M.
+    Every median is within 0.06 µs of §2's.
+  - **Host time.** From 1M up, every host ratio is 0.967-1.000. The launch-bound 1000-element
+    cells are not settled either way:
+    - `max` f32 1000 reads 1.161 and `max` f64 1000 reads 1.291, both with overlapping IQRs.
+    - The merged side's IQR is wide: 3.73-6.07 µs for f64.
+    - The same cells read 0.833 and 0.965 in §2.
+
+  `elementwise-merged/table.md` has the full median [Q1-Q3] table and the per-round values.

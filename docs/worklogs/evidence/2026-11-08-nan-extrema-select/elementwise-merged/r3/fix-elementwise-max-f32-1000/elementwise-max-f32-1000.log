@@ -1,0 +1,14 @@
+WARNING: CPU IP/backtrace sampling not supported, disabling.
+Try the 'nsys status --environment' command to learn more.
+
+WARNING: CPU context switch tracing not supported, disabling.
+Try the 'nsys status --environment' command to learn more.
+
+Capture range started in the application.
+Capture range ended in the application.
+Generating '/tmp/nsys-report-ffee.qdstrm'
+[1/1] [0%                          ] elementwise-max-f32-1000.nsys-repProcessing events...
+[1/1] [0%                          ] elementwise-max-f32-1000.nsys-rep[1/1] [5%                          ] elementwise-max-f32-1000.nsys-rep[1/1] [===========51%              ] elementwise-max-f32-1000.nsys-rep[1/1] [========================97% ] elementwise-max-f32-1000.nsys-rep[1/1] [========================100%] elementwise-max-f32-1000.nsys-rep[1/1] [========================100%] elementwise-max-f32-1000.nsys-rep
+BENCH_META case=elementwise-max-f32-1000 kernels=t4a_cuda_binary launches_per_iter=1 scratch_bytes=0 host_waits_per_iter=0 transfer_bytes_per_iter=0 device_allocations_per_iter=0 zero_fills_per_iter=0 boundary_barriers=1 host_ns_per_op=4891.160 input_digest=0x7bc6cba2ff6c24ee check=ok
+Generated:
+    /home/shinaoka/work/t4a-pr26-campaign/ep2/r3/fix-elementwise-max-f32-1000/elementwise-max-f32-1000.nsys-rep

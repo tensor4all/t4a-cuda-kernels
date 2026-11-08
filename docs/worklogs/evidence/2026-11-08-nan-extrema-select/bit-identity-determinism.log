@@ -1,0 +1,36 @@
+# Failure-path determinism of bit-identity.cu as it stands at 3999c3f (byte-identical to 18e061c), on primerose.
+# Under flock /tmp/gpu-slot.lock, taskset -c 0-7, PATH=/usr/local/cuda-12.6/bin first. Each program ran three times;
+# the three outputs (with the exit code appended) are compared with cmp. The two injected copies were made with sed
+# next to bit-identity.cu (their diffs are below), compiled, and deleted before the runs; the tree was clean afterwards.
+# $ nvcc -std=c++17 -arch=sm_80 -o <name> <name>.cu && taskset -c 0-7 ./<name>   (x3 per name)
+## guard: gpu-apps=[] load: 0.25 0.21 0.30 2/1915 3158585
+## cores 0-7 %idle: 100.00 100.00 100.00 95.00 100.00 100.00 100.00 100.00 
+## 2026-11-08T19:16:13Z tree 3999c3f, NVIDIA A100 80GB PCIe, 580.178.04, Build cuda_12.6.r12.6/compiler.35059454_0
+## bit-identity.cu sha256 0aacb789b4ba816a (identical to 18e061c)
+### diff bit-identity.cu inject-mismatch.cu
+36c36
+<     if (y[0] != y[1] || y[2] != y[3]) atomicAdd(&counters[0], 1ull);
+---
+>     if (true) atomicAdd(&counters[0], 1ull);
+### diff bit-identity.cu inject-download.cu
+36c36
+<     if (y[0] != y[1] || y[2] != y[3]) atomicAdd(&counters[0], 1ull);
+---
+>     if (true) atomicAdd(&counters[0], 1ull);
+60c60
+<   CUDA_CHECK(cudaMemcpy(counters, dcounters, sizeof(counters), cudaMemcpyDeviceToHost));
+---
+>   CUDA_CHECK(cudaMemcpy(nullptr, dcounters, sizeof(counters), cudaMemcpyDeviceToHost));
+### bit-identity: 3 runs byte-identical (sha256 29c16ccf1759de29); run 1:
+f32: 67109120 pairs (16 special^2 + 67108864 random), compared 67109120, mismatches 0
+f64: 67109120 pairs (16 special^2 + 67108864 random), compared 67109120, mismatches 0
+total mismatches 0
+# exit 0
+### inject-mismatch: 3 runs byte-identical (sha256 6e6389f8e8a78a7d); run 1:
+f32: 67109120 pairs (16 special^2 + 67108864 random), compared 67109120, mismatches 67109120
+f64: 67109120 pairs (16 special^2 + 67108864 random), compared 67109120, mismatches 67109120
+total mismatches 134218240
+# exit 1
+### inject-download: 3 runs byte-identical (sha256 be6d14909640afd4); run 1:
+CUDA failure at /home/shinaoka/work/t4a-pr27b/docs/worklogs/evidence/2026-11-08-nan-extrema-select/inject-download.cu:60: cudaMemcpy(nullptr, dcounters, sizeof(counters), cudaMemcpyDeviceToHost) -> invalid argument
+# exit 2

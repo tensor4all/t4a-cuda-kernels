@@ -306,3 +306,37 @@ Revision 13 keeps the cheaper topology and states it.
 580.178.04, CUDA 12.6) at `3b65e03`. All 15 test binaries report `0 failed`, and the command
 ends `# exit 0`. `65a74d5..8640857` touches only `docs/`, and `8640857..3b65e03` touches only
 `tests/`. No timing was re-measured.
+
+## 9. Re-run on `3d9847e` (2026-11-08T15:14Z onward)
+
+`cuda/` and `src/` at `3d9847e` are identical to `65a74d5`
+(`git diff --quiet 65a74d5 3d9847e -- cuda src`). Later commits add only `docs/`.
+
+**GPU tests.** `h-cargo-test-gpu-tests-3d9847e.log` (sha256
+`60066c14fd9e6dceb98be376ac81b478778b8c7e84dae7081bd74dda9756cc09`): `cargo test -j 4
+--release --features gpu-tests --no-fail-fast` on primerose (A100 80GB PCIe, driver
+580.178.04, CUDA 12.6). All 15 test binaries and the doc-tests report `0 failed`, and the
+command ends `# exit 0`. `gpu_dynamic_rank` 23 passed, `gpu_reduce` 28, `planning` 89.
+
+**Pass 1 alone, nsys.** `i-nsys-3d9847e/` (method in its `README.md`): `31b734e` against
+`3d9847e`, run b1, c1, b2, c2 with `scripts/knsys.sh`. Every bench run reports `check=ok`.
+Median `t4a_cuda_reduce_partials` time, mean of the two runs, with each run in parentheses:
+
+| case | before µs (r1/r2) | GB/s | after µs (r1/r2) | GB/s | ratio (r1/r2) | after / 1935 GB/s |
+|---|---:|---:|---:|---:|---:|---:|
+| `reduce-sum-f32-full-1048576` | 8.9 (8.9/8.9) | 471 | 8.2 (8.2/8.2) | 514 | 0.917 (0.917/0.917) | 27% |
+| `reduce-max-f32-full-1048576` | 10.5 (10.5/10.5) | 401 | 8.8 (8.8/8.8) | 475 | 0.844 (0.844/0.844) | 25% |
+| `reduce-min-f32-full-1048576` | 10.4 (10.4/10.4) | 402 | 8.9 (8.9/8.9) | 471 | 0.853 (0.853/0.853) | 24% |
+| `reduce-sum-f64-full-1048576` | 9.0 (9.0/9.0) | 936 | 8.5 (8.5/8.5) | 987 | 0.948 (0.950/0.946) | 51% |
+| `reduce-max-f64-full-1048576` | 10.4 (10.5/10.4) | 804 | 8.8 (8.8/8.8) | 950 | 0.847 (0.844/0.849) | 49% |
+| `reduce-min-f64-full-1048576` | 11.0 (11.0/11.0) | 760 | 8.8 (8.8/8.8) | 953 | 0.797 (0.797/0.797) | 49% |
+| `reduce-sum-f32-full-16777216` | 60.9 (60.9/60.9) | 1102 | 46.7 (46.7/46.6) | 1438 | 0.766 (0.767/0.765) | 74% |
+| `reduce-max-f32-full-16777216` | 149.4 (149.3/149.5) | 449 | 49.3 (49.3/49.3) | 1361 | 0.330 (0.330/0.330) | 70% |
+| `reduce-min-f32-full-16777216` | 149.0 (149.1/148.9) | 450 | 49.4 (49.3/49.5) | 1358 | 0.332 (0.331/0.332) | 70% |
+| `reduce-sum-f64-full-16777216` | 94.2 (94.1/94.4) | 1424 | 87.6 (87.6/87.7) | 1531 | 0.930 (0.931/0.930) | 79% |
+| `reduce-max-f64-full-16777216` | 163.4 (163.4/163.4) | 822 | 90.6 (90.7/90.5) | 1481 | 0.555 (0.555/0.554) | 77% |
+| `reduce-min-f64-full-16777216` | 163.5 (163.6/163.5) | 821 | 90.7 (90.8/90.7) | 1479 | 0.555 (0.555/0.554) | 76% |
+
+Every cell agrees with §2 (measured on `65a74d5`) to within 0.1 µs, except the baseline of
+`reduce-sum-f64-full-16777216` (94.2 µs, was 94.4). The two runs of one side differ by at most
+0.61 % (`reduce-max-f64-full-1048576` baseline).

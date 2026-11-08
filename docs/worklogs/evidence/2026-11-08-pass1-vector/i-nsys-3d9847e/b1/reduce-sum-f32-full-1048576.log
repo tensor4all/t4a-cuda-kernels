@@ -1,0 +1,1 @@
+BENCH_META case=reduce-sum-f32-full-1048576 kernels=t4a_cuda_reduce_partials|t4a_cuda_reduce launches_per_iter=2 scratch_bytes=16384 host_waits_per_iter=0 transfer_bytes_per_iter=0 device_allocations_per_iter=0 zero_fills_per_iter=0 boundary_barriers=1 host_ns_per_op=16828.540 input_digest=0x31a804a0ea2b5c70 check=ok

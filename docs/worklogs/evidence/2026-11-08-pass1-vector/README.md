@@ -1,4 +1,4 @@
-# Evidence: vectorized pass-1 walk (code at `65a74d5`; `e-`, `f-`, `g-` at `3b65e03`)
+# Evidence: vectorized pass-1 walk (code at `65a74d5`; `e-`, `f-` at `3b65e03`; `g-`, `h-`, `i-` at `01dc9b0`/`3d9847e`)
 
 These are raw outputs, as produced. The worklog
 `../../2026-11-08-reduction-pass1-vector.md` explains each one.
@@ -15,6 +15,8 @@ These are raw outputs, as produced. The worklog
 | `c-sass-diff.log`, `c-ptxas.log` | `scripts/sass-diff.sh 31b734e` and `ptxas -v` output |
 | `d-shuffle-prototype/` | the revision-12-topology shuffle prototype: patch, bit-identity dumps, nsys timings |
 | `e-cargo-test-gpu-tests-3b65e03.log` | `cargo test -j 4 --release --features gpu-tests --no-fail-fast` re-run on `3b65e03` (CUDA 12.6, local A100) |
+| `h-cargo-test-gpu-tests-3d9847e.log` | the same GPU test command re-run on `3d9847e` |
+| `i-nsys-3d9847e/` | pass-1 nsys re-measurement, `31b734e` against `3d9847e`, two interleaved runs |
 | `f-sass-ldg128.log` | `cuobjdump --dump-sass` of the pass-1 build: `LDG.E.128` counts per entry on both trees and an instruction excerpt |
 | `g-pointer-guard-mutants/*.{patch,log}` | the executed pointer-guard probe against five mutants, and the old text-order test against both review mutants |
 | `scripts/` | the drivers that produced the above |

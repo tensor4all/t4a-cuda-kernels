@@ -229,7 +229,11 @@ idle.
   rounds, all complete, 96 runs, every one `check=ok`.
   - **About the "merged" side.** `stop.log` calls it "merged = tree 10969e5". That tree was a
     local merge of #27's earlier head with `18e061c`; it was never pushed, and #27 was rebuilt
-    on `18e061c` instead. Its `cuda/` and `examples/` are the ones here.
+    on `18e061c` instead. Its `cuda/` and `examples/` are the ones here. The identity is checkable from the local
+    object: `git rev-parse 10969e5:cuda` = `bddb952e89f1e44dfdcb3a2b68ee14e2fed7b7c2` and
+    `10969e5:examples` = `18b387b143e9fc52ce107ceb1b174e7f8e607c59`, the same tree IDs as
+    `6fb610c:cuda` and `6fb610c:examples`. Those two directories are what the kernels and the
+    bench consist of.
   - **Device time.** Lower than `3c8d82c` in all 12 cells, with disjoint IQRs: 2.08-2.14 µs vs
     2.13-2.18 at 1000, 7.63-9.25 vs 7.80-9.34 at 1M, 138.71-250.94 vs 139.23-251.12 at 16M.
     Every median is within 0.06 µs of §2's.

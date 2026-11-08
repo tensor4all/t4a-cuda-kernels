@@ -23,7 +23,10 @@ produces `rhs` under a branch on the accumulator. In the strided loop of
 previous fold: the SASS is `FSETP.NAN acc` → `@P BRA` → `LDG` → `FMNMX`, once per element.
 The extrema loop itself is in both logs: `sass-plane-loop.log` in a probe kernel, and
 `sass-production.log` on the entries, `t4a_cuda_reduce` at `reduce.cu:252-253` (double `MIN`)
-and `t4a_cuda_binary`.
+and `t4a_cuda_binary`. The production excerpt covers the double `MIN` specialization of
+`t4a_cuda_reduce`; the float `MAX` form of that entry is not in it. For the reduction entry the
+shown mechanism is therefore the double one, and the float form is shown only at
+`t4a_cuda_binary`. The timing conclusions do not depend on the distinction.
 
 ## Change
 

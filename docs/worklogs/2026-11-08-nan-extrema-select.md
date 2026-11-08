@@ -18,7 +18,7 @@ candidate tree is exactly this branch's commit: the diff against `3c8d82c` is `a
 ## Results
 
 Medians over the three rounds; host time is the bench's `host_ns_per_op` (100 launches,
-pass 1 + pass 2, no host wait). The per-round values are in `nsys/table.md`.
+pass 1 + pass 2, timed as a synchronized batch — the clock is read after `pub_sync` drains the outstanding work, so it is batch throughput including the drain, not enqueue-only host overhead; there is no per-iteration wait). The per-round values are in `nsys/table.md`.
 
 | case | pass 1 µs main → fix | pass 2 µs main → fix | host/op µs main → fix | host ratio |
 |---|---|---|---|---|

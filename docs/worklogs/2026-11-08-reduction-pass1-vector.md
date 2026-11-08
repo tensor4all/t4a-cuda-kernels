@@ -353,3 +353,8 @@ Every cell agrees with §2 (measured on `65a74d5`) to within 0.1 µs, except the
 - **Point 2, provenance.** §1 claimed that every commit after `65a74d5` touches only `docs/`.
   It now says that the kernel and library sources are unchanged after `65a74d5` and names the two
   commits that changed tests.
+- **GPU re-run of the affected tests** on `aa37870` (code identical to `65a74d5`; tests identical
+  to `3d9847e`): `j-cargo-test-reduce-aa37870.log` (sha256
+  `01b73073f14c24270330d7755dcaf3d50833d23cf7ade4baace8edf9d6ff24b1`), `cargo test -j 4 --release
+  --features gpu-tests --no-fail-fast --test gpu_reduce --test gpu_dynamic_rank --test
+  planning`: 28, 23 and 89 passed, `# exit 0`.

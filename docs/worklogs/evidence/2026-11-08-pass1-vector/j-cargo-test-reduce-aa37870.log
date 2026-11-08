@@ -1,0 +1,186 @@
+# commit aa3787088b7194d1022b30f1c0adba9f94ed88d1
+# host primerose; GPU: NVIDIA A100 80GB PCIe, 580.178.04; nvcc Build cuda_12.6.r12.6/compiler.35059454_0
+# date 2026-11-08T16:09:01Z
+# $ cargo test -j 4 --release --features gpu-tests --no-fail-fast --test gpu_reduce --test gpu_dynamic_rank --test planning
+   Compiling t4a-cuda-kernels v0.1.1 (/home/shinaoka/tensor4all/t4a-cuda-kernels-pass1)
+    Finished `release` profile [optimized] target(s) in 2.98s
+     Running tests/gpu_dynamic_rank.rs (target/release/deps/gpu_dynamic_rank-22a243ebf3c59b3b)
+
+running 23 tests
+test linalg_aux_twins_agree ... ok
+test rank_nine_gather_matches_the_cpu_reference ... ok
+test diagonal_and_strided_twins_agree_at_rank_up_to_eight has been running for over 60 seconds
+test general_and_fast_agree_on_every_rank_up_to_eight has been running for over 60 seconds
+test linalg_fill_and_adjoint_twins_agree_at_rank_up_to_eight has been running for over 60 seconds
+test movement_twins_agree_at_rank_up_to_eight has been running for over 60 seconds
+test rank_nine_and_sixteen_fill_one_pad_diagonal_and_combined_match_the_cpu_reference has been running for over 60 seconds
+test rank_nine_and_sixteen_match_the_cpu_reference has been running for over 60 seconds
+test rank_nine_contiguous_split_takes_the_vector_walk_through_the_general_twin has been running for over 60 seconds
+test rank_nine_dynamic_slice_adjoint_and_column_norms_match_the_cpu_reference has been running for over 60 seconds
+test rank_nine_reduce_matches_the_cpu_reference has been running for over 60 seconds
+test rank_nine_scatter_add_matches_the_cpu_reference has been running for over 60 seconds
+test rank_nine_slice_matches_the_cpu_reference has been running for over 60 seconds
+test rank_nine_split_reaches_every_partial_through_the_wide_combine has been running for over 60 seconds
+test reduction_twins_agree_at_rank_up_to_eight has been running for over 60 seconds
+test rrqr_apply_reflector_twins_agree has been running for over 60 seconds
+test rrqr_column_norms_twins_agree has been running for over 60 seconds
+test rrqr_extract_r_twins_agree has been running for over 60 seconds
+test rrqr_prefix_rank_twins_agree has been running for over 60 seconds
+test rrqr_reflector_twins_agree has been running for over 60 seconds
+test rrqr_select_pivot_twins_agree has been running for over 60 seconds
+test rrqr_swap_columns_twins_agree has been running for over 60 seconds
+test window_twins_agree_at_rank_up_to_eight has been running for over 60 seconds
+test rank_nine_and_sixteen_match_the_cpu_reference ... ok
+test rank_nine_contiguous_split_takes_the_vector_walk_through_the_general_twin ... ok
+test general_and_fast_agree_on_every_rank_up_to_eight ... ok
+test linalg_fill_and_adjoint_twins_agree_at_rank_up_to_eight ... ok
+test movement_twins_agree_at_rank_up_to_eight ... ok
+test rank_nine_reduce_matches_the_cpu_reference ... ok
+test rrqr_select_pivot_twins_agree ... ok
+test rrqr_swap_columns_twins_agree ... ok
+test rrqr_extract_r_twins_agree ... ok
+test rrqr_prefix_rank_twins_agree ... ok
+test rrqr_reflector_twins_agree ... ok
+test rrqr_apply_reflector_twins_agree ... ok
+test rrqr_column_norms_twins_agree ... ok
+test rank_nine_split_reaches_every_partial_through_the_wide_combine ... ok
+test rank_nine_scatter_add_matches_the_cpu_reference ... ok
+test reduction_twins_agree_at_rank_up_to_eight ... ok
+test rank_nine_slice_matches_the_cpu_reference ... ok
+test window_twins_agree_at_rank_up_to_eight ... ok
+test diagonal_and_strided_twins_agree_at_rank_up_to_eight ... ok
+test rank_nine_dynamic_slice_adjoint_and_column_norms_match_the_cpu_reference ... ok
+test rank_nine_and_sixteen_fill_one_pad_diagonal_and_combined_match_the_cpu_reference ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 93.34s
+
+     Running tests/gpu_reduce.rs (target/release/deps/gpu_reduce-652123b6ba646ae6)
+
+running 28 tests
+test an_empty_reduction_axis_is_refused_before_any_launch ... ok
+test sum_of_squares_combines_as_a_plain_sum ... ok
+test nan_in_one_split_survives_the_combine ... ok
+test empty_output_plans_no_launch ... ok
+test sum_squares_rounds_before_adding ... ok
+test middle_axis_split_handles_gapped_partials_and_a_strided_output ... ok
+test launch_counts_follow_the_plan ... ok
+test reductions_read_a_strided_input ... ok
+test vector_walk_keeps_a_negative_zero_sum ... ok
+test pass1_reads_broadcast_and_reversed_axes_inside_their_allocation ... ok
+test single_element_axes_seed_from_the_input ... ok
+test float_extrema_follow_nan_and_signed_zero_rules ... ok
+test split_reduction_submits_two_ordered_passes ... ok
+test product_partials_keep_the_serial_lane_walk_bit_for_bit ... ok
+test integer_and_complex_routes_hold_their_contract ... ok
+test reduction_matches_cpu_for_every_route ... ok
+test split_product_and_complex_splits_match_the_direct_result ... ok
+test large_domains_cover_both_reduction_shapes ... ok
+test plane_and_unit_strategies_meet_at_the_plane_width ... ok
+test wide_combine_matches_the_cpu_reference_for_each_dtype ... ok
+test wide_combine_folds_every_partial_for_every_wide_width ... ok
+test pass1_overflow_follows_the_revision_13_grouping ... ok
+test integer_and_complex_routes_cover_both_strategies ... ok
+test pass1_adds_exactly_the_one_nonzero_element ... ok
+test pass1_topology_does_not_depend_on_the_input_address ... ok
+test vector_walk_propagates_a_nan_from_the_first_group_the_body_and_the_tail ... ok
+test pass1_folds_nothing_outside_its_chunk ... ok
+test vector_walk_folds_every_element_once_for_every_op_and_dtype ... ok
+
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 12.33s
+
+     Running tests/planning.rs (target/release/deps/planning-b22c32468f2d5900)
+
+running 89 tests
+test a_reversed_layout_is_a_strided_movement_plan ... ok
+test a_split_reduction_exposes_its_partials_layout ... ok
+test abi_revision_is_documented ... ok
+test abi_revision_matches_the_c_header ... ok
+test apply_reflector_checks_the_target_window ... ok
+test assemble_requires_only_the_regions_its_branches_read ... ok
+test binary_accepts_exactly_the_documented_op_dtype_side_triples ... ok
+test binary_entries_follow_the_dtype_matrix ... ok
+test broadcast_axis_is_not_a_destination ... ok
+test byte_lengths_are_checked ... ok
+test broadcast_in_dim_plans_the_rank_map ... ok
+test c_axis_values_mirror_layout ... ok
+test c_layout_mirror_round_trips ... ok
+test column_norms_maps_one_task_per_trailing_column ... ok
+test combine_pass_widens_only_for_long_partials_and_not_for_prod ... ok
+test compact_layout_has_axis_zero_fastest ... ok
+test combined_strided_validates_the_shared_domain_and_spans ... ok
+test compare_select_and_clamp_reject_complex_and_bool ... ok
+test concatenate_copy_plans_the_axis_offset ... ok
+test convert_accepts_every_unequal_pair_and_rejects_identity ... ok
+test dynamic_slice_checks_windows_and_index_dtype ... ok
+test dynamic_update_slice_plans_the_update_domain ... ok
+test embed_diagonal_allows_an_insertion_position_at_the_end ... ok
+test empty_views_need_no_span ... ok
+test entry_dtype_matrix_matches_the_abi_document ... ok
+test explicit_v_may_be_narrower_than_the_packed_factors ... ok
+test extent_product_overflow_is_rejected ... ok
+test extract_diagonal_derives_the_output_layout ... ok
+test extract_r_copies_the_upper_triangle_only ... ok
+test fast_variants_still_report_the_fast_policy ... ok
+test fill_one_is_a_layout_fill ... ok
+test fill_zero_plans_one_block_per_256_elements ... ok
+test flat_plan_rejects_negative_and_oversized_counts ... ok
+test gather_and_scatter_mirrors_have_the_documented_layout ... ok
+test gather_derives_the_output_and_plans_one_flat_launch ... ok
+test gather_requires_unit_slices_on_collapsed_axes ... ok
+test every_pinned_tenferro_cuda_kernel_resolves_to_an_entry ... ok
+test general_entries_mirror_their_fast_dtype_matrix ... ok
+test general_geometry_rejects_an_unrepresentable_rank_or_length ... ok
+test general_path_accepts_rank_nine_and_sixteen ... ok
+test geometry_packing_follows_the_documented_order ... ok
+test identity_shifted_allows_zero_complement_columns ... ok
+test initialize_permutation_is_the_modulo_image ... ok
+test layout_rejects_bad_inputs ... ok
+test lu_apply_pivots_needs_matching_extents_and_a_bounded_k ... ok
+test lu_extract_checks_the_pinned_shape_relationships ... ok
+test matrix_adjoint_swaps_the_first_two_axes ... ok
+test offsets_must_fit_a_64_bit_byte_address ... ok
+test negative_strides_report_the_reachable_span ... ok
+test partials_plans_enforce_the_floor_split ... ok
+test pad_derives_the_padded_extents ... ok
+test prefix_rank_bounds_the_diagonal_domain ... ok
+test qr_apply_phase_checks_the_r_rows_and_the_start ... ok
+test qr_phase_bounds_the_diagonal_it_reads ... ok
+test rank_zero_is_a_scalar_view ... ok
+test reduction_dtype_gates_follow_the_operation ... ok
+test reduction_geometry_and_shapes ... ok
+test reduction_plan_applies_the_auto_policy ... ok
+test reflector_bounds_the_step_and_the_coefficients ... ok
+test revision_eleven_entries_are_in_the_manifest ... ok
+test revision_eight_entries_are_in_the_manifest ... ok
+test revision_seven_entries_are_in_the_manifest ... ok
+test revision_six_entries_are_in_the_manifest ... ok
+test revision_six_tags_are_stable_and_unique ... ok
+test scatter_validates_the_batch_shape_and_ignores_operand_fit ... ok
+test scatter_with_an_empty_destination_plans_nothing ... ok
+test select_pivot_requires_matching_arrays_and_capacities ... ok
+test slice_requires_the_reachable_count ... ok
+test split_policy_matches_the_baseline ... ok
+test strategy_boundary_is_the_plane_width ... ok
+test strided_to_strided_requires_equal_extents ... ok
+test structural_extras_are_expressible_with_revision_one_entries ... ok
+test swap_columns_bounds_the_step_and_the_permutation ... ok
+test the_variant_is_general_when_any_participating_rank_is ... ok
+test transpose_configuration_range ... ok
+test transpose_plans_grid_shared_memory_and_batches ... ok
+test transpose_rejects_bad_batches_and_limits ... ok
+test triangular_plans_accept_batches_and_extreme_offsets ... ok
+test triangular_views_read_through_the_input_layout ... ok
+test unary_accepts_exactly_the_documented_pairs ... ok
+test validation_plans_cap_the_domain_and_check_stride ... ok
+test view_entries_derive_the_count_from_the_extents ... ok
+test view_entries_reject_out_of_span_layouts ... ok
+test violation_matrix_is_i32_whatever_the_input_dtype ... ok
+test wide_combine_widths_are_plane_only_and_bounded ... ok
+test window_dims_helper_drops_collapsed_axes ... ok
+test entry_names_are_unique_and_exported_by_the_sources ... ok
+test the_exposed_sources_match_the_files ... ok
+test pass1_checks_the_axis_stride_before_forming_a_chunk_pointer ... ok
+
+test result: ok. 89 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+# exit 0

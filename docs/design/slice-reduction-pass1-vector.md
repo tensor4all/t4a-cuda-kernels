@@ -246,8 +246,11 @@ loads together. The whole campaign was then repeated, and the tables are from th
     offset=511` forms `in + 767`. Forming such a pointer is undefined behaviour.
   - The stride is now tested first, and the chunk pointer is formed only on a contiguous
     axis.
-  - The source-contract test `tests/planning.rs::pass1_checks_the_axis_stride_before_forming_a_chunk_pointer`
-    fails on the old code and passes now.
+  - `tests/planning.rs::pass1_checks_the_axis_stride_before_forming_a_chunk_pointer` executes
+    the dispatch: it compiles the actual `t4a_cuda_partials_walk` definition as host C++, with
+    only its `in` parameter retyped to a pointer that records every `+` landing outside its
+    allocation, and runs both layouts above plus a contiguous chunk. A pointer formed outside
+    the stride guard fails it (`g-pointer-guard-mutants/` in the worklog evidence).
   - `gpu_reduce.rs::pass1_reads_broadcast_and_reversed_axes_inside_their_allocation` runs both
     layouts on exact-size allocations. The UB is not observable, so this test passed before
     the fix as well.

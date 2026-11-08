@@ -1,7 +1,7 @@
-# test file: tests/planning.rs at 3b65e03; mutant: hoist.patch
-# $ cargo test -j 4 --test planning pass1_checks_the_axis_stride_before_forming_a_chunk_pointer -- --exact
+# tests/planning.rs: execution probe (this commit); mutant: hoist.patch
+# $ cargo test -j 8 --test planning pass1_checks_the_axis_stride_before_forming_a_chunk_pointer -- --exact
    Compiling t4a-cuda-kernels v0.1.1 (/home/shinaoka/tensor4all/t4a-cuda-kernels-pass1)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.13s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.11s
      Running tests/planning.rs (target/debug/deps/planning-16c656270418cf81)
 
 running 1 test
@@ -11,36 +11,19 @@ failures:
 
 ---- pass1_checks_the_axis_stride_before_forming_a_chunk_pointer stdout ----
 
-thread 'pass1_checks_the_axis_stride_before_forming_a_chunk_pointer' (2834070) panicked at tests/planning.rs:3721:9:
-a pointer `in + ...` at byte 143 is formed outside an `if (axis_stride == 1 && ...)` block:
-{
-  if constexpr (t4a_cuda_vector_walk_enabled<Fold, T>()) {
-    
-    
-    
-    const bool contiguous = axis_stride == 1;
-    const T* chunk = in + in_base + start;
-    if (contiguous &&
-        t4a_cuda_vector_walk_applies<T>(end - start, plane_width)) {
-      
-      
-      if ((reinterpret_cast<unsigned long long>(chunk) & 15ull) == 0) {
-        return t4a_cuda_partials_walk_vector<Fold, T, true>(chunk, end - start, plane_width,
-                                                            fold);
-      }
-      return t4a_cuda_partials_walk_vector<Fold, T, false>(chunk, end - start, plane_width,
-                                                           fold);
-    }
-  }
-  return t4a_cuda_partials_walk_scalar<Fold, T>(in, in_base, axis_stride, start, end,
-                                                plane_width, fold);
-}
+thread 'pass1_checks_the_axis_stride_before_forming_a_chunk_pointer' (2875126) panicked at tests/planning.rs:3796:5:
+the pass-1 dispatch forms an out-of-range chunk pointer or picks the wrong walk:
+formed in + 256 over an allocation of 1
+formed in + 767 over an allocation of 512
+out-of-range pointers formed: 2
+
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 
 
 failures:
     pass1_checks_the_axis_stride_before_forming_a_chunk_pointer
 
-test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 88 filtered out; finished in 0.00s
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 88 filtered out; finished in 0.06s
 
 error: test failed, to rerun pass `--test planning`
+# exit 101

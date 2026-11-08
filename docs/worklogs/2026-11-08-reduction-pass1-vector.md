@@ -260,20 +260,33 @@ Revision 13 keeps the cheaper topology and states it.
 
 **Pointer-guard test (needs-changes 1).**
 - `tests/planning.rs::pass1_checks_the_axis_stride_before_forming_a_chunk_pointer` used to
-  check only that `axis_stride == 1` came before the pointer expression in the text. The
-  review's hoisting mutant (`const bool contiguous = ...; const T* chunk = in + in_base +
-  start; if (contiguous && ...)`) passed it.
-- The test now strips `//` comments and requires every `in + ...` expression in
-  `t4a_cuda_partials_walk` to sit inside a block opened by an `if` whose condition has
-  `axis_stride == 1` as a top-level `&&` conjunct, with no `||`.
-- `g-pointer-guard-mutants/`, at `3b65e03`:
-  - `hoist.patch`: the new test `FAILED. 0 passed; 1 failed`; the old test
-    (`hoist-old-test.log`) `ok. 1 passed`;
-  - `var-guard.patch` (pointer inside `if (contiguous && ...)`): `FAILED`;
-  - `or-guard.patch` (`axis_stride == 1 || ...`): `FAILED`.
-  - `cuda/src/reduce.cu` was restored after each, and the commit leaves it unchanged.
-- This is still a source contract: the out-of-allocation pointer is not observable on the
-  device, so no GPU test can fail on it.
+  check only that `axis_stride == 1` came before the pointer expression in the text. Both
+  reviews' hoisting mutants passed it (`hoist-old-test.log`, `hoist-folded-guard-old-test.log`:
+  `ok. 1 passed`).
+- The test now executes the dispatch instead of reading it (`01dc9b0`):
+  - it extracts the actual `t4a_cuda_partials_walk` definition from `reduce.cu`;
+  - it retypes only the `in` parameter, to `CheckedPtr<T>`, whose `operator+` records every
+    result outside `[0, len]` of its allocation;
+  - it stubs the callees so they report which walk ran, compiles the result with the host
+    `c++ -std=c++17` (`$CXX` if set) and runs it;
+  - it runs the review's two witnesses (stride 0 over one element, `start = 256`; stride -1
+    at offset 511 over 512) and a contiguous chunk. The witnesses must form no out-of-range
+    pointer and take the serial walk; the contiguous chunk must take the vector walk.
+- `g-pointer-guard-mutants/` (each patch applied to `reduce.cu`, the test run, the original
+  restored and its sha256 checked):
+
+| mutant | result | probe output |
+| --- | --- | --- |
+| `hoist` (14:25Z review) | `FAILED. 0 passed; 1 failed` | `formed in + 256 over an allocation of 1`, `formed in + 767 over an allocation of 512` |
+| `hoist-folded-guard` (14:28Z review) | `FAILED. 0 passed; 1 failed` | the same two |
+| `or-guard` (`axis_stride == 1 \|\| ...`) | `FAILED. 0 passed; 1 failed` | the same two, and both witnesses take the vector walk |
+| `no-stride-check` | `FAILED. 0 passed; 1 failed` | the same |
+| `var-guard` (pointer inside `if (contiguous && ...)`, which is safe) | `ok. 1 passed` | none |
+
+- The probe stubs the walks, so it proves where the pointer is formed, not what the walks
+  compute; the GPU tests cover that.
+- GCC 13 does not diagnose out-of-bounds pointer arithmetic during constant evaluation, so a
+  `static_assert`-based probe would not fail on the mutants. That is why the probe runs.
 
 **Numbers corrected against the artifacts (needs-changes 2).**
 - Sparse coverage: the single-`1.0` test checks 13 chosen positions (F32, `W = 32`, leads
@@ -286,7 +299,8 @@ Revision 13 keeps the cheaper topology and states it.
 
 **`LDG.E.128` (unverified 1).** `f-sass-ldg128.log`; see §5(c).
 
-**GPU re-run (unverified 2).** `e-cargo-test-gpu-tests-3b65e03.log` (sha256
+**GPU re-run (unverified 2).** Superseded by §9.
+ `e-cargo-test-gpu-tests-3b65e03.log` (sha256
 `625b32320585ef0de99beb44531dac6e820c53644fb0c3e8f3c7ea9e273edf44`): `cargo test -j 4
 --release --features gpu-tests --no-fail-fast` on primerose (A100 80GB PCIe, driver
 580.178.04, CUDA 12.6) at `3b65e03`. All 15 test binaries report `0 failed`, and the command

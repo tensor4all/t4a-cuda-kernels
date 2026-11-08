@@ -19,7 +19,7 @@ These are raw outputs, as produced. The worklog
 | `j-cargo-test-reduce-aa37870.log` | `gpu_reduce`, `gpu_dynamic_rank`, `planning` re-run on `aa37870` |
 | `i-nsys-3d9847e/` | pass-1 nsys re-measurement, `31b734e` against `3d9847e`, two interleaved runs |
 | `f-sass-ldg128.log` | `cuobjdump --dump-sass` of the pass-1 build: `LDG.E.128` counts per entry on both trees and an instruction excerpt |
-| `g-pointer-guard-mutants/*.{patch,log}` | the executed pointer-guard probe against six mutants, and the earlier text checks against the review mutants |
+| `g-pointer-guard-mutants/*.{patch,log}` | the executed pointer-guard probe against seven mutants, the earlier test versions against the review mutants, and the probe self-check |
 | `scripts/` | the drivers that produced the above |
 
 The scripts carry the absolute paths of the session that ran them: a scratch directory, and

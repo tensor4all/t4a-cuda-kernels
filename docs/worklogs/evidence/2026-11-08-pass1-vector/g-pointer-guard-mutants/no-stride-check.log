@@ -1,7 +1,7 @@
-# tests/planning.rs: execution probe (this commit); mutant: no-stride-check.patch
+# tests/planning.rs: tightened probe (conversion counted); mutant: no-stride-check.patch
 # $ cargo test -j 8 --test planning pass1_checks_the_axis_stride_before_forming_a_chunk_pointer -- --exact
    Compiling t4a-cuda-kernels v0.1.1 (/home/shinaoka/tensor4all/t4a-cuda-kernels-pass1)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.59s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.61s
      Running tests/planning.rs (target/debug/deps/planning-16c656270418cf81)
 
 running 1 test
@@ -11,12 +11,13 @@ failures:
 
 ---- pass1_checks_the_axis_stride_before_forming_a_chunk_pointer stdout ----
 
-thread 'pass1_checks_the_axis_stride_before_forming_a_chunk_pointer' (2875904) panicked at tests/planning.rs:3796:5:
+thread 'pass1_checks_the_axis_stride_before_forming_a_chunk_pointer' (2958856) panicked at tests/planning.rs:3812:5:
 the pass-1 dispatch forms an out-of-range chunk pointer or picks the wrong walk:
 formed in + 256 over an allocation of 1
 broadcast axis did not take the serial walk
 formed in + 767 over an allocation of 512
 reversed axis did not take the serial walk
+raw pointers derived from `in` on a non-contiguous axis: 2
 out-of-range pointers formed: 2
 
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

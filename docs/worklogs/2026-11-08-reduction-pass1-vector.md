@@ -358,3 +358,28 @@ Every cell agrees with §2 (measured on `65a74d5`) to within 0.1 µs, except the
   `01b73073f14c24270330d7755dcaf3d50833d23cf7ade4baace8edf9d6ff24b1`), `cargo test -j 4 --release
   --features gpu-tests --no-fail-fast --test gpu_reduce --test gpu_dynamic_rank --test
   planning`: 28, 23 and 89 passed, `# exit 0`.
+
+## 11. GPT-6.1-sol review of head `09196de`: a raw-pointer escape from the probe
+
+- **Finding.** `CheckedPtr` converted implicitly to `const T*`, so `const T* base = in +
+  in_base; const T* chunk = base + start;` placed before the stride check formed an in-range
+  pointer, then did the out-of-range arithmetic on a raw pointer the probe could not see. The
+  `09196de` test passes this mutant (`raw-base-09196de-test.log`: `ok. 1 passed`).
+- **Fix.** The conversion to `const T*` is now counted, and the two non-contiguous witnesses
+  must perform none: on those axes the dispatch must not derive any raw pointer from `in`. The
+  contiguous chunk must perform at least one, so the check cannot pass by never converting.
+- **Mutants now part of the test.** The test also rebuilds the probe around four mutants of
+  the dispatch and requires each to fail: the 14:25Z hoist, the 14:28Z folded guard, the
+  15:30Z negated guard and this review's `raw-base`. If the guard text moves, the test fails
+  and names the mutants to update.
+- Evidence in `g-pointer-guard-mutants/`:
+  - `raw-base.patch` applied to `reduce.cu`: `raw-base.log`, `FAILED. 0 passed; 1 failed`
+    (`raw pointers derived from `in` on a non-contiguous axis: 2`);
+  - the probe with the new check disabled (`if (false && conversions != 0)`) fails its own
+    self-check: `probe-without-conversion-check.log`, ``the probe accepts the `raw-base`
+    mutant``;
+  - the other mutant logs were re-run against the tightened probe; `var-guard` (safe) still
+    passes and every other mutant fails.
+- Only `tests/planning.rs` changed; `cuda/` and `src/` remain identical to `65a74d5`. Host
+  `cargo test -j 8` (89 planning tests), `clippy -D warnings` and `fmt --check` pass. No GPU
+  code changed, so the GPU suite was not re-run for this commit (§10 has the latest run).

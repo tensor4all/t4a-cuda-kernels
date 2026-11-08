@@ -1,0 +1,27 @@
+# tests/planning.rs with the non-contiguous conversion check disabled (`if (false && conversions != 0)`, the 09196de weakness); production unchanged
+# $ cargo test -j 8 --test planning pass1_checks_the_axis_stride_before_forming_a_chunk_pointer -- --exact
+   Compiling t4a-cuda-kernels v0.1.1 (/home/shinaoka/tensor4all/t4a-cuda-kernels-pass1)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.40s
+     Running tests/planning.rs (target/debug/deps/planning-16c656270418cf81)
+
+running 1 test
+test pass1_checks_the_axis_stride_before_forming_a_chunk_pointer ... FAILED
+
+failures:
+
+---- pass1_checks_the_axis_stride_before_forming_a_chunk_pointer stdout ----
+
+thread 'pass1_checks_the_axis_stride_before_forming_a_chunk_pointer' (2961133) panicked at tests/planning.rs:3763:9:
+the probe accepts the `raw-base` mutant, which forms an unchecked pointer:
+out-of-range pointers formed: 0
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    pass1_checks_the_axis_stride_before_forming_a_chunk_pointer
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 88 filtered out; finished in 0.28s
+
+error: test failed, to rerun pass `--test planning`
+# exit 101

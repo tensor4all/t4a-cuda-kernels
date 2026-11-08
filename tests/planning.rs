@@ -3691,9 +3691,12 @@ fn pass1_checks_the_axis_stride_before_forming_a_chunk_pointer() {
     // The device cannot observe that UB, and a text check passes a hoisted pointer. So this
     // test executes the dispatch itself: the actual `t4a_cuda_partials_walk` definition from
     // `reduce.cu`, compiled as host C++ with only its `in` parameter retyped to a pointer that
-    // records every `+` landing outside its allocation. Its callees are stubs that report
-    // which walk was chosen. The two review witnesses must form no out-of-range pointer and
-    // take the serial walk; a contiguous chunk must take the vector walk.
+    // records every `+` landing outside its allocation and every conversion back to a raw
+    // `const T*`. Its callees are stubs that report which walk was chosen. The two review
+    // witnesses must form no out-of-range pointer, convert `in` to no raw pointer at all (raw
+    // arithmetic after a conversion would escape the bounds check: `const T* base = in +
+    // in_base; const T* chunk = base + start;`), and take the serial walk; a contiguous chunk
+    // must take the vector walk.
     let source = include_str!("../cuda/src/reduce.cu");
     let signature = "template <typename Fold, typename T>\n\
                      __device__ __forceinline__ T t4a_cuda_partials_walk(";
@@ -3715,9 +3718,63 @@ fn pass1_checks_the_axis_stride_before_forming_a_chunk_pointer() {
         .replacen("__device__ __forceinline__", "inline", 1)
         .replacen("const T* in,", "CheckedPtr<T> in,", 1);
 
+    let (ok, output) = run_pointer_guard_probe(&definition, "dispatch");
+    assert!(
+        ok,
+        "the pass-1 dispatch forms an out-of-range chunk pointer, derives a raw pointer on a \
+         non-contiguous axis, or picks the wrong walk:\n{output}"
+    );
+
+    // The probe must also catch the mutants the reviews used to defeat earlier versions of
+    // this test, so they are rebuilt and run here on every test run.
+    let guard = "    if (axis_stride == 1 && t4a_cuda_vector_walk_applies<T>(end - start, plane_width)) {\n";
+    let guarded_pointer = "      const T* chunk = in + in_base + start;\n";
+    let guarded = format!("{guard}{guarded_pointer}");
+    assert_eq!(
+        definition.matches(&guarded).count(),
+        1,
+        "the guard and the chunk pointer moved; update the mutants below:\n{definition}"
+    );
+    let mutants = [
+        // 14:25Z review: the pointer hoisted above a `contiguous` flag.
+        (
+            "hoist",
+            "    const bool contiguous = axis_stride == 1;\n    const T* chunk = in + in_base + start;\n    if (contiguous &&\n        t4a_cuda_vector_walk_applies<T>(end - start, plane_width)) {\n".to_string(),
+        ),
+        // 14:28Z review: the whole guard folded into the flag.
+        (
+            "hoist-folded-guard",
+            "    const bool contiguous =\n        axis_stride == 1 &&\n        t4a_cuda_vector_walk_applies<T>(end - start, plane_width);\n    const T* chunk = in + in_base + start;\n    if (contiguous) {\n".to_string(),
+        ),
+        // 15:30Z review: a negated condition that still contains `axis_stride == 1`.
+        (
+            "negated-guard",
+            format!("    if (!(false && axis_stride == 1 &&\n          t4a_cuda_vector_walk_applies<T>(end - start, plane_width))) {{\n{guarded_pointer}"),
+        ),
+        // Review of head 09196de: raw arithmetic after a conversion that is still in range.
+        (
+            "raw-base",
+            format!("    const T* base = in + in_base;\n    const T* chunk = base + start;\n{guard}"),
+        ),
+    ];
+    for (name, replacement) in mutants {
+        let mutant = definition.replacen(&guarded, &replacement, 1);
+        let (ok, output) = run_pointer_guard_probe(&mutant, name);
+        assert!(
+            !ok,
+            "the probe accepts the `{name}` mutant, which forms an unchecked pointer:\n{output}"
+        );
+    }
+}
+
+/// Compiles the pointer-guard probe around `definition` with the host C++ compiler and runs
+/// it. Returns whether it exited 0 and its output. A probe that does not compile panics, so a
+/// mutant cannot pass by breaking the build.
+fn run_pointer_guard_probe(definition: &str, name: &str) -> (bool, String) {
     let program = format!(
         r#"#include <cstdio>
 static int violations = 0;
+static int conversions = 0;
 template <typename T> struct CheckedPtr {{
   const T* base;
   long long len;
@@ -3730,7 +3787,10 @@ template <typename T> struct CheckedPtr {{
     }}
     return next;
   }}
+  // The only way out of the bounds check, so every use is counted: on a non-contiguous axis
+  // the dispatch must not derive any raw pointer from `in`.
   operator const T*() const {{
+    ++conversions;
     return offset < 0 || offset > len ? nullptr : base + offset;
   }}
 }};
@@ -3760,10 +3820,19 @@ int main() {{
     std::printf("reversed axis did not take the serial walk\n");
     ++wrong;
   }}
-  // A contiguous chunk takes the vector walk, so the probe is not vacuous.
+  if (conversions != 0) {{
+    std::printf("raw pointers derived from `in` on a non-contiguous axis: %d\n", conversions);
+    ++wrong;
+  }}
+  // A contiguous chunk takes the vector walk and forms its chunk pointer, so the probe is not
+  // vacuous.
   if (t4a_cuda_partials_walk<Fold, float>(CheckedPtr<float>{{many, 512, 0}}, 0, 1, 256, 512, 32,
                                           Fold{{}}) != 1.0f) {{
     std::printf("contiguous chunk did not take the vector walk\n");
+    ++wrong;
+  }}
+  if (conversions == 0) {{
+    std::printf("the contiguous chunk formed no chunk pointer\n");
     ++wrong;
   }}
   std::printf("out-of-range pointers formed: %d\n", violations);
@@ -3772,7 +3841,10 @@ int main() {{
 "#
     );
 
-    let dir = std::env::temp_dir().join(format!("t4a-pass1-pointer-guard-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "t4a-pass1-pointer-guard-{}-{name}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&dir).expect("scratch directory");
     let cpp = dir.join("probe.cpp");
     let exe = dir.join("probe");
@@ -3793,9 +3865,8 @@ int main() {{
         .output()
         .expect("run the dispatch probe");
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(
+    (
         ran.status.success(),
-        "the pass-1 dispatch forms an out-of-range chunk pointer or picks the wrong walk:\n{}",
-        String::from_utf8_lossy(&ran.stdout)
-    );
+        String::from_utf8_lossy(&ran.stdout).into_owned(),
+    )
 }

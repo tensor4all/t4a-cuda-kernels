@@ -1,7 +1,7 @@
-# tests/planning.rs: execution probe (this commit); mutant: var-guard.patch
+# tests/planning.rs: tightened probe (conversion counted); mutant: var-guard.patch
 # $ cargo test -j 8 --test planning pass1_checks_the_axis_stride_before_forming_a_chunk_pointer -- --exact
    Compiling t4a-cuda-kernels v0.1.1 (/home/shinaoka/tensor4all/t4a-cuda-kernels-pass1)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.58s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.59s
      Running tests/planning.rs (target/debug/deps/planning-16c656270418cf81)
 
 running 1 test

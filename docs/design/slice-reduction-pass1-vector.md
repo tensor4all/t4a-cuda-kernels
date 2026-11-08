@@ -120,7 +120,9 @@ drift, plus a uniform per-block choice of walk:
 - The NaN of the first witness is not a defect of empty or padding lanes:
   - With `A = 1`, the same placement sums to exactly `0`.
   - Two tests pin that nothing outside a lane's own groups and tail contributes: guard NaNs
-    around the view, and a single `1.0` at every chunk position.
+    around the view, and a single `1.0` at 13 chosen positions (F32, `W = 32`, input leads
+    0-3) covering the first group, a group interior, the last whole group and the tail. The
+    second is not an exhaustive sweep of chunk positions.
   - An empty axis never reaches the kernels: the planner refuses it, and the caller supplies
     the identity (0 for a sum).
 - The topology depends only on `len`, `W`, the element type and the operation. Results are
@@ -227,9 +229,13 @@ loads together. The whole campaign was then repeated, and the tables are from th
 **Instruction evidence.**
 - `scripts/sass-diff.sh 31b734e`: 92 entries identical. Only `t4a_cuda_reduce_partials` and
   `t4a_cuda_reduce_partials_any` differ, and both carry the new walk.
-- The pass-1 entries go from 39-40 to 52-54 registers, with no spills. With one-warp blocks,
-  the 32-blocks-per-SM limit still binds before registers do.
-- The vector bodies emit `LDG.E.128`.
+- `c-ptxas.log`: both pass-1 entries use 50 registers (`:7`, `:115`), up from 40
+  (`_any`, `:225`) and 39 (`:277`), with no spills. With one-warp blocks, the
+  32-blocks-per-SM limit still binds before registers do.
+- `f-sass-ldg128.log` (`cuobjdump --dump-sass`, CUDA 12.6, `sm_80`): each pass-1 entry has
+  154 `LDG.E.128`; on `31b734e` they have none, and the two single-pass entries have none
+  on either tree. The excerpt shows two runs of four `LDG.E.128`: one with three of the four
+  predicated, one unpredicated.
 
 ## 9. Review fixes (GPT-6.1-sol review of #23, points 1 and 2)
 
@@ -274,9 +280,10 @@ loads together. The whole campaign was then repeated, and the tables are from th
 A prototype was built to answer this; it is not on this branch.
 - **Design.** 16-byte loads, with every element shuffled back to its revision-12 lane.
 - **Bit identity.** It is bit-identical to the revision-12 serial walk at 1M and 16M.
-- **Cost.** **+5.6 to +7.8 µs per call** of 16M pass-1 device time over the vector walk for
-  F32/F64 `SUM`/`MAX`/`MIN` (`SUM` f64 +2.9 µs), which is 12-16 %. It is close to nothing at
-  1M.
+- **Cost.** At 16M, pass-1 device time (nsys medians, same session) rises over the vector
+  walk by +5.6 to +6.3 µs (12.1-12.9 %) for F32 `SUM`/`MAX`/`MIN`, +7.8 µs (8.57 % `MAX`,
+  8.62 % `MIN`) for F64, and +2.9 µs (3.30 %) for F64 `SUM`. At 1M the change is -0.1 to
+  +0.9 µs.
 - **Why not adopted.**
   - It buys only bit compatibility with a topology that is not more accurate: the two
     documented witnesses flip in opposite directions.

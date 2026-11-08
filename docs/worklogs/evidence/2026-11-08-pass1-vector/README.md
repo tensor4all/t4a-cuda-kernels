@@ -1,4 +1,4 @@
-# Evidence: vectorized pass-1 walk (code at `65a74d5`)
+# Evidence: vectorized pass-1 walk (code at `65a74d5`; `e-`, `f-`, `g-` at `3b65e03`)
 
 These are raw outputs, as produced. The worklog
 `../../2026-11-08-reduction-pass1-vector.md` explains each one.
@@ -14,6 +14,9 @@ These are raw outputs, as produced. The worklog
 | `c-mutants/*.{patch,log}` | the seven mutants and their full test logs |
 | `c-sass-diff.log`, `c-ptxas.log` | `scripts/sass-diff.sh 31b734e` and `ptxas -v` output |
 | `d-shuffle-prototype/` | the revision-12-topology shuffle prototype: patch, bit-identity dumps, nsys timings |
+| `e-cargo-test-gpu-tests-3b65e03.log` | `cargo test -j 4 --release --features gpu-tests --no-fail-fast` re-run on `3b65e03` (CUDA 12.6, local A100) |
+| `f-sass-ldg128.log` | `cuobjdump --dump-sass` of the pass-1 build: `LDG.E.128` counts per entry on both trees and an instruction excerpt |
+| `g-pointer-guard-mutants/*.{patch,log}` | the pointer-guard source contract against three mutants, and the old text-order test against the hoisting mutant |
 | `scripts/` | the drivers that produced the above |
 
 The scripts carry the absolute paths of the session that ran them: a scratch directory, and

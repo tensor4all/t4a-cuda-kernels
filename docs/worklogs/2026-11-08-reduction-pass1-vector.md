@@ -178,7 +178,12 @@ and the driver is `scripts/gpu-evidence.sh`.
 - `c-sass-diff.log` is the raw `scripts/sass-diff.sh 31b734e` output: 92 entries identical, and
   only `t4a_cuda_reduce_partials` and `t4a_cuda_reduce_partials_any` differ.
 - `c-ptxas.log` has the `ptxas -v` output for both trees: registers per entry and zero spill
-  bytes.
+  bytes. Both pass-1 entries use 50 registers (`:7`, `:115`); on `31b734e` they used 40
+  (`t4a_cuda_reduce_partials_any`, `:225`) and 39 (`t4a_cuda_reduce_partials`, `:277`).
+- `f-sass-ldg128.log` (added after the 14:25Z review) is `cuobjdump --dump-sass` of the same
+  `nvcc -std=c++17 -cubin -arch=sm_80` build with CUDA 12.6: 154 `LDG.E.128` in each pass-1
+  entry, none in either entry on `31b734e`, and none in the single-pass entries. It includes
+  an instruction excerpt of `t4a_cuda_reduce_partials`.
 
 **Not runnable here.** `gpt_review.sh`, the external GPT review driver, is not installed on
 this host, and the review states it runs on a Darwin host. It has to be run there.
@@ -219,23 +224,28 @@ and not on this branch.
 
 **Timing.** Pass-1 device time, nsys, with all three variants measured in the same session:
 
-| case | serial walk, `31b734e` µs | vector walk, `65a74d5` µs | shuffle prototype µs | shuffle − vector |
-|---|---:|---:|---:|---:|
-| `reduce-sum-f32-full-1048576` | 8.9 | 8.1 | 8.7 | +0.5 µs |
-| `reduce-max-f32-full-1048576` | 10.5 | 8.8 | 8.9 | +0.0 µs |
-| `reduce-sum-f64-full-1048576` | 9.0 | 8.5 | 8.4 | -0.1 µs |
-| `reduce-max-f64-full-1048576` | 10.4 | 8.8 | 9.8 | +0.9 µs |
-| `reduce-sum-f32-full-16777216` | 61.0 | 46.7 | 52.4 | +5.6 µs |
-| `reduce-max-f32-full-16777216` | 149.3 | 49.0 | 55.3 | +6.3 µs |
-| `reduce-min-f32-full-16777216` | 148.9 | 49.3 | 55.3 | +6.0 µs |
-| `reduce-sum-f64-full-16777216` | 94.4 | 87.3 | 90.2 | +2.9 µs |
-| `reduce-max-f64-full-16777216` | 163.5 | 90.6 | 98.3 | +7.8 µs |
-| `reduce-min-f64-full-16777216` | 163.7 | 90.6 | 98.4 | +7.8 µs |
+| case | serial walk, `31b734e` µs | vector walk, `65a74d5` µs | shuffle prototype µs | shuffle − vector | shuffle / vector − 1 |
+|---|---:|---:|---:|---:|---:|
+| `reduce-sum-f32-full-1048576` | 8.9 | 8.1 | 8.7 | +0.5 µs | +6.69 % |
+| `reduce-max-f32-full-1048576` | 10.5 | 8.8 | 8.9 | +0.0 µs | +0.36 % |
+| `reduce-sum-f64-full-1048576` | 9.0 | 8.5 | 8.4 | -0.1 µs | -0.94 % |
+| `reduce-max-f64-full-1048576` | 10.4 | 8.8 | 9.8 | +0.9 µs | +10.49 % |
+| `reduce-sum-f32-full-16777216` | 61.0 | 46.7 | 52.4 | +5.6 µs | +12.05 % |
+| `reduce-max-f32-full-16777216` | 149.3 | 49.0 | 55.3 | +6.3 µs | +12.86 % |
+| `reduce-min-f32-full-16777216` | 148.9 | 49.3 | 55.3 | +6.0 µs | +12.27 % |
+| `reduce-sum-f64-full-16777216` | 94.4 | 87.3 | 90.2 | +2.9 µs | +3.30 % |
+| `reduce-max-f64-full-16777216` | 163.5 | 90.6 | 98.3 | +7.8 µs | +8.57 % |
+| `reduce-min-f64-full-16777216` | 163.7 | 90.6 | 98.4 | +7.8 µs | +8.62 % |
+
+The last two columns are computed from the `Med (ns)` column of
+`d-shuffle-prototype/nsys-prototype.csv` and `nsys-vector-65a74d5-same-session.csv`, kernel
+`t4a_cuda_reduce_partials`: `prototype / vector − 1`.
 
 **Conclusion: not worth it.**
-- **Cost:** keeping the revision-12 topology costs **+5.6 to +7.8 µs per call at 16M** for
-  F32/F64 `SUM`/`MAX`/`MIN` (`SUM` f64 +2.9 µs). That is 12-16 % of the vector walk's pass 1.
-  It is under the 10-15 µs estimated beforehand, and close to nothing at 1M.
+- **Cost:** at 16M, keeping the revision-12 topology adds +5.6 to +6.3 µs (12.1-12.9 %) to
+  the vector walk's pass 1 for F32 `SUM`/`MAX`/`MIN`, +7.8 µs (8.57 % `MAX`, 8.62 % `MIN`) for
+  F64, and +2.9 µs (3.30 %) for F64 `SUM`. That is under the 10-15 µs estimated beforehand.
+  At 1M it is -0.1 to +0.9 µs.
 - **What it would buy:** bit compatibility with revision 12 only. Revision 12's topology is not
   more accurate: the two documented witnesses flip classification in opposite directions.
 - **What it would also need:**
@@ -245,3 +255,40 @@ and not on this branch.
     keep tested.
 
 Revision 13 keeps the cheaper topology and states it.
+
+## 8. Review fixes (GPT-6.1-sol review of #23, 2026-11-08T14:25Z)
+
+**Pointer-guard test (needs-changes 1).**
+- `tests/planning.rs::pass1_checks_the_axis_stride_before_forming_a_chunk_pointer` used to
+  check only that `axis_stride == 1` came before the pointer expression in the text. The
+  review's hoisting mutant (`const bool contiguous = ...; const T* chunk = in + in_base +
+  start; if (contiguous && ...)`) passed it.
+- The test now strips `//` comments and requires every `in + ...` expression in
+  `t4a_cuda_partials_walk` to sit inside a block opened by an `if` whose condition has
+  `axis_stride == 1` as a top-level `&&` conjunct, with no `||`.
+- `g-pointer-guard-mutants/`, at `3b65e03`:
+  - `hoist.patch`: the new test `FAILED. 0 passed; 1 failed`; the old test
+    (`hoist-old-test.log`) `ok. 1 passed`;
+  - `var-guard.patch` (pointer inside `if (contiguous && ...)`): `FAILED`;
+  - `or-guard.patch` (`axis_stride == 1 || ...`): `FAILED`.
+  - `cuda/src/reduce.cu` was restored after each, and the commit leaves it unchanged.
+- This is still a source contract: the out-of-allocation pointer is not observable on the
+  device, so no GPU test can fail on it.
+
+**Numbers corrected against the artifacts (needs-changes 2).**
+- Sparse coverage: the single-`1.0` test checks 13 chosen positions (F32, `W = 32`, leads
+  0-3), not every chunk position. The design and the test comment now say so.
+- Registers: 50 in both pass-1 entries (`c-ptxas.log:7,115`), from 40 and 39
+  (`:225`, `:277`). The earlier "52-54 from 39-40" was wrong.
+- Shuffle prototype: recomputed from the same-session medians (§7 table, last column). 16M:
+  F32 +12.05/+12.86/+12.27 % (`SUM`/`MAX`/`MIN`), F64 `MAX` +8.57 %, `MIN` +8.62 %, `SUM`
+  +3.30 %. The earlier "12-16 %" was wrong.
+
+**`LDG.E.128` (unverified 1).** `f-sass-ldg128.log`; see §5(c).
+
+**GPU re-run (unverified 2).** `e-cargo-test-gpu-tests-3b65e03.log` (sha256
+`625b32320585ef0de99beb44531dac6e820c53644fb0c3e8f3c7ea9e273edf44`): `cargo test -j 4
+--release --features gpu-tests --no-fail-fast` on primerose (A100 80GB PCIe, driver
+580.178.04, CUDA 12.6) at `3b65e03`. All 15 test binaries report `0 failed`, and the command
+ends `# exit 0`. `65a74d5..8640857` touches only `docs/`, and `8640857..3b65e03` touches only
+`tests/`. No timing was re-measured.

@@ -1,0 +1,44 @@
+# test file: tests/planning.rs at 3b65e03; mutant: or-guard.patch
+# $ cargo test -j 4 --test planning pass1_checks_the_axis_stride_before_forming_a_chunk_pointer -- --exact
+   Compiling t4a-cuda-kernels v0.1.1 (/home/shinaoka/tensor4all/t4a-cuda-kernels-pass1)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.58s
+     Running tests/planning.rs (target/debug/deps/planning-16c656270418cf81)
+
+running 1 test
+test pass1_checks_the_axis_stride_before_forming_a_chunk_pointer ... FAILED
+
+failures:
+
+---- pass1_checks_the_axis_stride_before_forming_a_chunk_pointer stdout ----
+
+thread 'pass1_checks_the_axis_stride_before_forming_a_chunk_pointer' (2834837) panicked at tests/planning.rs:3721:9:
+a pointer `in + ...` at byte 188 is formed outside an `if (axis_stride == 1 && ...)` block:
+{
+  if constexpr (t4a_cuda_vector_walk_enabled<Fold, T>()) {
+    
+    
+    
+    if (axis_stride == 1 || t4a_cuda_vector_walk_applies<T>(end - start, plane_width)) {
+      const T* chunk = in + in_base + start;
+      
+      
+      if ((reinterpret_cast<unsigned long long>(chunk) & 15ull) == 0) {
+        return t4a_cuda_partials_walk_vector<Fold, T, true>(chunk, end - start, plane_width,
+                                                            fold);
+      }
+      return t4a_cuda_partials_walk_vector<Fold, T, false>(chunk, end - start, plane_width,
+                                                           fold);
+    }
+  }
+  return t4a_cuda_partials_walk_scalar<Fold, T>(in, in_base, axis_stride, start, end,
+                                                plane_width, fold);
+}
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    pass1_checks_the_axis_stride_before_forming_a_chunk_pointer
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 88 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test planning`

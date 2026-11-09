@@ -223,6 +223,69 @@ __device__ __forceinline__ void unit_reduce_body(const void* in_ptr,
   out[out_offset] = acc;
 }
 
+// Bytes of elements a plane lane loads before it folds any of them
+// (docs/design/slice-combine-load-ahead.md): 16 F32/I32, 8 F64/I64/C32, 4 C64 elements. The
+// batch is held in registers by `t4a_cuda_reduce`/`t4a_cuda_reduce_any`, which also serve the
+// unit strategy and every other dtype; 64 bytes keeps both entries at or below 64 registers
+// (62 with CUDA 12.6), the point above which a 32-thread block — the many-block unit and
+// direct-plane launches — no longer reaches the 32-blocks-per-SM limit. 96 bytes takes them to
+// 109.
+constexpr int t4a_cuda_plane_batch_bytes = 64;
+
+template <typename T>
+struct t4a_cuda_plane_batch {
+  static constexpr int value = t4a_cuda_plane_batch_bytes / static_cast<int>(sizeof(T));
+};
+
+// One plane lane's serial walk, shared by both plane bodies (and so by the combine pass):
+// lane `t` seeds from element `t` and folds `t + W, t + 2W, ...` in order, exactly as a
+// one-load-per-step loop would. The loads are issued `t4a_cuda_plane_batch` at a time before
+// any of them is folded, the seed being the first load of the first batch, and each is
+// predicated on its own index, so only elements `< axis_len` are read and the folds keep their
+// order: only the loads move earlier.
+template <typename Fold, typename T>
+__device__ __forceinline__ T t4a_cuda_plane_walk(const T* in,
+                                                 long long in_base,
+                                                 long long axis_stride,
+                                                 long long axis_len,
+                                                 int plane_width,
+                                                 Fold fold) {
+  constexpr int B = t4a_cuda_plane_batch<T>::value;
+  const long long stride = plane_width;
+  // INVARIANT: `axis_len >= plane_width` (the planner's `PLANE` precondition), so the seed
+  // element `threadIdx.x` exists.
+  long long index = threadIdx.x;
+  T batch[B];
+#pragma unroll
+  for (int b = 0; b < B; ++b) {
+    if (b == 0 || index + b * stride < axis_len) {
+      batch[b] = in[in_base + (index + b * stride) * axis_stride];
+    }
+  }
+  T acc = fold.seed(batch[0]);
+#pragma unroll
+  for (int b = 1; b < B; ++b) {
+    if (index + b * stride < axis_len) {
+      acc = fold(acc, batch[b]);
+    }
+  }
+  for (index += B * stride; index < axis_len; index += B * stride) {
+#pragma unroll
+    for (int b = 0; b < B; ++b) {
+      if (index + b * stride < axis_len) {
+        batch[b] = in[in_base + (index + b * stride) * axis_stride];
+      }
+    }
+#pragma unroll
+    for (int b = 0; b < B; ++b) {
+      if (index + b * stride < axis_len) {
+        acc = fold(acc, batch[b]);
+      }
+    }
+  }
+  return acc;
+}
+
 // One block (one plane) per output. Every lane participates in the shuffles: the
 // planner guarantees `axis_len >= plane_width`, so no lane returns early, and
 // only lane 0 writes.
@@ -247,11 +310,8 @@ __device__ __forceinline__ void plane_reduce_body(const void* in_ptr,
   const int plane_width = static_cast<int>(blockDim.x);
   const long long axis_stride = in_layout.strides[axis];
   const long long axis_len = in_layout.extents[axis];
-  long long reduce_index = threadIdx.x;
-  T acc = fold.seed(in[in_base + reduce_index * axis_stride]);
-  for (reduce_index += plane_width; reduce_index < axis_len; reduce_index += plane_width) {
-    acc = fold(acc, in[in_base + reduce_index * axis_stride]);
-  }
+  const T acc = t4a_cuda_plane_walk<Fold, T>(in, in_base, axis_stride, axis_len, plane_width,
+                                             fold);
   const T reduced = t4a_cuda_plane_fold(acc, plane_width, fold);
   if (threadIdx.x == 0) {
     out[out_offset] = reduced;
@@ -594,11 +654,8 @@ __device__ __forceinline__ void plane_reduce_body_any(const void* in_ptr,
   const int plane_width = static_cast<int>(blockDim.x);
   const long long axis_stride = in_layout.strides[axis];
   const long long axis_len = in_layout.extents[axis];
-  long long reduce_index = threadIdx.x;
-  T acc = fold.seed(in[in_base + reduce_index * axis_stride]);
-  for (reduce_index += plane_width; reduce_index < axis_len; reduce_index += plane_width) {
-    acc = fold(acc, in[in_base + reduce_index * axis_stride]);
-  }
+  const T acc = t4a_cuda_plane_walk<Fold, T>(in, in_base, axis_stride, axis_len, plane_width,
+                                             fold);
   const T reduced = t4a_cuda_plane_fold(acc, plane_width, fold);
   if (threadIdx.x == 0) {
     out[out_offset] = reduced;

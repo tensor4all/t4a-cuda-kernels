@@ -1,0 +1,13 @@
+### mutated kernel: steady-state batch folded in reverse order
+280c280
+<     for (int b = 0; b < B; ++b) {
+---
+>     for (int b = B - 1; b >= 0; --b) {
+test combine_keeps_the_serial_lane_walk_bit_for_bit ... FAILED
+
+--
+thread 'combine_keeps_the_serial_lane_walk_bit_for_bit' (3557549) panicked at tests/gpu_reduce.rs:3151:29:
+assertion `left == right` failed: F32 Sum len 3001 lanes 32 AxisMajor general false pattern 0: got 2571.8962, serial walk 2571.896
+--
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 29 filtered out; finished in 9.79s
+

@@ -1,0 +1,293 @@
+# Production-entry SASS of the PLANE walk, `t4a_cuda_reduce`, F64 PROD (the combine of the
+# full f64 product: 32 lanes over 4096 partials, 128 elements per lane).
+#
+# $ nvcc -std=c++17 -cubin -arch=sm_80 -lineinfo -I cuda/include -o reduce.cubin cuda/src/reduce.cu
+# $ nvdisasm -g -c reduce.cubin        # section .text.t4a_cuda_reduce
+# CUDA 12.6 (Build cuda_12.6.r12.6/compiler.35059454_0). Base: the same commands on ab7395c.
+# Blocks were selected by loops.py (a block that branches back to its own label and holds the
+# loads and multiplies); trailing hex encodings stripped, no instruction removed. The 16-load
+# blocks in the base entry are the unit strategy's walk (`unit_reduce_body`), unchanged.
+#
+# Base: a one-load remainder loop (.L_x_3644, `(n-1) % 4` trips), then four loads before four
+# dependent DMULs per trip (.L_x_3645). For 127 folds that is 3 + 31 = 34 load batches after the
+# seed load.
+# This branch: eight predicated LDG.E.64 (`t4a_cuda_plane_batch<double>` = 64 bytes / 8) issued
+# before the eight DMULs of the same batch, which fold in index order with the accumulator
+# carried (R30/R32). For 127 folds after the seed: the seed batch plus 15 more = 16 batches.
+
+## ===== base ab7395c =====
+## loop block .L_x_3644: 13 instructions, 1 LDG.E.64, 1 DMUL
+.L_x_3644:
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-old.cu", line 253
+        /*8600*/                   IMAD.MOV.U32 R2, RZ, RZ, R0 ;
+        /*8610*/                   MOV R3, R6 ;
+        /*8620*/                   LDG.E.64 R2, [R2.64] ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-old.cu", line 252
+        /*8630*/                   IADD3 R8, P1, R8, -0x1, RZ ;
+        /*8640*/                   IADD3 R19, P2, R19, c[0x0][0x0], RZ ;
+        /*8650*/                   IADD3.X R9, R9, -0x1, RZ, P1, !PT ;
+        /*8660*/                   ISETP.NE.U32.AND P1, PT, R8, RZ, PT ;
+        /*8670*/                   IMAD.X R24, R26, 0x1, R24, P2 ;
+        /*8680*/                   LEA R0, P3, R4, R0, 0x3 ;
+        /*8690*/                   ISETP.NE.AND.EX P1, PT, R9, RZ, PT, P1 ;
+        /*86a0*/                   IMAD.X R6, R6, 0x1, R7, P3 ;
+	//## File "/home/shinaoka/work/t4a-cuda-kernels-combine/cuda/include/t4a/abi.cuh", line 654
+        /*86b0*/                   DMUL R12, R2, R12 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-old.cu", line 252
+        /*86c0*/               @P1 BRA `(.L_x_3644) ;
+## loop block .L_x_3645: 26 instructions, 4 LDG.E.64, 4 DMUL
+.L_x_3645:
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-old.cu", line 253
+        /*87f0*/                   IADD3 R4, P0, R0, R14, RZ ;
+        /*8800*/                   IMAD.MOV.U32 R2, RZ, RZ, R0 ;
+        /*8810*/                   MOV R3, R10 ;
+        /*8820*/                   IMAD.X R5, R10, 0x1, R22.reuse, P0 ;
+        /*8830*/                   IADD3 R8, P0, R4, R14.reuse, RZ ;
+        /*8840*/                   LDG.E.64 R2, [R2.64] ;
+        /*8850*/                   IMAD.X R9, R5, 0x1, R22, P0 ;
+        /*8860*/                   LDG.E.64 R4, [R4.64] ;
+        /*8870*/                   IADD3 R10, P0, R8, R14, RZ ;
+        /*8880*/                   LDG.E.64 R6, [R8.64] ;
+        /*8890*/                   IMAD.X R11, R9, 0x1, R22, P0 ;
+        /*88a0*/                   LDG.E.64 R8, [R10.64] ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-old.cu", line 252
+        /*88b0*/                   MOV R17, c[0x0][0x0] ;
+        /*88c0*/                   IADD3 R0, P0, P1, R17, c[0x0][0x0], R19 ;
+        /*88d0*/                   IADD3 R19, P2, P3, R17, c[0x0][0x0], R0 ;
+        /*88e0*/                   IADD3.X R0, R26.reuse, R24, R26.reuse, P0, P1 ;
+        /*88f0*/                   ISETP.GE.U32.AND P0, PT, R19, R20, PT ;
+        /*8900*/                   IADD3.X R24, R26, R0, R26, P2, P3 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-old.cu", line 253
+        /*8910*/                   IADD3 R0, P1, R10, R14, RZ ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-old.cu", line 252
+        /*8920*/                   ISETP.GE.AND.EX P0, PT, R24, R21, PT, P0 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-old.cu", line 253
+        /*8930*/                   IMAD.X R10, R11, 0x1, R22, P1 ;
+	//## File "/home/shinaoka/work/t4a-cuda-kernels-combine/cuda/include/t4a/abi.cuh", line 654
+        /*8940*/                   DMUL R2, R2, R12 ;
+        /*8950*/                   DMUL R2, R2, R4 ;
+        /*8960*/                   DMUL R2, R2, R6 ;
+        /*8970*/                   DMUL R12, R2, R8 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-old.cu", line 252
+        /*8980*/              @!P0 BRA `(.L_x_3645) ;
+
+## ===== this branch =====
+## loop block .L_x_3514: 147 instructions, 8 LDG.E.64, 8 DMUL
+.L_x_3514:
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 275
+        /*a0f0*/                   ISETP.GE.U32.AND P1, PT, R3.reuse, R4.reuse, PT ;
+        /*a100*/                   IADD3 R38, P0, R3, c[0x0][0x0], RZ ;
+        /*a110*/                   ISETP.GE.AND.EX P1, PT, R14, R5, PT, P1 ;
+        /*a120*/                   ISETP.GE.U32.AND P2, PT, R38, R4, PT ;
+        /*a130*/                   IADD3.X R39, R14, UR4, RZ, P0, !PT ;
+        /*a140*/                   IADD3 R40, P4, R38, c[0x0][0x0], RZ ;
+        /*a150*/                   ISETP.GE.AND.EX P2, PT, R39.reuse, R5, PT, P2 ;
+        /*a160*/                   IADD3.X R41, R39, UR4, RZ, P4, !PT ;
+        /*a170*/                   ISETP.GE.U32.AND P0, PT, R40, R4, PT ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 276
+        /*a180*/              @!P1 IMAD R0, R14, R26, RZ ;
+        /*a190*/              @!P1 MOV R32, R17 ;
+        /*a1a0*/              @!P1 IMAD.MOV.U32 R33, RZ, RZ, R18 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 275
+        /*a1b0*/                   ISETP.GE.AND.EX P0, PT, R41, R5, PT, P0 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 276
+        /*a1c0*/              @!P1 IMAD R0, R27, R3, R0 ;
+        /*a1d0*/              @!P1 IMAD.WIDE.U32 R32, R26, R3, R32 ;
+        /*a1e0*/              @!P1 IMAD.IADD R0, R33, 0x1, R0 ;
+        /*a1f0*/              @!P1 LEA R34, P4, R32.reuse, c[0x0][0x168], 0x3 ;
+        /*a200*/              @!P2 IMAD R19, R39, R26, RZ ;
+        /*a210*/              @!P2 IMAD.MOV.U32 R33, RZ, RZ, R18 ;
+        /*a220*/              @!P1 LEA.HI.X R35, R32, c[0x0][0x16c], R0, 0x3, P4 ;
+        /*a230*/              @!P2 IMAD.MOV.U32 R32, RZ, RZ, R17 ;
+        /*a240*/              @!P2 IMAD R0, R27, R38.reuse, R19 ;
+        /*a250*/              @!P1 LDG.E.64 R28, [R34.64] ;
+        /*a260*/              @!P2 IMAD.WIDE.U32 R32, R26, R38, R32 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 275
+        /*a270*/                   IADD3 R42, P4, R40, c[0x0][0x0], RZ ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 276
+        /*a280*/              @!P2 IMAD.IADD R0, R33, 0x1, R0 ;
+        /*a290*/              @!P2 LEA R34, P1, R32.reuse, c[0x0][0x168], 0x3 ;
+        /*a2a0*/              @!P0 IMAD.MOV.U32 R33, RZ, RZ, R18 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 275
+        /*a2b0*/                   IADD3.X R43, R41.reuse, UR4, RZ, P4, !PT ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 276
+        /*a2c0*/              @!P2 LEA.HI.X R35, R32, c[0x0][0x16c], R0, 0x3, P1 ;
+        /*a2d0*/              @!P0 IMAD R0, R41, R26, RZ ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 275
+        /*a2e0*/                   ISETP.GE.U32.AND P1, PT, R42, R4, PT ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 276
+        /*a2f0*/              @!P0 MOV R32, R17 ;
+        /*a300*/              @!P2 LDG.E.64 R24, [R34.64] ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 275
+        /*a310*/                   ISETP.GE.AND.EX P1, PT, R43, R5, PT, P1 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 276
+        /*a320*/              @!P0 IMAD R0, R27, R40, R0 ;
+        /*a330*/              @!P0 IMAD.WIDE.U32 R32, R26, R40, R32 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 275
+        /*a340*/                   IADD3 R44, P5, R42, c[0x0][0x0], RZ ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 276
+        /*a350*/              @!P0 IMAD.IADD R0, R33, 0x1, R0 ;
+        /*a360*/              @!P0 LEA R34, P4, R32, c[0x0][0x168], 0x3 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 275
+        /*a370*/                   ISETP.GE.U32.AND P2, PT, R44, R4, PT ;
+        /*a380*/                   IADD3.X R45, R43.reuse, UR4, RZ, P5, !PT ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 276
+        /*a390*/              @!P0 LEA.HI.X R35, R32, c[0x0][0x16c], R0, 0x3, P4 ;
+        /*a3a0*/              @!P1 IMAD R0, R43, R26, RZ ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 275
+        /*a3b0*/                   ISETP.GE.AND.EX P2, PT, R45, R5, PT, P2 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 276
+        /*a3c0*/              @!P1 IMAD.MOV.U32 R32, RZ, RZ, R17 ;
+        /*a3d0*/              @!P1 IMAD.MOV.U32 R33, RZ, RZ, R18 ;
+        /*a3e0*/              @!P0 LDG.E.64 R22, [R34.64] ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 275
+        /*a3f0*/                   IADD3 R46, P4, R44, c[0x0][0x0], RZ ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 276
+        /*a400*/              @!P1 IMAD R0, R27, R42.reuse, R0 ;
+        /*a410*/              @!P1 IMAD.WIDE.U32 R32, R26, R42, R32 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 275
+        /*a420*/                   IADD3.X R47, R45, UR4, RZ, P4, !PT ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 276
+        /*a430*/              @!P1 IMAD.IADD R0, R33, 0x1, R0 ;
+        /*a440*/              @!P1 LEA R34, P4, R32, c[0x0][0x168], 0x3 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 275
+        /*a450*/                   ISETP.GE.U32.AND P0, PT, R46, R4, PT ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 276
+        /*a460*/              @!P2 IMAD R19, R45, R26, RZ ;
+        /*a470*/              @!P2 MOV R37, R18 ;
+        /*a480*/              @!P2 IMAD.MOV.U32 R36, RZ, RZ, R17 ;
+        /*a490*/              @!P1 LEA.HI.X R35, R32, c[0x0][0x16c], R0, 0x3, P4 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 275
+        /*a4a0*/                   ISETP.GE.AND.EX P0, PT, R47, R5, PT, P0 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 276
+        /*a4b0*/              @!P2 IMAD.WIDE.U32 R36, R26, R44, R36 ;
+        /*a4c0*/              @!P1 LDG.E.64 R20, [R34.64] ;
+        /*a4d0*/              @!P2 IMAD R19, R27, R44, R19 ;
+        /*a4e0*/              @!P2 LEA R32, P4, R36, c[0x0][0x168], 0x3 ;
+        /*a4f0*/              @!P2 IMAD.IADD R0, R37, 0x1, R19 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 275
+        /*a500*/                   IADD3 R19, P5, R46, c[0x0][0x0], RZ ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 276
+        /*a510*/              @!P0 IMAD.MOV.U32 R34, RZ, RZ, R17 ;
+        /*a520*/              @!P2 LEA.HI.X R33, R36, c[0x0][0x16c], R0, 0x3, P4 ;
+        /*a530*/              @!P0 IMAD R0, R47, R26, RZ ;
+        /*a540*/              @!P0 IMAD.MOV.U32 R35, RZ, RZ, R18 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 275
+        /*a550*/                   ISETP.GE.U32.AND P1, PT, R19, R4, PT ;
+        /*a560*/                   IADD3.X R36, R47, UR4, RZ, P5, !PT ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 276
+        /*a570*/              @!P0 IMAD.WIDE.U32 R34, R26, R46.reuse, R34 ;
+        /*a580*/              @!P2 LDG.E.64 R12, [R32.64] ;
+        /*a590*/              @!P0 IMAD R0, R27, R46, R0 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 275
+        /*a5a0*/                   ISETP.GE.AND.EX P1, PT, R36, R5, PT, P1 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 276
+        /*a5b0*/              @!P0 IMAD.IADD R0, R35, 0x1, R0 ;
+        /*a5c0*/              @!P0 LEA R32, P2, R34, c[0x0][0x168], 0x3 ;
+        /*a5d0*/              @!P0 LEA.HI.X R33, R34, c[0x0][0x16c], R0, 0x3, P2 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 275
+        /*a5e0*/                   IADD3 R37, P2, R19, c[0x0][0x0], RZ ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 276
+        /*a5f0*/              @!P1 IMAD R0, R36.reuse, R26, RZ ;
+        /*a600*/              @!P0 LDG.E.64 R10, [R32.64] ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 275
+        /*a610*/                   ISETP.GE.U32.AND P0, PT, R37, R4, PT ;
+        /*a620*/                   IADD3.X R48, R36, UR4, RZ, P2, !PT ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 276
+        /*a630*/              @!P1 IMAD R0, R27, R19, R0 ;
+        /*a640*/              @!P1 MOV R32, R17 ;
+        /*a650*/              @!P1 IMAD.MOV.U32 R33, RZ, RZ, R18 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 275
+        /*a660*/                   ISETP.GE.AND.EX P0, PT, R48, R5, PT, P0 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 276
+        /*a670*/              @!P1 IMAD.WIDE.U32 R32, R26, R19, R32 ;
+        /*a680*/              @!P1 IMAD.IADD R0, R33, 0x1, R0 ;
+        /*a690*/              @!P1 LEA R34, P2, R32, c[0x0][0x168], 0x3 ;
+        /*a6a0*/              @!P1 LEA.HI.X R35, R32, c[0x0][0x16c], R0, 0x3, P2 ;
+        /*a6b0*/              @!P0 IMAD R0, R48, R26, RZ ;
+        /*a6c0*/              @!P0 IMAD.MOV.U32 R32, RZ, RZ, R17 ;
+        /*a6d0*/              @!P0 IMAD.MOV.U32 R33, RZ, RZ, R18 ;
+        /*a6e0*/              @!P1 LDG.E.64 R8, [R34.64] ;
+        /*a6f0*/              @!P0 IMAD R0, R27, R37.reuse, R0 ;
+        /*a700*/              @!P0 IMAD.WIDE.U32 R32, R26, R37, R32 ;
+        /*a710*/              @!P0 IMAD.IADD R0, R33, 0x1, R0 ;
+        /*a720*/              @!P0 LEA R34, P1, R32, c[0x0][0x168], 0x3 ;
+        /*a730*/              @!P0 LEA.HI.X R35, R32, c[0x0][0x16c], R0, 0x3, P1 ;
+        /*a740*/              @!P0 LDG.E.64 R6, [R34.64] ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 275
+        /*a750*/                   ISETP.GE.U32.AND P0, PT, R3, R4, PT ;
+        /*a760*/                   ISETP.GE.AND.EX P0, PT, R14, R5, PT, P0 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 272
+        /*a770*/                   IADD3 R3, P2, R37, c[0x0][0x0], RZ ;
+        /*a780*/                   ISETP.GE.U32.AND P1, PT, R3, R4, PT ;
+        /*a790*/                   IADD3.X R14, R48, UR4, RZ, P2, !PT ;
+        /*a7a0*/                   ISETP.GE.AND.EX P1, PT, R14, R5, PT, P1 ;
+	//## File "/home/shinaoka/work/t4a-cuda-kernels-combine/cuda/include/t4a/abi.cuh", line 654
+        /*a7b0*/                   DMUL R32, R28, R30 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 281
+        /*a7c0*/                   FSEL R32, R32, R30, !P0 ;
+        /*a7d0*/                   FSEL R33, R33, R31, !P0 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 275
+        /*a7e0*/                   ISETP.GE.U32.AND P0, PT, R38, R4, PT ;
+	//## File "/home/shinaoka/work/t4a-cuda-kernels-combine/cuda/include/t4a/abi.cuh", line 654
+        /*a7f0*/                   DMUL R30, R24, R32 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 275
+        /*a800*/                   ISETP.GE.AND.EX P0, PT, R39, R5, PT, P0 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 281
+        /*a810*/                   FSEL R32, R30, R32, !P0 ;
+        /*a820*/                   FSEL R33, R31, R33, !P0 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 275
+        /*a830*/                   ISETP.GE.U32.AND P0, PT, R40, R4, PT ;
+	//## File "/home/shinaoka/work/t4a-cuda-kernels-combine/cuda/include/t4a/abi.cuh", line 654
+        /*a840*/                   DMUL R30, R22, R32 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 275
+        /*a850*/                   ISETP.GE.AND.EX P0, PT, R41, R5, PT, P0 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 281
+        /*a860*/                   FSEL R32, R30, R32, !P0 ;
+        /*a870*/                   FSEL R33, R31, R33, !P0 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 275
+        /*a880*/                   ISETP.GE.U32.AND P0, PT, R42, R4, PT ;
+	//## File "/home/shinaoka/work/t4a-cuda-kernels-combine/cuda/include/t4a/abi.cuh", line 654
+        /*a890*/                   DMUL R30, R20, R32 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 275
+        /*a8a0*/                   ISETP.GE.AND.EX P0, PT, R43, R5, PT, P0 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 281
+        /*a8b0*/                   FSEL R32, R30, R32, !P0 ;
+        /*a8c0*/                   FSEL R33, R31, R33, !P0 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 275
+        /*a8d0*/                   ISETP.GE.U32.AND P0, PT, R44, R4, PT ;
+	//## File "/home/shinaoka/work/t4a-cuda-kernels-combine/cuda/include/t4a/abi.cuh", line 654
+        /*a8e0*/                   DMUL R30, R12, R32 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 275
+        /*a8f0*/                   ISETP.GE.AND.EX P0, PT, R45, R5, PT, P0 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 281
+        /*a900*/                   FSEL R32, R30, R32, !P0 ;
+        /*a910*/                   FSEL R33, R31, R33, !P0 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 275
+        /*a920*/                   ISETP.GE.U32.AND P0, PT, R46, R4, PT ;
+	//## File "/home/shinaoka/work/t4a-cuda-kernels-combine/cuda/include/t4a/abi.cuh", line 654
+        /*a930*/                   DMUL R30, R10, R32 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 275
+        /*a940*/                   ISETP.GE.AND.EX P0, PT, R47, R5, PT, P0 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 281
+        /*a950*/                   FSEL R32, R30, R32, !P0 ;
+        /*a960*/                   FSEL R33, R31, R33, !P0 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 275
+        /*a970*/                   ISETP.GE.U32.AND P0, PT, R19, R4, PT ;
+        /*a980*/                   ISETP.GE.AND.EX P0, PT, R36, R5, PT, P0 ;
+	//## File "/home/shinaoka/work/t4a-cuda-kernels-combine/cuda/include/t4a/abi.cuh", line 654
+        /*a990*/                   DMUL R30, R8, R32 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 281
+        /*a9a0*/                   FSEL R32, R30, R32, !P0 ;
+        /*a9b0*/                   FSEL R33, R31, R33, !P0 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 275
+        /*a9c0*/                   ISETP.GE.U32.AND P0, PT, R37, R4, PT ;
+	//## File "/home/shinaoka/work/t4a-cuda-kernels-combine/cuda/include/t4a/abi.cuh", line 654
+        /*a9d0*/                   DMUL R30, R6, R32 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 275
+        /*a9e0*/                   ISETP.GE.AND.EX P0, PT, R48, R5, PT, P0 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 281
+        /*a9f0*/                   FSEL R30, R30, R32, !P0 ;
+        /*aa00*/                   FSEL R31, R31, R33, !P0 ;
+	//## File "/tmp/claude-2000/-home-shinaoka/97937db9-1670-48ae-8b75-ed6eb3056267/scratchpad/evidence/reduce-new.cu", line 272
+        /*aa10*/              @!P1 BRA `(.L_x_3514) ;

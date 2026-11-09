@@ -3197,9 +3197,11 @@ fn main() {
     }
     // The pass-1 streaming cells of the vectorized lane mapping
     // (docs/design/slice-reduction-pass1-vector.md): 64/128 MiB inputs, where pass 1 is
-    // DRAM-bound rather than L2-resident.
+    // DRAM-bound rather than L2-resident. `prod` (serial pass-1 walk, one-warp combine) is the
+    // control of docs/design/slice-combine-load-ahead.md.
     for (op, name) in [
         (ReduceOp::Sum, "sum"),
+        (ReduceOp::Prod, "prod"),
         (ReduceOp::Max, "max"),
         (ReduceOp::Min, "min"),
     ] {

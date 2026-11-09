@@ -33,6 +33,15 @@ fn repo_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
 }
 
+/// Checkout whose `cuda/` the cubins are compiled from: this crate's, unless
+/// `T4A_CUDA_SOURCE_ROOT` names another (a benchmark measuring a previous
+/// revision's kernels with the same harness binary).
+fn source_root() -> PathBuf {
+    std::env::var_os("T4A_CUDA_SOURCE_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo_root().to_path_buf())
+}
+
 fn cubin(source: &str) -> PathBuf {
     static CUBINS: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
     let cache = CUBINS.get_or_init(|| Mutex::new(HashMap::new()));
@@ -51,10 +60,10 @@ fn cubin(source: &str) -> PathBuf {
             .arg("-cubin")
             .arg(format!("-arch={arch}"))
             .arg("-I")
-            .arg(repo_root().join("cuda/include"))
+            .arg(source_root().join("cuda/include"))
             .arg("-o")
             .arg(&out)
-            .arg(repo_root().join(format!("cuda/src/{source}.cu")))
+            .arg(source_root().join(format!("cuda/src/{source}.cu")))
             .status()
             .expect("nvcc not found: the GPU tests need the CUDA toolkit");
         assert!(status.success(), "nvcc failed for cuda/src/{source}.cu");

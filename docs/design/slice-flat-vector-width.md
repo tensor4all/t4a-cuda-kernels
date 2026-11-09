@@ -105,8 +105,31 @@ take (`sizeof(T) * W > 16`) is not instantiated and, like an unknown dtype,
 performs no work. The planner never produces it.
 
 Every lane applies the same scalar expression the old body applied, in the same
-type, with no reassociation. **Results are therefore bit-identical to width 1.**
-The GPU tests check this per width.
+type, with no reassociation. Two freedoms remain, both already in the ABI's
+arithmetic semantics:
+
+- **NaN payload.** `NaN + NaN` may return either operand's payload, because the
+  compiler may swap a commutative operation's operands. As for the reductions,
+  only "is NaN" is part of the contract. Observed on an A100: `Add F64` width 2
+  returned the lhs payload where width 1 returned the rhs payload.
+- **FMA contraction.** The ABI leaves contraction to the compiler, and the pack
+  lanes and the scalar tail are separately compiled code. Complex
+  multiplication (`a.re*b.re - a.im*b.im`) can therefore round differently
+  between them. Observed: `Mul C32`, len 5, width 2, 1 ULP on the tail element.
+  The difference is bounded normwise by
+  `2 eps (|a.re b.re| + |a.im b.im|)` (and the imaginary analogue), not in ULPs
+  of a result that may cancel.
+
+Everything else (real add/sub/mul/div, complex add/sub, every unary pair
+tested, compare, clamp, integers) was bit-identical across widths in the A100
+run. The GPU test asserts exactly that split. Making complex multiplication
+bit-stable would mean pinning its formula (for example `__fmul_rn` /
+`__fadd_rn`, or an explicit `fma`). That is a revision-wide numerics decision
+and is not part of this slice.
+
+For a given input, length and alignment, the width and so the bits are fixed, so
+tenferro's reproducibility promise (same build, same input) is unaffected. An
+owned tensor's allocation base is always aligned.
 
 ## 6. ABI
 
@@ -135,9 +158,11 @@ CPU (`tests/planning.rs`, red before the rule exists):
 GPU (`tests/gpu_elementwise.rs`, `--features gpu-tests`, A100):
 
 - for every vectorized entry and dtype, widths 1/2/4 (where the dtype allows)
-  over lengths `0, 1, w-1, w, w+1, 65_537, 1_000_003`. Each width's destination
-  bytes must equal width 1's bytes over a sentinel-filled buffer, guard
-  included. NaN payloads, signed zero and infinities are among the inputs;
+  over lengths `0, 1, 2, 3, 4, 5, 7, 65_537, 1_000_003`. Each width must leave
+  the guard of a sentinel-filled destination untouched and match width 1 under
+  the contract of section 5. NaN payloads, signed zero, infinities, subnormals
+  and integer extremes are among the inputs. `Add F64` is also checked against
+  a CPU reference;
 - a misaligned operand (base + one element) plans width 1 and matches.
 
 ## 8. Deferred / out of scope

@@ -1041,7 +1041,12 @@ Thread `t` owns elements `t*w .. t*w+w-1` while `t < len/w` (one aligned
 load per input, one aligned store), and otherwise the single tail element
 `(len/w)*w + (t - len/w)` while that is below `len`. Width 1 is the
 one-element-per-thread form. Every lane applies the width-1 scalar expression to
-the same element in the same type, so **every width writes the same bits**.
+the same element in the same type. Across widths the results are bit-identical
+except in two places, both already covered by "Arithmetic semantics":
+- the payload of a NaN result: only "is NaN" is contractual;
+- FMA contraction in complex multiplication, which the pack lanes and the scalar
+  tail may round differently, bounded normwise by
+  `2 eps (|a.re b.re| + |a.im b.im|)`.
 
 `alignment` and `vector_width` are caller contracts like the pointers: they must
 describe the addresses actually passed. A caller that does not know them passes

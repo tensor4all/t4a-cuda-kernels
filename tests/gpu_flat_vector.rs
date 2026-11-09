@@ -2,7 +2,8 @@
 //!
 //! Each entry runs at every vector width its dtypes admit. The planner picks
 //! the width; the test steers it through the `alignment` argument. Every width
-//! must write exactly the bytes width 1 writes, guard region included. Width 1 is
+//! must write the values width 1 writes, guard region untouched: bit-identical
+//! except the payload of a NaN result, which is not part of the contract. Width 1 is
 //! the one-element-per-thread body the other GPU tests check against CPU
 //! references; here it is also checked against a CPU reference for the
 //! arithmetic entries. Inputs carry NaN payloads, signed zeros, infinities,
@@ -167,16 +168,59 @@ fn expected_width(wanted: u32, len: i64) -> u32 {
     }
 }
 
+/// A float component two widths may disagree on: its index, and both values.
+type Allowance<'a> = &'a dyn Fn(usize, f64, f64) -> bool;
+
+/// No difference beyond a NaN payload is allowed.
+fn exact(_: usize, _: f64, _: f64) -> bool {
+    false
+}
+
+/// First output component where `a` and `b` disagree under the cross-width
+/// contract: integer and Bool components are bit-identical; a float component is
+/// bit-identical unless both are NaN, whose payload is not part of the contract
+/// (as for the reductions), or `allowed` accepts the pair. Complex outputs compare
+/// their parts.
+fn first_mismatch(out: DType, a: &[u8], b: &[u8], allowed: Allowance<'_>) -> Option<usize> {
+    let (part, float) = match out {
+        DType::F32 | DType::C32 => (4, true),
+        DType::F64 | DType::C64 => (8, true),
+        DType::I32 => (4, false),
+        DType::I64 => (8, false),
+        DType::Bool => (1, false),
+    };
+    let value = |bytes: &[u8]| match part {
+        4 => f64::from(f32::from_le_bytes(bytes.try_into().unwrap())),
+        _ => f64::from_le_bytes(bytes.try_into().unwrap()),
+    };
+    a.chunks_exact(part)
+        .zip(b.chunks_exact(part))
+        .enumerate()
+        .position(|(index, (x, y))| {
+            if x == y {
+                return false;
+            }
+            if !float {
+                return true;
+            }
+            let (x, y) = (value(x), value(y));
+            !((x.is_nan() && y.is_nan()) || allowed(index, x, y))
+        })
+}
+
 fn check_widths(
     what: &str,
+    out: DType,
     widest: usize,
     len: i64,
+    allowed: Allowance<'_>,
     plan_for: impl Fn(u64) -> FlatLaunch,
     run_plan: impl Fn(FlatLaunch) -> Vec<u8>,
 ) -> Vec<u8> {
     let scalar_plan = plan_for(1);
     assert_eq!(scalar_plan.vector_width, 1, "{what}");
     let scalar = run_plan(scalar_plan);
+    let payload = len as usize * out.size();
     for (wanted, alignment) in widths(widest) {
         let plan = plan_for(alignment);
         assert_eq!(
@@ -185,12 +229,28 @@ fn check_widths(
             "{what} len {len} alignment {alignment}"
         );
         let bytes = run_plan(plan);
-        assert!(
-            bytes == scalar,
-            "{what} len {len}: width {} differs from width 1 at byte {:?}",
-            plan.vector_width,
-            bytes.iter().zip(&scalar).position(|(a, b)| a != b)
-        );
+        // `run` already proved the guard behind the payload untouched for both.
+        if let Some(index) = first_mismatch(out, &bytes[..payload], &scalar[..payload], allowed) {
+            let part = out.size()
+                / if matches!(out, DType::C32 | DType::C64) {
+                    2
+                } else {
+                    1
+                };
+            let hex = |buffer: &[u8]| {
+                buffer[index * part..(index + 1) * part]
+                    .iter()
+                    .rev()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            };
+            panic!(
+                "{what} len {len}: width {} differs from width 1 at component {index}: {} vs {}",
+                plan.vector_width,
+                hex(&bytes),
+                hex(&scalar)
+            );
+        }
     }
     scalar
 }
@@ -209,6 +269,7 @@ fn arithmetic_widths_write_the_scalar_bytes() {
         (Entry::Sub, DType::I64),
         (Entry::Mul, DType::F64),
         (Entry::Mul, DType::C32),
+        (Entry::Mul, DType::C64),
         (Entry::Mul, DType::I32),
         (Entry::Div, DType::F32),
         (Entry::Div, DType::F64),
@@ -216,13 +277,49 @@ fn arithmetic_widths_write_the_scalar_bytes() {
     for (entry, dtype) in cases {
         for len in LENGTHS {
             let n = len as usize;
-            let lhs = written(&session, &values(dtype, n.max(1), 1 + len as u64));
-            let rhs = written(&session, &values(dtype, n.max(1), 2 + len as u64));
+            let lhs_host = values(dtype, n.max(1), 1 + len as u64);
+            let rhs_host = values(dtype, n.max(1), 2 + len as u64);
+            let lhs = written(&session, &lhs_host);
+            let rhs = written(&session, &rhs_host);
             let what = format!("{entry:?} {dtype:?}");
+            // Complex multiplication is `a.re*b.re - a.im*b.im` (and the imaginary
+            // analogue), where the ABI leaves FMA contraction to the compiler. The pack
+            // lanes and the scalar tail are separately compiled, so they may contract
+            // differently; the difference is bounded normwise, not in ULPs of a result
+            // that may cancel.
+            let complex_mul = |index: usize, x: f64, y: f64| {
+                let (part, eps) = match dtype {
+                    DType::C32 => (4, f64::from(f32::EPSILON)),
+                    DType::C64 => (8, f64::EPSILON),
+                    _ => return false,
+                };
+                if entry != Entry::Mul {
+                    return false;
+                }
+                let get = |bytes: &[u8], component: usize| match part {
+                    4 => f64::from(f32::from_le_bytes(
+                        bytes[component * 4..component * 4 + 4].try_into().unwrap(),
+                    )),
+                    _ => f64::from_le_bytes(
+                        bytes[component * 8..component * 8 + 8].try_into().unwrap(),
+                    ),
+                };
+                let element = index / 2;
+                let (ar, ai) = (get(&lhs_host, 2 * element), get(&lhs_host, 2 * element + 1));
+                let (br, bi) = (get(&rhs_host, 2 * element), get(&rhs_host, 2 * element + 1));
+                let scale = if index % 2 == 0 {
+                    (ar * br).abs() + (ai * bi).abs()
+                } else {
+                    (ar * bi).abs() + (ai * br).abs()
+                };
+                (x - y).abs() <= 2.0 * eps * scale
+            };
             let scalar = check_widths(
                 &what,
+                dtype,
                 dtype.size(),
                 len,
+                &complex_mul,
                 |alignment| plan_arithmetic(entry, dtype, len, alignment).unwrap(),
                 |plan| {
                     run(
@@ -244,11 +341,10 @@ fn arithmetic_widths_write_the_scalar_bytes() {
                 },
             );
             if matches!(dtype, DType::F64) && matches!(entry, Entry::Add) {
-                let l = values(dtype, n.max(1), 1 + len as u64);
-                let r = values(dtype, n.max(1), 2 + len as u64);
+                let (l, r) = (&lhs_host, &rhs_host);
                 for i in 0..n {
                     let at = |b: &[u8]| f64::from_le_bytes(b[i * 8..i * 8 + 8].try_into().unwrap());
-                    let expected = at(&l) + at(&r);
+                    let expected = at(l) + at(r);
                     let actual = at(&scalar);
                     assert!(
                         actual.to_bits() == expected.to_bits()
@@ -283,8 +379,10 @@ fn unary_widths_write_the_scalar_bytes() {
             let input = written(&session, &values(src, n.max(1), 3 + len as u64));
             check_widths(
                 &format!("{op:?} {dst:?}<-{src:?}"),
+                dst,
                 dst.size().max(src.size()),
                 len,
+                &exact,
                 |alignment| plan_unary(op, dst, src, len, alignment).unwrap(),
                 |plan| {
                     run(
@@ -321,8 +419,10 @@ fn compare_and_clamp_widths_write_the_scalar_bytes() {
                 let rhs = written(&session, &values(dtype, n.max(1), 6 + len as u64));
                 check_widths(
                     &format!("compare {cmp:?} {dtype:?}"),
+                    DType::Bool,
                     dtype.size(),
                     len,
+                    &exact,
                     |alignment| plan_compare(dtype, len, alignment).unwrap(),
                     |plan| {
                         run(&session, "t4a_cuda_compare", plan, n, |out, width| {
@@ -349,8 +449,10 @@ fn compare_and_clamp_widths_write_the_scalar_bytes() {
             let upper = written(&session, &values(dtype, n.max(1), 9 + len as u64));
             check_widths(
                 &format!("clamp {dtype:?}"),
+                dtype,
                 dtype.size(),
                 len,
+                &exact,
                 |alignment| plan_clamp(dtype, len, alignment).unwrap(),
                 |plan| {
                     run(

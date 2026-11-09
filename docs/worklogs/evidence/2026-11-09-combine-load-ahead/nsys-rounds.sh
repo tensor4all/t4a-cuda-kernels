@@ -8,7 +8,7 @@ for r in 1 2 3; do
   for side in $order; do
     [ -n "$(nvidia-smi --query-compute-apps=pid --format=csv,noheader)" ] && { echo "GPU busy"; exit 3; }
     bin=$B; [ $side = cand ] && bin=$C
-    bash $E/knsys.sh $bin $E/nsys/r$r-$side $cases
+    bash /home/shinaoka/work/t4a-cuda-kernels-combine/docs/worklogs/evidence/2026-11-08-nan-extrema-select/knsys.sh $bin ${NSYS_OUT:?}/r$r-$side $cases
   done
 done
 echo nsys-done

@@ -54,7 +54,7 @@ threads. At or below 64 registers they therefore keep their occupancy. The value
 
 | batch | `t4a_cuda_reduce` / `_any` registers |
 |---|---|
-| 64 bytes (chosen) | 62 / 62 |
+| 64 bytes (chosen) | 61 / 61 (62 / 62 before the overflow fallback below) |
 | 96 bytes | 109 / 109 |
 | 128 bytes | 142 / 142 |
 | 16 elements of every 8-byte type | 69 / 65 |
@@ -74,6 +74,15 @@ What does not change:
 - **Addresses.** Only elements `< axis_len` are loaded, the same set as before. A load is
   issued earlier, never at a new address, and the address of an element past the axis is never
   formed.
+- **Counter range.** The batched walk forms `index + b * W` up to `axis_len + B * W`. An axis
+  within `B * W` of the `long long` limit (only a broadcast view can be that long) takes the
+  original one-load loop, verbatim, on a uniform branch. That loop never steps more than `W`
+  past the end, so no input that was representable before overflows now. The loop is an
+  out-of-line function (`t4a_cuda_plane_walk_serial`). Inlined, it changed the scheduling of
+  the batched walk enough to fail the control gate (`reduce-min-f32-full-16777216` at 1.041 in
+  a full paired campaign). Two counter forms
+  that avoid the branch were tried and rejected: a remaining-distance bound (`PROD` f64 1M at
+  42.5 µs) and a per-lane element count (80 registers, `axis-511` 11.9 µs).
 - **ABI.** No symbol, signature, struct, launch geometry, planner, manifest or ABI revision
   changes. `scripts/sass-diff.sh ab7395c` lists exactly `t4a_cuda_reduce` and
   `t4a_cuda_reduce_any`; the other 92 entries, pass 1 included, are identical.
@@ -115,29 +124,43 @@ Rejected:
    drives `t4a_cuda_reduce` and `t4a_cuda_reduce_any` directly with strategy `PLANE` at the
    planner's combine widths. It covers the combine geometries (32 lanes for `PROD`, 512 for
    the others, over 4096), ragged lengths, `axis_len == plane_width`, short direct-plane axes,
-   and contiguous, strided, reversed (stride -1) and broadcast (stride 0) axes. Its nine input
-   patterns hold NaNs (one, or several meeting in one lane), ±inf with a zero, -0.0, mixed
-   signed zeros, near-overflow sums, products that overflow or underflow mid-walk, and
-   subnormals, for F32 and F64 under all five ops.
+   and contiguous, strided, reversed (stride -1) and broadcast (stride 0) axes.
+   - Its eleven input patterns hold: one NaN; NaNs meeting in one lane's walk (lane 7's seed,
+     element 1 and element 3); ±inf with a zero; -0.0; mixed signed zeros; near-overflow sums;
+     products that overflow or underflow mid-walk; subnormals.
+   - Two patterns each put two NaNs after a finite seed in one lane, alone in their output so
+     the xor tree cannot mask them: the first batch, and a steady-state batch. They pin the fold
+     order *inside* a batch through the extrema.
+   - All of it runs for F32 and F64 under all five ops.
    - Each result must equal, bit for bit, a CPU emulation of the serial walk and the
      xor/warp tree (the pattern of `product_partials_keep_the_serial_lane_walk_bit_for_bit`).
-   - The one exception is the f64 arithmetic payload case above, where it must be NaN.
+   - The one exception is the f64 arithmetic payload case above, where it must be NaN. It is
+     applied only where two distinct NaN payloads actually meet in one lane (both NaNs inside
+     the axis), never to a single NaN or to the extrema.
    - `combine_inputs_exercise_every_special_class` checks that the expected results really
      contain each class.
    - The test passes on the unmodified `ab7395c` kernel, so the emulation is the previous
-     implementation on these inputs. It fails on a kernel that folds one batch in reverse.
+     implementation on these inputs.
+   - It fails on a kernel that folds the steady-state batch in reverse, and on one that does so
+     only for `MAX`/`MIN`.
 2. **Old vs new, out of tree.** A driver-API program compares the two cubins byte for byte on
-   every dtype/op route, 15 geometries, three layouts and both entries, and classifies each
-   difference as value, NaN-ness or payload-only. Value and NaN-ness differences must be zero
-   (`docs/worklogs/evidence/2026-11-09-combine-load-ahead/`).
+   every dtype/op route, 15 geometries, three layouts and both entries. It classifies each
+   differing output as value, NaN-ness or payload-only (`docs/worklogs/evidence/2026-11-09-combine-load-ahead/`).
+   - Value and NaN-ness differences must be zero.
+   - A payload-only difference is tolerated only on f64/c64 `SUM`/`PROD`/`SUM_SQUARES`; on any
+     other route it is a failure.
 3. **Full GPU suite**, `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`.
 4. **SASS/resources.** Production-entry SASS of the new loop, `ptxas -v` for the four reduce
    entries in both trees, and `scripts/sass-diff.sh ab7395c`.
 
 ## Measurement
 
-A100 80GB PCIe, CUDA 12.6, GPU idle (no compute process before each process, checked with
-`nvidia-smi`), CPUs 0-7 below 5 % busy before each process, one GPU job at a time.
+A100 80GB PCIe, CUDA 12.6, one GPU job at a time.
+
+- **GPU idle.** No compute process before each process, checked with `nvidia-smi`.
+- **CPU isolation.** The measured processes run on CPUs 0-7, one L3 domain (checked from
+  sysfs), and must be below 5 % busy before each process. The campaign driver and its probes
+  run on CPUs 8-15, another L3 domain. Other work stays on 16-63.
 
 - **Host µs/op.** The same `bench_kernels` source (with `reduce-prod-{f32,f64}-full-16777216`
   added) built on `ab7395c` and on this branch, run by the evidence directory's `campaign.sh`.
@@ -154,3 +177,26 @@ A100 80GB PCIe, CUDA 12.6, GPU idle (no compute process before each process, che
   change.
 - **Not measured.** The general-rank entry has no `bench_kernels` case. Its loop is the same
   helper, and its registers are reported above.
+
+## Results (2026-11-09)
+
+Evidence directory: `docs/worklogs/evidence/2026-11-09-combine-load-ahead/`.
+
+- **Combine device time** (`nsys/table.md`, median of three alternating rounds):
+  - `PROD` f32 11.60 → 8.31 µs; `PROD` f64 11.90 → 10.33 µs.
+  - `SUM`/`MAX`/`MIN`/`SUM_SQUARES` 5.4-6.5 → 5.0-5.7 µs.
+  - Pass 1 is unchanged.
+- **Host µs/op** (`campaign/table.md`):
+  - `PROD` f32 1M 21.82 → 18.34 (0.841); `PROD` f64 1M 22.12 → 20.59 (0.931).
+  - The other required 1M/16M cells are 0.939-1.007.
+- **Control gate: one control fails.** `reduce-sum-f32-axis-513` (many-output unit combine) is
+  at 1.037 against the 1.03 rule. That cell was 0.999 in a full paired campaign of the same
+  walk without the near-`LLONG_MAX` fallback (every control ≤ 1.010 there), and 1.024 with the
+  fallback inlined. The fallback is the cost. Whether to keep it (no new overflow at any
+  representable length) or drop it (all controls pass; an axis within `B * W` of `2^63` would
+  overflow `index`) is left to review.
+- **Not reached.** "Most of the 10.9 µs" for `PROD`: about 28 % of the f32 combine goes.
+  - On one warp, the address arithmetic of a predicated batch (≈ 18 instructions per load in
+    the f64 loop) is now comparable to the L2 latency.
+  - More loads in flight cost registers above the 64-register occupancy threshold of the
+    shared entry.

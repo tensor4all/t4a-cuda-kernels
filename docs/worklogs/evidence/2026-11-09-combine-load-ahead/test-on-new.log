@@ -1,0 +1,8 @@
+### this branch
+test combine_inputs_exercise_every_special_class ... ok
+test wide_combine_folds_every_partial_for_every_wide_width ... ok
+test wide_combine_matches_the_cpu_reference_for_each_dtype ... ok
+test combine_keeps_the_serial_lane_walk_bit_for_bit ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 26 filtered out; finished in 12.46s
+

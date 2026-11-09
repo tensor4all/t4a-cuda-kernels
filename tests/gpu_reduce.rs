@@ -2605,11 +2605,17 @@ fn pass1_overflow_follows_the_revision_13_grouping() {
 // folds, but must fold exactly as the serial walk does: lane `t` seeds from element `t` and
 // folds `t + k*W` in increasing `k`, then the xor tree combines the lanes (through shared
 // memory across warps for a block wider than one warp). The emulation below is that order in
-// IEEE arithmetic, with the device's observable NaN conventions: an f32 arithmetic NaN result
-// is the canonical NaN, an f64 one keeps the payload of its first NaN operand (quieted), and
-// the NaN-propagating extrema select an operand (payload kept, `lhs` first) and order
-// `-0.0 < +0.0`. The f64 rule makes the operand order of every add and multiply observable. The inputs are chosen so that a different order changes the
-// bits: NaN payloads, infinities, signed zeros, overflow and underflow mid-walk, subnormals.
+// IEEE arithmetic, with the device's NaN conventions:
+// - an f32 arithmetic NaN result is the canonical NaN;
+// - an f64 one keeps the payload of its NaN operand (quieted), or is the default NaN
+//   `0xfff8...` when neither operand is NaN. With two NaN operands the device keeps the second
+//   instruction operand's payload, and the instruction operand order is the compiler's choice,
+//   so the emulation's "accumulator first" is a convention, checked only where at most one NaN
+//   meets in a lane (`combine_bits_pinned`);
+// - the NaN-propagating extrema select an operand (payload kept, `lhs` first) and order
+//   `-0.0 < +0.0`.
+// The inputs are chosen so that a different order changes the bits: NaN payloads, infinities,
+// signed zeros, overflow and underflow mid-walk, subnormals.
 
 /// A floating element type of the combine emulation.
 trait CombineValue: Probe + PartialEq + std::fmt::Debug {
@@ -2728,8 +2734,9 @@ impl CombineValue for f64 {
 }
 
 /// Arithmetic as the device rounds it: IEEE round-to-nearest; a NaN result is canonical (f32)
-/// or keeps the first NaN operand's payload, quieted (f64; canonical when neither operand is
-/// NaN, as in `inf - inf`).
+/// or keeps a NaN operand's payload, quieted (f64; the default NaN when neither operand is NaN,
+/// as in `inf - inf`). For two f64 NaN operands this picks `lhs` by convention; see the section
+/// comment above.
 fn device_arith<T: CombineValue>(lhs: T, rhs: T, value: T) -> T {
     if !value.is_nan() {
         return value;
@@ -2849,10 +2856,7 @@ fn unit_hash(column: usize, index: usize) -> f64 {
 }
 
 /// Number of input patterns, one per output of a launch.
-const COMBINE_PATTERNS: usize = 9;
-
-/// The pattern whose distinct NaN payloads meet inside one lane's walk.
-const COLLIDING_NANS: usize = 1;
+const COMBINE_PATTERNS: usize = 11;
 
 /// Element `index` of an axis of `len` under input pattern `column`.
 fn combine_input<T: CombineValue>(column: usize, index: usize, len: usize, width: usize) -> T {
@@ -2867,10 +2871,8 @@ fn combine_input<T: CombineValue>(column: usize, index: usize, len: usize, width
     };
     match column {
         0 => base,
-        // NaNs with distinct payloads, all in lane 7's walk (its seed and its elements 1 and 3):
-        // which payload survives depends on the walk folding in order with the accumulator on
-        // the left. Keeping them in one lane leaves the xor tree a single NaN lane, so the
-        // result does not depend on the operand order the compiler chose inside the tree.
+        // NaNs with distinct payloads meeting inside lane 7's walk: its seed and its elements
+        // 1 and 3.
         1 => match index {
             7 => T::payload_nan(1, false),
             _ if index == width + 7 => T::payload_nan(2, false),
@@ -2917,9 +2919,22 @@ fn combine_input<T: CombineValue>(column: usize, index: usize, len: usize, width
                 base
             }
         }
+        // Two NaNs after a finite seed, alone in their output so the xor tree cannot mask them:
+        // lane 11's elements 17 and 18 (pattern 9: one steady-state batch for both the
+        // 16-element F32 and the 8-element F64 batch) or lane 9's elements 1 and 2 (pattern
+        // 10: the first batch). The extrema keep the first NaN in fold order, so their bits
+        // pin the order of the folds inside a batch.
+        9 | 10 => {
+            let (lane, first) = if column == 9 { (11, 17) } else { (9, 1) };
+            match index {
+                _ if index == first * width + lane => T::payload_nan(5 + column as u64, false),
+                _ if index == (first + 1) * width + lane => T::payload_nan(7 + column as u64, true),
+                _ => base,
+            }
+        }
         // Subnormals of both signs: the sum and the extrema stay subnormal, the product
         // underflows to a signed zero.
-        _ => {
+        7 => {
             let value = T::min_subnormal().raw_mul(T::from_f64((1 + index % 97) as f64));
             if h < 0.5 {
                 value.raw_mul(T::from_f64(-1.0))
@@ -2927,6 +2942,7 @@ fn combine_input<T: CombineValue>(column: usize, index: usize, len: usize, width
                 value
             }
         }
+        _ => unreachable!("{column} is not an input pattern"),
     }
 }
 
@@ -3076,16 +3092,31 @@ fn run_combine<T: CombineValue>(
     download::<T>(session, &dst, outputs as usize)
 }
 
-/// Whether the emulation pins `pattern`'s result bit for bit under `op`. The one exception:
-/// two distinct f64 NaN payloads meeting in one lane's `SUM`/`PROD`/`SUM_SQUARES` walk. An
+/// Whether the emulation pins `pattern`'s result bit for bit under `op` on a `len`-long axis of
+/// `width` lanes. The one exception: two distinct f64 NaN payloads actually meeting in one
+/// lane's `SUM`/`PROD`/`SUM_SQUARES` walk, i.e. both NaNs of pattern 1, 9 or 10 inside the axis
+/// (a shorter axis holds one NaN and stays bit-exact). An
 /// f64 add or multiply of two NaNs keeps one operand's payload, and which one is the
 /// compiler's choice of operand order per instruction: at `ab7395c` it already differs between
 /// the loop's remainder and unrolled iterations, so the same lane keeps a different payload
 /// at lengths 3001 and 4096. The ABI leaves the payload out of the contract
 /// (docs/abi/c-kernel-abi.md, "NaN"), so there only "is NaN" is checked. The extrema select
 /// their NaN in source order and stay bit-exact on that pattern too.
-fn combine_bits_pinned<T: CombineValue>(op: ReduceOp, pattern: usize) -> bool {
-    pattern != COLLIDING_NANS || !T::KEEPS_PAYLOAD || matches!(op, ReduceOp::Max | ReduceOp::Min)
+fn combine_bits_pinned<T: CombineValue>(
+    op: ReduceOp,
+    pattern: usize,
+    len: i64,
+    width: u32,
+) -> bool {
+    let w = i64::from(width);
+    let second_nan = match pattern {
+        1 => w + 7,
+        9 => 18 * w + 11,
+        10 => 2 * w + 9,
+        _ => return true,
+    };
+    let collides = len > second_nan;
+    !collides || !T::KEEPS_PAYLOAD || matches!(op, ReduceOp::Max | ReduceOp::Min)
 }
 
 fn check_combine_serial_walk<T: CombineValue>(session: &Session) {
@@ -3147,7 +3178,7 @@ fn check_combine_serial_walk<T: CombineValue>(session: &Session) {
                              pattern {pattern}: got {got:?}, serial walk {want:?}",
                             T::DTYPE
                         );
-                        if combine_bits_pinned::<T>(op, pattern) || !want.is_nan() {
+                        if combine_bits_pinned::<T>(op, pattern, len, width) || !want.is_nan() {
                             assert_eq!(got.bits(), want.bits(), "{context}");
                         } else {
                             assert!(got.is_nan() && want.is_nan(), "{context}");

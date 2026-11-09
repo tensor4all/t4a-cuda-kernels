@@ -2,14 +2,17 @@
 //
 // Loads two cubins of cuda/src/reduce.cu (the baseline and the candidate), launches
 // `t4a_cuda_reduce` and `t4a_cuda_reduce_any` with strategy PLANE on identical inputs, and
-// compares every output element bit for bit. Each floating component that differs is classified:
+// compares every output element bit for bit. Each output that differs is classified by its worst
+// component:
 //   - value:   at least one side is not NaN and the bits differ (an in-contract difference);
 //   - nanness: one side NaN, the other not (an in-contract difference);
-//   - payload: both NaN, different bits (outside the ABI contract, c-kernel-abi.md "NaN").
-// Integers have only the `value` class.
+//   - payload: both NaN, different bits. Tolerated only on the routes where the payload is the
+//     compiler's operand order (F64/C64 SUM, PROD, SUM_SQUARES; see the design slice); on any
+//     other route it is counted as `payload-violation`, a failure.
+// Integers have only the `value` class. All counts are outputs (elements), not components.
 //
-// Exit codes: 0 every planned output was compared and no value/nanness difference was found;
-// 1 a value/nanness difference; 2 any CUDA failure or an incomplete comparison.
+// Exit codes: 0 every planned output was compared, with no value, nanness or payload-violation
+// difference; 1 such a difference; 2 any CUDA failure or an incomplete comparison.
 //
 // Build: g++ -O2 -std=c++17 -I/usr/local/cuda-12.6/include combine-old-vs-new.cpp
 //        -L/usr/local/cuda-12.6/lib64/stubs -lcuda -o combine-old-vs-new
@@ -144,7 +147,7 @@ uint64_t float_bits(Rng& rng, bool f32, int mode) {
 }
 
 struct Counts {
-  long long compared = 0, value = 0, nanness = 0, payload = 0;
+  long long compared = 0, value = 0, nanness = 0, payload = 0, payload_violation = 0;
 };
 
 bool is_nan_bits(uint64_t b, bool f32) {
@@ -152,21 +155,28 @@ bool is_nan_bits(uint64_t b, bool f32) {
   return (b & 0x7ff0000000000000ull) == 0x7ff0000000000000ull && (b & 0x000fffffffffffffull) != 0;
 }
 
-void classify(const uint8_t* a, const uint8_t* b, DType dtype, Counts& counts) {
+// 0 equal, 1 payload, 2 nanness, 3 value (the worst component wins).
+void classify(const uint8_t* a, const uint8_t* b, DType dtype, int op, Counts& counts) {
   const int sb = scalar_bytes(dtype);
   const int components = element_bytes(dtype) / sb;
+  int worst = 0;
   for (int c = 0; c < components; ++c) {
     uint64_t x = 0, y = 0;
     std::memcpy(&x, a + c * sb, sb);
     std::memcpy(&y, b + c * sb, sb);
     if (x == y) continue;
-    if (!floating(dtype)) { ++counts.value; continue; }
-    const bool f32 = sb == 4;
-    const bool xn = is_nan_bits(x, f32), yn = is_nan_bits(y, f32);
-    if (xn && yn) ++counts.payload;
-    else if (xn != yn) ++counts.nanness;
-    else ++counts.value;
+    int kind = 3;
+    if (floating(dtype)) {
+      const bool f32 = sb == 4;
+      const bool xn = is_nan_bits(x, f32), yn = is_nan_bits(y, f32);
+      kind = xn && yn ? 1 : (xn != yn ? 2 : 3);
+    }
+    worst = kind > worst ? kind : worst;
   }
+  const bool payload_route = (dtype == F64 || dtype == C64) && op != MAX && op != MIN;
+  if (worst == 3) ++counts.value;
+  else if (worst == 2) ++counts.nanness;
+  else if (worst == 1) ++(payload_route ? counts.payload : counts.payload_violation);
 }
 
 struct Module {
@@ -300,7 +310,7 @@ int main(int argc, char** argv) {
             CK(cuMemFree(dst));
           }
           for (long long o = 0; o < outputs; ++o) {
-            classify(&results[0][o * eb], &results[1][o * eb], route.dtype, counts);
+            classify(&results[0][o * eb], &results[1][o * eb], route.dtype, route.op, counts);
             ++counts.compared;
           }
           planned += outputs;
@@ -309,16 +319,20 @@ int main(int argc, char** argv) {
         CK(cuMemFree(geometry_buf));
       }
     }
-    std::printf("%-4s %-12s outputs %6lld  value %lld  nanness %lld  payload-only %lld\n",
+    std::printf("%-4s %-12s outputs %6lld  value %lld  nanness %lld  payload-only %lld"
+                "  payload-violation %lld\n",
                 dtype_name(route.dtype), op_name(route.op), counts.compared, counts.value,
-                counts.nanness, counts.payload);
+                counts.nanness, counts.payload, counts.payload_violation);
     total.compared += counts.compared;
     total.value += counts.value;
     total.nanness += counts.nanness;
     total.payload += counts.payload;
+    total.payload_violation += counts.payload_violation;
   }
-  std::printf("total outputs %lld (planned %lld)  value %lld  nanness %lld  payload-only %lld\n",
-              total.compared, planned, total.value, total.nanness, total.payload);
+  std::printf("total outputs %lld (planned %lld)  value %lld  nanness %lld  payload-only %lld"
+              "  payload-violation %lld\n",
+              total.compared, planned, total.value, total.nanness, total.payload,
+              total.payload_violation);
   if (total.compared != planned || planned == 0) return 2;
-  return total.value + total.nanness == 0 ? 0 : 1;
+  return total.value + total.nanness + total.payload_violation == 0 ? 0 : 1;
 }

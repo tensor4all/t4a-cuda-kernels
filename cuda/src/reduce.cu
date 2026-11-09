@@ -232,14 +232,27 @@ __device__ __forceinline__ void unit_reduce_body(const void* in_ptr,
 // 109.
 constexpr int t4a_cuda_plane_batch_bytes = 64;
 
-template <typename T>
-struct t4a_cuda_plane_batch {
-  static constexpr int value = t4a_cuda_plane_batch_bytes / static_cast<int>(sizeof(T));
-};
+// The one-load-per-step lane walk of `ab7395c`, kept for an axis within one batch of the
+// `long long` limit (see `t4a_cuda_plane_walk`). Out of line so the batched walk's code is
+// scheduled as if it were absent.
+template <typename Fold, typename T>
+__device__ __noinline__ T t4a_cuda_plane_walk_serial(const T* in,
+                                                     long long in_base,
+                                                     long long axis_stride,
+                                                     long long axis_len,
+                                                     int plane_width,
+                                                     Fold fold) {
+  long long index = threadIdx.x;
+  T acc = fold.seed(in[in_base + index * axis_stride]);
+  for (index += plane_width; index < axis_len; index += plane_width) {
+    acc = fold(acc, in[in_base + index * axis_stride]);
+  }
+  return acc;
+}
 
 // One plane lane's serial walk, shared by both plane bodies (and so by the combine pass):
 // lane `t` seeds from element `t` and folds `t + W, t + 2W, ...` in order, exactly as a
-// one-load-per-step loop would. The loads are issued `t4a_cuda_plane_batch` at a time before
+// one-load-per-step loop would. The loads are issued a batch at a time before
 // any of them is folded, the seed being the first load of the first batch, and each is
 // predicated on its own index, so only elements `< axis_len` are read and the folds keep their
 // order: only the loads move earlier.
@@ -250,11 +263,19 @@ __device__ __forceinline__ T t4a_cuda_plane_walk(const T* in,
                                                  long long axis_len,
                                                  int plane_width,
                                                  Fold fold) {
-  constexpr int B = t4a_cuda_plane_batch<T>::value;
+  constexpr int B = t4a_cuda_plane_batch_bytes / static_cast<int>(sizeof(T));
   const long long stride = plane_width;
   // INVARIANT: `axis_len >= plane_width` (the planner's `PLANE` precondition), so the seed
   // element `threadIdx.x` exists.
   long long index = threadIdx.x;
+  // The batched walk below forms `index + b * stride` up to `axis_len + B * stride`. An axis
+  // within that distance of the `long long` limit (only a broadcast view can be that long)
+  // takes the one-load-per-step loop instead, which never steps more than `stride` past the
+  // end. The test is uniform across the block.
+  if (axis_len > 0x7fffffffffffffffLL - static_cast<long long>(B) * stride) {
+    return t4a_cuda_plane_walk_serial<Fold, T>(in, in_base, axis_stride, axis_len, plane_width,
+                                               fold);
+  }
   T batch[B];
 #pragma unroll
   for (int b = 0; b < B; ++b) {

@@ -15,45 +15,34 @@
 
 namespace {
 
-template <typename T>
-__device__ __forceinline__ void add_body(void* out, const void* lhs, const void* rhs,
-                                         long long len) {
-  long long index;
-  if (t4a_cuda_tail_index(&index, len)) {
-    static_cast<T*>(out)[index] =
-        t4a_cuda_add<T>(static_cast<const T*>(lhs)[index], static_cast<const T*>(rhs)[index]);
+// One lane of each entry: the same scalar expression for every vector width.
+struct add_op {
+  template <typename T>
+  __device__ __forceinline__ T operator()(T lhs, T rhs) const {
+    return t4a_cuda_add<T>(lhs, rhs);
   }
-}
+};
 
-template <typename T>
-__device__ __forceinline__ void sub_body(void* out, const void* lhs, const void* rhs,
-                                         long long len) {
-  long long index;
-  if (t4a_cuda_tail_index(&index, len)) {
-    static_cast<T*>(out)[index] =
-        t4a_cuda_sub<T>(static_cast<const T*>(lhs)[index], static_cast<const T*>(rhs)[index]);
+struct sub_op {
+  template <typename T>
+  __device__ __forceinline__ T operator()(T lhs, T rhs) const {
+    return t4a_cuda_sub<T>(lhs, rhs);
   }
-}
+};
 
-template <typename T>
-__device__ __forceinline__ void mul_body(void* out, const void* lhs, const void* rhs,
-                                         long long len) {
-  long long index;
-  if (t4a_cuda_tail_index(&index, len)) {
-    static_cast<T*>(out)[index] =
-        t4a_cuda_mul<T>(static_cast<const T*>(lhs)[index], static_cast<const T*>(rhs)[index]);
+struct mul_op {
+  template <typename T>
+  __device__ __forceinline__ T operator()(T lhs, T rhs) const {
+    return t4a_cuda_mul<T>(lhs, rhs);
   }
-}
+};
 
-template <typename T>
-__device__ __forceinline__ void div_body(void* out, const void* lhs, const void* rhs,
-                                         long long len) {
-  long long index;
-  if (t4a_cuda_tail_index(&index, len)) {
-    static_cast<T*>(out)[index] =
-        t4a_cuda_div<T>(static_cast<const T*>(lhs)[index], static_cast<const T*>(rhs)[index]);
+struct div_op {
+  template <typename T>
+  __device__ __forceinline__ T operator()(T lhs, T rhs) const {
+    return t4a_cuda_div<T>(lhs, rhs);
   }
-}
+};
 
 }  // namespace
 
@@ -82,34 +71,34 @@ __device__ __forceinline__ void div_body(void* out, const void* lhs, const void*
   }
 
 extern "C" __global__ void t4a_cuda_add(void* out, const void* lhs, const void* rhs, int dtype,
-                                        long long len) {
-#define T4A_BODY(T) add_body<T>(out, lhs, rhs, len)
+                                        long long len, int vector_width) {
+#define T4A_BODY(T) t4a_cuda_flat_binary<T, T, T>(vector_width, out, lhs, rhs, len, add_op{})
   T4A_CUDA_ARITHMETIC_DTYPE_SWITCH(dtype, T4A_BODY)
 #undef T4A_BODY
 }
 
 extern "C" __global__ void t4a_cuda_sub(void* out, const void* lhs, const void* rhs, int dtype,
-                                        long long len) {
-#define T4A_BODY(T) sub_body<T>(out, lhs, rhs, len)
+                                        long long len, int vector_width) {
+#define T4A_BODY(T) t4a_cuda_flat_binary<T, T, T>(vector_width, out, lhs, rhs, len, sub_op{})
   T4A_CUDA_ARITHMETIC_DTYPE_SWITCH(dtype, T4A_BODY)
 #undef T4A_BODY
 }
 
 extern "C" __global__ void t4a_cuda_mul(void* out, const void* lhs, const void* rhs, int dtype,
-                                        long long len) {
-#define T4A_BODY(T) mul_body<T>(out, lhs, rhs, len)
+                                        long long len, int vector_width) {
+#define T4A_BODY(T) t4a_cuda_flat_binary<T, T, T>(vector_width, out, lhs, rhs, len, mul_op{})
   T4A_CUDA_ARITHMETIC_DTYPE_SWITCH(dtype, T4A_BODY)
 #undef T4A_BODY
 }
 
 extern "C" __global__ void t4a_cuda_div(void* out, const void* lhs, const void* rhs, int dtype,
-                                        long long len) {
+                                        long long len, int vector_width) {
   switch (dtype) {
     case T4A_CUDA_F32:
-      div_body<float>(out, lhs, rhs, len);
+      t4a_cuda_flat_binary<float, float, float>(vector_width, out, lhs, rhs, len, div_op{});
       break;
     case T4A_CUDA_F64:
-      div_body<double>(out, lhs, rhs, len);
+      t4a_cuda_flat_binary<double, double, double>(vector_width, out, lhs, rhs, len, div_op{});
       break;
     default:
       break;

@@ -71,6 +71,10 @@ path = "tests/gpu_convert.rs"
 required-features = ["gpu-tests"]
 
 [[test]]
+name = "gpu_flat_vector"
+required-features = ["gpu-tests"]
+
+[[test]]
 name = "gpu_elementwise"
 path = "tests/gpu_elementwise.rs"
 required-features = ["gpu-tests"]

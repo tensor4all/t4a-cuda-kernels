@@ -135,7 +135,7 @@ pub mod source {
 /// device memory, selected through [`RankVariant`].
 pub const MAX_RANK: usize = 8;
 /// Version of the C ABI described by this crate.
-pub const ABI_REVISION: u32 = 13;
+pub const ABI_REVISION: u32 = 14;
 /// Threads per block for the flat (element-wise) entries.
 pub const FLAT_BLOCK: u32 = 256;
 /// Lanes per block for the plane-reduction entries: one 32-lane plane per block.
@@ -1512,29 +1512,72 @@ impl FlatLaunch {
 /// address the launch will use. An empty list or all-zero addresses impose no
 /// constraint and return `1 << 63`.
 pub fn address_alignment(addresses: &[u64]) -> u64 {
-    // STUB: no alignment is assumed until the rule lands.
-    let _ = addresses;
-    1
+    let combined = addresses.iter().fold(0u64, |acc, address| acc | address);
+    if combined == 0 {
+        1 << 63
+    } else {
+        1 << combined.trailing_zeros()
+    }
 }
 
 /// Vector width a flat entry uses for operands of `element_sizes` bytes.
 ///
-/// STUB: always width 1 until the selection rule lands.
+/// The widest of [`FLAT_VECTOR_WIDTHS`] such that one pack of the widest operand
+/// is at most [`MAX_VECTOR_BYTES`], `alignment` (see [`address_alignment`]) is a
+/// multiple of that pack, and `len` holds at least one pack. Every size and the
+/// alignment are powers of two, so an alignment that serves the widest operand's
+/// pack serves every narrower operand's pack. Width 1 is the one-element-per-thread
+/// geometry: a misaligned or short request falls back to it.
 pub fn flat_vector_width(element_sizes: &[usize], len: i64, alignment: u64) -> u32 {
-    let _ = (element_sizes, len, alignment);
-    1
+    let widest = element_sizes.iter().copied().max().unwrap_or(1) as u64;
+    FLAT_VECTOR_WIDTHS
+        .into_iter()
+        .find(|&width| {
+            let pack = widest * u64::from(width);
+            pack <= MAX_VECTOR_BYTES as u64 && alignment % pack == 0 && len >= i64::from(width)
+        })
+        .unwrap_or(1)
 }
 
-/// Plan a vectorized flat launch over `len` elements whose widest operand pack is
-/// selected by [`flat_vector_width`].
+/// Plan a vectorized flat launch over `len` elements.
+///
+/// With `vectors = len / width` and `tail = len % width`, a thread owns one pack or
+/// one tail element, so `vectors + tail` threads run. The block is those threads
+/// rounded up to whole warps and capped at [`FLAT_BLOCK`], so a tensor smaller than
+/// one block launches only the warps it needs; the grid covers the threads.
 fn flat_vector_launch(
     element_sizes: &[usize],
     len: i64,
     alignment: u64,
 ) -> Result<FlatLaunch, Error> {
+    if len < 0 {
+        return Err(Error::NegativeCount);
+    }
     let vector_width = flat_vector_width(element_sizes, len, alignment);
+    if len == 0 {
+        return Ok(FlatLaunch {
+            launch: Launch::EMPTY,
+            vector_width,
+        });
+    }
+    let width = i64::from(vector_width);
+    // INVARIANT: len > 0 and width >= 1, so threads is in 1..=len.
+    let threads = (len / width + len % width) as u64;
+    let block = threads
+        .div_ceil(u64::from(WARP_SIZE))
+        .saturating_mul(u64::from(WARP_SIZE))
+        .min(u64::from(FLAT_BLOCK));
+    let blocks = threads.div_ceil(block);
+    if blocks > u64::from(MAX_GRID_X) {
+        return Err(Error::LaunchLimit);
+    }
     Ok(FlatLaunch {
-        launch: flat_launch(len)?,
+        launch: Launch {
+            grid: [blocks as u32, 1, 1],
+            block: [block as u32, 1, 1],
+            shared_bytes: 0,
+            variant: RankVariant::Fast,
+        },
         vector_width,
     })
 }
@@ -1674,6 +1717,9 @@ pub fn plan_concatenate_copy<'a>(
 pub fn plan_elementwise(entry: Entry, dtype: DType, len: i64) -> Result<Launch, Error> {
     if !entry.is_elementwise() {
         return Err(Error::NotElementwise);
+    }
+    if entry.takes_vector_width() {
+        return Err(Error::VectorWidthRequired);
     }
     check_dtype(entry, dtype)?;
     flat_launch(len)

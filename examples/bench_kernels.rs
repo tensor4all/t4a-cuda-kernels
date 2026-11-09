@@ -488,6 +488,7 @@ fn bench_add_f32(case: &str, len: usize, filter: &[String]) {
             Slot::ptr(&rhs_buf),
             Slot::i32(DType::F32.tag()),
             Slot::i64(len as i64),
+            Slot::i32(1),
         ];
         launch_async(function, &plan, session.stream(), &mut slots);
     };
@@ -532,6 +533,7 @@ fn bench_exp_f32(case: &str, len: usize, filter: &[String]) {
             Slot::i32(DType::F32.tag()),
             Slot::i32(UnaryOp::Exp.tag()),
             Slot::i64(len as i64),
+            Slot::i32(1),
         ];
         launch_async(function, &plan, session.stream(), &mut slots);
     };
@@ -577,6 +579,7 @@ fn bench_mul_c64(case: &str, len: usize, filter: &[String]) {
             Slot::ptr(&rhs_buf),
             Slot::i32(DType::C64.tag()),
             Slot::i64(len as i64),
+            Slot::i32(1),
         ];
         launch_async(function, &plan, session.stream(), &mut slots);
     };

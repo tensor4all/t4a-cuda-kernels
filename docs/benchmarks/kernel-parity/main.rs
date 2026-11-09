@@ -138,7 +138,7 @@ fn main() {
         let lhs_buf = sentinel(&session, len * 4);
         let rhs_buf = sentinel(&session, len * 4);
         let out_buf = sentinel(&session, len * 4);
-        let plan = kernels::plan_arithmetic(Entry::Add, KernelDType::F32, len as i64, 1).unwrap().launch;
+        let plan = kernels::plan_elementwise(Entry::Add, KernelDType::F32, len as i64).unwrap();
         let function = session.function("t4a_cuda_add");
         let mut slots = [
             Slot::ptr(&out_buf),
@@ -183,7 +183,7 @@ fn main() {
             |backend| backend.runtime().synchronize().expect("sync"),
         );
 
-        let plan = kernels::plan_arithmetic(Entry::Add, KernelDType::F32, len as i64, 1).unwrap().launch;
+        let plan = kernels::plan_elementwise(Entry::Add, KernelDType::F32, len as i64).unwrap();
         let lhs_buf = upload(&session, as_bytes(&lhs_host));
         let rhs_buf = upload(&session, as_bytes(&rhs_host));
         let out_buf = sentinel(&session, len * 4);
@@ -246,7 +246,7 @@ fn main() {
             },
             |backend| backend.runtime().synchronize().expect("sync"),
         );
-        let plan = kernels::plan_arithmetic(Entry::Add, KernelDType::F32, len as i64, 1).unwrap().launch;
+        let plan = kernels::plan_elementwise(Entry::Add, KernelDType::F32, len as i64).unwrap();
         let lhs_buf = upload(&session, as_bytes(&lhs_host));
         let rhs_buf = upload(&session, as_bytes(&rhs_host));
         let out_buf = sentinel(&session, len * 4);
@@ -309,7 +309,7 @@ fn main() {
             },
             |backend| backend.runtime().synchronize().expect("sync"),
         );
-        let plan = kernels::plan_arithmetic(Entry::Add, KernelDType::C64, len as i64, 1).unwrap().launch;
+        let plan = kernels::plan_elementwise(Entry::Add, KernelDType::C64, len as i64).unwrap();
         let lhs_buf = upload(&session, as_bytes(&lhs_host));
         let rhs_buf = upload(&session, as_bytes(&rhs_host));
         let out_buf = sentinel(&session, len * 16);
@@ -372,7 +372,7 @@ fn main() {
             },
             |backend| backend.runtime().synchronize().expect("sync"),
         );
-        let plan = kernels::plan_arithmetic(Entry::Mul, KernelDType::F64, len as i64, 1).unwrap().launch;
+        let plan = kernels::plan_elementwise(Entry::Mul, KernelDType::F64, len as i64).unwrap();
         let lhs_buf = upload(&session, as_bytes(&lhs_host));
         let rhs_buf = upload(&session, as_bytes(&rhs_host));
         let out_buf = sentinel(&session, len * 8);

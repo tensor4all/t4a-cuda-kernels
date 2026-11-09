@@ -4032,7 +4032,8 @@ fn flat_vector_width_one_keeps_the_scalar_geometry_for_large_lengths() {
 fn address_alignment_is_the_common_power_of_two() {
     assert_eq!(
         address_alignment(&[ALLOCATION_BASE, ALLOCATION_BASE + 512]),
-        ALLOCATION_BASE & ALLOCATION_BASE.wrapping_neg()
+        512,
+        "the lowest set bit of any address bounds the common alignment"
     );
     assert_eq!(address_alignment(&[256, 512]), 256);
     assert_eq!(address_alignment(&[256, 260]), 4);

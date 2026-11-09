@@ -18,7 +18,7 @@ nothing, so the same text compiles under NVCC and NVRTC.
 
 ## Revision
 
-`T4A_CUDA_ABI_REVISION == 13`. Revision 2 added `t4a_cuda_axis_values` and the
+`T4A_CUDA_ABI_REVISION == 14`. Revision 2 added `t4a_cuda_axis_values` and the
 diagonal, windowing and validation-status entries; revision 3 added the reduction
 entries; revision 4 added gather and additive scatter; revision 5 added the dtype
 conversion entry; revision 6 added the elementwise, comparison and
@@ -34,7 +34,10 @@ revision 12 changes the *launch* contract of a split reduction's combine pass
 records the reassociation policy of `SUM`/`SUM_SQUARES`/`MAX`/`MIN`, with no new
 symbol, signature or struct; revision 13 fixes which elements a lane of split pass 1
 combines, and in what order, on a contiguous axis (the "Pass-1 lane assignment"
-section), with no new symbol, signature, struct or launch geometry.
+section), with no new symbol, signature, struct or launch geometry; revision 14
+appends a trailing `int vector_width` to the flat arithmetic, unary, compare and
+clamp entries and gives them the vectorized flat geometry (see "Vectorized flat
+entries"), with no new symbol or struct.
 **Nothing in revisions 1-10 changed** — the 88 existing symbols, their signatures
 and the nine existing struct layouts are identical. Any
 change to a struct layout, an entry signature, an element type
@@ -133,7 +136,7 @@ an uninitialized read. Its value cannot change a result.
 | `t4a_cuda_contiguous_to_view` | `(void* dst, const void* src, int dtype, t4a_cuda_layout dst, long long len)` | scatter a compact source into the strided destination |
 | `t4a_cuda_strided_to_strided` | `(void* dst, const void* src, int dtype, t4a_cuda_layout src, t4a_cuda_layout dst, long long len)` | copy between two layouts with the same extents |
 | `t4a_cuda_tiled_transpose` | `(void* dst, const void* src, int dtype, long long src_offset, long long batch_stride, long long dst_fast_extent, long long src_fast_extent, t4a_cuda_transpose_config config)` | see below |
-| `t4a_cuda_add` / `t4a_cuda_sub` / `t4a_cuda_mul` | `(void* out, const void* lhs, const void* rhs, int dtype, long long len)` | element-wise, `out` distinct from both inputs |
+| `t4a_cuda_add` / `t4a_cuda_sub` / `t4a_cuda_mul` | `(void* out, const void* lhs, const void* rhs, int dtype, long long len, int vector_width)` | element-wise, `out` distinct from both inputs; vectorized (revision 14) |
 | `t4a_cuda_div` | same | F32/F64 only |
 
 Supported dtypes are `DType::ALL` for the movement entries; add/sub/mul serve
@@ -469,15 +472,17 @@ conversion (use `t4a_cuda_copy_exact` for a same-dtype copy).
 
 | Symbol | Arguments |
 | --- | --- |
-| `t4a_cuda_unary` | `(void* out, const void* in, int dst_dtype, int src_dtype, int op, long long len)` |
+| `t4a_cuda_unary` | `(void* out, const void* in, int dst_dtype, int src_dtype, int op, long long len, int vector_width)` |
 | `t4a_cuda_binary` | `(void* out, const void* lhs, const void* rhs, int dtype, int op, int scalar_side, long long len, unsigned int* err)` |
-| `t4a_cuda_compare` | `(void* out, const void* lhs, const void* rhs, int dtype, int cmp, long long len)` |
+| `t4a_cuda_compare` | `(void* out, const void* lhs, const void* rhs, int dtype, int cmp, long long len, int vector_width)` |
 | `t4a_cuda_select` | `(void* out, const void* pred, const void* on_true, const void* on_false, int dtype, long long len)` |
-| `t4a_cuda_clamp` | `(void* out, const void* in, const void* lower, const void* upper, int dtype, long long len)` |
+| `t4a_cuda_clamp` | `(void* out, const void* in, const void* lower, const void* upper, int dtype, long long len, int vector_width)` |
 | `t4a_cuda_combined_strided` | `(void* out, const void* a, const void* b, const void* coefficients, t4a_cuda_layout out_layout, t4a_cuda_layout a_layout, t4a_cuda_layout b_layout, int dtype, int op, long long len)` |
 
-All except `t4a_cuda_combined_strided` are flat (`block = (256,1,1)`,
-`grid = ceil(len/256)`) over `len` logical elements. Op tags are stable and
+All except `t4a_cuda_combined_strided` are flat over `len` logical elements:
+`t4a_cuda_binary` and `t4a_cuda_select` with `block = (256,1,1)`,
+`grid = ceil(len/256)`; unary, compare and clamp with the vectorized flat
+geometry of revision 14. Op tags are stable and
 append-only; an unsupported `(op, dtype[, side])` triple is the caller's error and
 is rejected by the facade planner. At the raw entry such a triple is caller UB and
 the kernels make no promise about what they write, but the contract is the
@@ -1020,15 +1025,40 @@ replace a 64-bit quotient by a 32-bit one over a proved range and keep the same
 64-bit address arithmetic, so the element index, and with it every value, is
 identical.
 
+## Vectorized flat entries
+
+Revision 14 gives `t4a_cuda_add`, `t4a_cuda_sub`, `t4a_cuda_mul`, `t4a_cuda_div`,
+`t4a_cuda_unary`, `t4a_cuda_compare` and `t4a_cuda_clamp` a trailing
+`int vector_width` (`w`). The facade plans it: `plan_arithmetic`, `plan_unary`,
+`plan_compare` and `plan_clamp` take `alignment`, the largest power of two
+dividing every operand address (`address_alignment`), and return a
+`FlatLaunch { launch, vector_width }`. `w` is the widest of 4, 2, 1 for which one
+pack of the widest operand is at most 16 bytes, `alignment` is a multiple of that
+pack, and `len >= w` (`flat_vector_width`). `plan_elementwise` rejects these
+entries with `VectorWidthRequired`.
+
+Thread `t` owns elements `t*w .. t*w+w-1` while `t < len/w` (one aligned
+load per input, one aligned store), and otherwise the single tail element
+`(len/w)*w + (t - len/w)` while that is below `len`. Width 1 is the
+one-element-per-thread form. Every lane applies the width-1 scalar expression to
+the same element in the same type, so **every width writes the same bits**.
+
+`alignment` and `vector_width` are caller contracts like the pointers: they must
+describe the addresses actually passed. A caller that does not know them passes
+`alignment = 1` and launches with width 1. A `vector_width` outside `{1, 2, 4}`,
+or one whose pack exceeds 16 bytes for the entry's types, performs no work, like
+an unknown dtype tag; the facade never plans one.
+
 ## Launch geometry
 
 | Entry | Grid | Block | Shared |
 | --- | --- | --- | --- |
 | flat entries | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |
+| vectorized flat entries (revision 14: add/sub/mul/div, unary, compare, clamp) | `(ceil(T/block), 1, 1)` with `T = len/w + len%w` | `(min(256, ceil(T/32)*32), 1, 1)` | 0 |
 | revision 11 (`tril_view`, `triu_view`, `dynamic_update_slice`) | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |
 | reductions | see the revision-3 section | `(plane_width, 1, 1)`, or `(64..512, 1, 1)` for a split reduction's combine pass (revision 12) | 0 for the baseline geometries; the wide combine block allocates 16 accumulators of the element type as static shared memory (≤ 256 B for `C64`) |
 | gather / scatter add / convert | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |
-| unary / binary / compare / select / clamp / combined strided | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |
+| binary / select / combined strided | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |
 | revision 7 linalg auxiliaries | `(ceil(domain/256), 1, 1)` | `(256, 1, 1)` | 0 |
 | revision 8 flat entries (`initialize_permutation`, `extract_r`, `swap_columns`) | `(ceil(domain/256), 1, 1)` | `(256, 1, 1)` | 0 |
 | revision 8 plane entries (`column_norms`, `select_pivot`, `reflector`, `apply_reflector`, `prefix_rank`) | `(tasks, 1, 1)` | `(32, 1, 1)` | 0 |

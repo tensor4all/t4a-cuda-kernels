@@ -16,7 +16,7 @@
 #endif
 
 #define T4A_CUDA_MAX_RANK 8
-#define T4A_CUDA_ABI_REVISION 13
+#define T4A_CUDA_ABI_REVISION 14
 
 static_assert(sizeof(int) == 4, "the C ABI requires 32-bit int");
 static_assert(sizeof(long long) == 8, "the C ABI requires 64-bit long long");
@@ -518,6 +518,191 @@ __device__ __forceinline__ void t4a_cuda_axis_add(long long* values, int axis, l
 __device__ __forceinline__ bool t4a_cuda_tail_index(long long* index, long long len) {
   *index = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
   return *index < len;
+}
+
+// --- vectorized flat entries (revision 14) -----------------------------------
+//
+// A vectorized flat entry takes a trailing `int vector_width` in {1, 2, 4} that
+// the facade planner chose from the operand sizes, `len` and the operand
+// addresses' alignment (`flat_vector_width`). Thread `t` owns the pack of
+// `vector_width` consecutive elements starting at `t * vector_width` while
+// `t < len / vector_width`, and otherwise one element of the scalar tail. Width 1
+// is the one-element-per-thread geometry of `t4a_cuda_tail_index`. Each lane
+// applies the same scalar expression the width-1 body applies, so every width
+// produces the same bits.
+
+// One aligned pack of W elements: a single 32/64/128-bit access.
+template <typename T, int W>
+struct alignas(sizeof(T) * W) t4a_cuda_pack {
+  T lane[W];
+};
+
+// Whether a W-pack of every listed type fits one 128-bit access. A width that
+// does not fit is never planned and is not instantiated.
+template <int W, typename... Ts>
+struct t4a_cuda_pack_fits {
+  static constexpr bool value = ((sizeof(Ts) * W <= 16) && ...);
+};
+
+// Returns W when this thread owns the pack starting at *first, 1 when it owns the
+// tail element *first, and 0 when it owns nothing.
+template <int W>
+__device__ __forceinline__ int t4a_cuda_flat_slot(long long len, long long* first) {
+  const long long thread = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const long long vectors = len / W;
+  if (thread < vectors) {
+    *first = thread * W;
+    return W;
+  }
+  const long long tail = vectors * W + (thread - vectors);
+  if (tail < len) {
+    *first = tail;
+    return 1;
+  }
+  return 0;
+}
+
+template <typename T, int W>
+__device__ __forceinline__ t4a_cuda_pack<T, W> t4a_cuda_load_pack(const void* base,
+                                                                  long long first) {
+  // INVARIANT: the planner chose W only when every operand address is a multiple
+  // of sizeof(T) * W, and `first` is a multiple of W, so the pack is aligned.
+  return *reinterpret_cast<const t4a_cuda_pack<T, W>*>(static_cast<const T*>(base) + first);
+}
+
+template <typename T, int W>
+__device__ __forceinline__ void t4a_cuda_store_pack(void* base, long long first,
+                                                    const t4a_cuda_pack<T, W>& value) {
+  *reinterpret_cast<t4a_cuda_pack<T, W>*>(static_cast<T*>(base) + first) = value;
+}
+
+template <int W, typename TO, typename TA, typename Op>
+__device__ __forceinline__ void t4a_cuda_flat_map1(void* out, const void* a, long long len,
+                                                   Op op) {
+  long long first = 0;
+  const int count = t4a_cuda_flat_slot<W>(len, &first);
+  if (count == W) {
+    const t4a_cuda_pack<TA, W> x = t4a_cuda_load_pack<TA, W>(a, first);
+    t4a_cuda_pack<TO, W> y;
+#pragma unroll
+    for (int k = 0; k < W; ++k) {
+      y.lane[k] = op(x.lane[k]);
+    }
+    t4a_cuda_store_pack<TO, W>(out, first, y);
+  } else if (count == 1) {
+    static_cast<TO*>(out)[first] = op(static_cast<const TA*>(a)[first]);
+  }
+}
+
+template <int W, typename TO, typename TA, typename TB, typename Op>
+__device__ __forceinline__ void t4a_cuda_flat_map2(void* out, const void* a, const void* b,
+                                                   long long len, Op op) {
+  long long first = 0;
+  const int count = t4a_cuda_flat_slot<W>(len, &first);
+  if (count == W) {
+    const t4a_cuda_pack<TA, W> x = t4a_cuda_load_pack<TA, W>(a, first);
+    const t4a_cuda_pack<TB, W> y = t4a_cuda_load_pack<TB, W>(b, first);
+    t4a_cuda_pack<TO, W> z;
+#pragma unroll
+    for (int k = 0; k < W; ++k) {
+      z.lane[k] = op(x.lane[k], y.lane[k]);
+    }
+    t4a_cuda_store_pack<TO, W>(out, first, z);
+  } else if (count == 1) {
+    static_cast<TO*>(out)[first] =
+        op(static_cast<const TA*>(a)[first], static_cast<const TB*>(b)[first]);
+  }
+}
+
+template <int W, typename TO, typename TA, typename TB, typename TC, typename Op>
+__device__ __forceinline__ void t4a_cuda_flat_map3(void* out, const void* a, const void* b,
+                                                   const void* c, long long len, Op op) {
+  long long first = 0;
+  const int count = t4a_cuda_flat_slot<W>(len, &first);
+  if (count == W) {
+    const t4a_cuda_pack<TA, W> x = t4a_cuda_load_pack<TA, W>(a, first);
+    const t4a_cuda_pack<TB, W> y = t4a_cuda_load_pack<TB, W>(b, first);
+    const t4a_cuda_pack<TC, W> z = t4a_cuda_load_pack<TC, W>(c, first);
+    t4a_cuda_pack<TO, W> r;
+#pragma unroll
+    for (int k = 0; k < W; ++k) {
+      r.lane[k] = op(x.lane[k], y.lane[k], z.lane[k]);
+    }
+    t4a_cuda_store_pack<TO, W>(out, first, r);
+  } else if (count == 1) {
+    static_cast<TO*>(out)[first] = op(static_cast<const TA*>(a)[first],
+                                      static_cast<const TB*>(b)[first],
+                                      static_cast<const TC*>(c)[first]);
+  }
+}
+
+// Runtime width dispatch. A width outside {1, 2, 4}, or one whose pack does not
+// fit 128 bits for these types, performs no work, like an unknown dtype tag.
+template <typename TO, typename TA, typename Op>
+__device__ __forceinline__ void t4a_cuda_flat_unary(int vector_width, void* out, const void* a,
+                                                    long long len, Op op) {
+  switch (vector_width) {
+    case 4:
+      if constexpr (t4a_cuda_pack_fits<4, TO, TA>::value) {
+        t4a_cuda_flat_map1<4, TO, TA>(out, a, len, op);
+      }
+      break;
+    case 2:
+      if constexpr (t4a_cuda_pack_fits<2, TO, TA>::value) {
+        t4a_cuda_flat_map1<2, TO, TA>(out, a, len, op);
+      }
+      break;
+    case 1:
+      t4a_cuda_flat_map1<1, TO, TA>(out, a, len, op);
+      break;
+    default:
+      break;
+  }
+}
+
+template <typename TO, typename TA, typename TB, typename Op>
+__device__ __forceinline__ void t4a_cuda_flat_binary(int vector_width, void* out, const void* a,
+                                                     const void* b, long long len, Op op) {
+  switch (vector_width) {
+    case 4:
+      if constexpr (t4a_cuda_pack_fits<4, TO, TA, TB>::value) {
+        t4a_cuda_flat_map2<4, TO, TA, TB>(out, a, b, len, op);
+      }
+      break;
+    case 2:
+      if constexpr (t4a_cuda_pack_fits<2, TO, TA, TB>::value) {
+        t4a_cuda_flat_map2<2, TO, TA, TB>(out, a, b, len, op);
+      }
+      break;
+    case 1:
+      t4a_cuda_flat_map2<1, TO, TA, TB>(out, a, b, len, op);
+      break;
+    default:
+      break;
+  }
+}
+
+template <typename TO, typename TA, typename TB, typename TC, typename Op>
+__device__ __forceinline__ void t4a_cuda_flat_ternary(int vector_width, void* out, const void* a,
+                                                      const void* b, const void* c,
+                                                      long long len, Op op) {
+  switch (vector_width) {
+    case 4:
+      if constexpr (t4a_cuda_pack_fits<4, TO, TA, TB, TC>::value) {
+        t4a_cuda_flat_map3<4, TO, TA, TB, TC>(out, a, b, c, len, op);
+      }
+      break;
+    case 2:
+      if constexpr (t4a_cuda_pack_fits<2, TO, TA, TB, TC>::value) {
+        t4a_cuda_flat_map3<2, TO, TA, TB, TC>(out, a, b, c, len, op);
+      }
+      break;
+    case 1:
+      t4a_cuda_flat_map3<1, TO, TA, TB, TC>(out, a, b, c, len, op);
+      break;
+    default:
+      break;
+  }
 }
 
 template <typename T>

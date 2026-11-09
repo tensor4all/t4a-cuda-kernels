@@ -145,5 +145,8 @@ GPU (`tests/gpu_elementwise.rs`, `--features gpu-tests`, A100):
 - `t4a_cuda_binary`, `t4a_cuda_select`, fusion emitter widths.
 - Grid-stride or multi-pack-per-thread unrolling: only with a measurement
   showing it is needed.
+- `docs/benchmarks/kernel-parity/` is the recorded ABI-13 parity harness (its
+  own crate against a pinned tenferro checkout); it stays at the revision its
+  recorded runs used and is not updated here.
 - tenferro-rs consumes the new planner signature after this crate's release
   (repin, pass `alignment` for allocation bases, append `vector_width`).

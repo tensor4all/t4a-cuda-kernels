@@ -86,6 +86,7 @@ fn launch_binary(
         Slot::ptr(rhs),
         Slot::i32(dtype.tag()),
         Slot::i64(len),
+        Slot::i32(1),
     ];
     launch(
         session.function(entry.name()),

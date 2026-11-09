@@ -117,50 +117,72 @@ __device__ __forceinline__ C unary_complex(int op, C value) {
   return value;
 }
 
+// One unary lane per dtype class; `op` is uniform across the launch.
+template <typename F>
+struct unary_float_op {
+  int op;
+  __device__ __forceinline__ F operator()(F x) const { return unary_float<F>(op, x); }
+};
+
+template <typename I>
+struct unary_int_op {
+  int op;
+  __device__ __forceinline__ I operator()(I x) const { return unary_int<I>(op, x); }
+};
+
+template <typename C, typename F>
+struct unary_complex_op {
+  int op;
+  __device__ __forceinline__ C operator()(C x) const { return unary_complex<C, F>(op, x); }
+};
+
+// ABS of a complex operand is the only unequal dtype pair (abs_complex32/64).
+template <typename F>
+struct abs_complex_op {
+  template <typename C>
+  __device__ __forceinline__ F operator()(C value) const {
+    return t4a_cuda_abs_complex(value);
+  }
+};
+
 }  // namespace
 
 extern "C" __global__ void t4a_cuda_unary(void* out, const void* in, int dst_dtype, int src_dtype,
-                                          int op, long long len) {
-  long long index;
-  if (!t4a_cuda_tail_index(&index, len)) {
-    return;
-  }
+                                          int op, long long len, int vector_width) {
   if (dst_dtype == T4A_CUDA_F32 && src_dtype == T4A_CUDA_F32) {
-    static_cast<float*>(out)[index] = unary_float<float>(op, static_cast<const float*>(in)[index]);
+    t4a_cuda_flat_unary<float, float>(vector_width, out, in, len, unary_float_op<float>{op});
     return;
   }
   if (dst_dtype == T4A_CUDA_F64 && src_dtype == T4A_CUDA_F64) {
-    static_cast<double*>(out)[index] = unary_float<double>(op, static_cast<const double*>(in)[index]);
+    t4a_cuda_flat_unary<double, double>(vector_width, out, in, len, unary_float_op<double>{op});
     return;
   }
   if (dst_dtype == T4A_CUDA_I32 && src_dtype == T4A_CUDA_I32) {
-    static_cast<int*>(out)[index] = unary_int<int>(op, static_cast<const int*>(in)[index]);
+    t4a_cuda_flat_unary<int, int>(vector_width, out, in, len, unary_int_op<int>{op});
     return;
   }
   if (dst_dtype == T4A_CUDA_I64 && src_dtype == T4A_CUDA_I64) {
-    static_cast<long long*>(out)[index] =
-        unary_int<long long>(op, static_cast<const long long*>(in)[index]);
+    t4a_cuda_flat_unary<long long, long long>(vector_width, out, in, len,
+                                              unary_int_op<long long>{op});
     return;
   }
   if (dst_dtype == T4A_CUDA_C32 && src_dtype == T4A_CUDA_C32) {
-    static_cast<t4a_cuda_c32*>(out)[index] =
-        unary_complex<t4a_cuda_c32, float>(op, static_cast<const t4a_cuda_c32*>(in)[index]);
+    t4a_cuda_flat_unary<t4a_cuda_c32, t4a_cuda_c32>(
+        vector_width, out, in, len, unary_complex_op<t4a_cuda_c32, float>{op});
     return;
   }
   if (dst_dtype == T4A_CUDA_C64 && src_dtype == T4A_CUDA_C64) {
-    static_cast<t4a_cuda_c64*>(out)[index] =
-        unary_complex<t4a_cuda_c64, double>(op, static_cast<const t4a_cuda_c64*>(in)[index]);
+    t4a_cuda_flat_unary<t4a_cuda_c64, t4a_cuda_c64>(
+        vector_width, out, in, len, unary_complex_op<t4a_cuda_c64, double>{op});
     return;
   }
-  // ABS of a complex operand is the only unequal dtype pair (abs_complex32/64).
   if (dst_dtype == T4A_CUDA_F32 && src_dtype == T4A_CUDA_C32) {
-    const t4a_cuda_c32 value = static_cast<const t4a_cuda_c32*>(in)[index];
-    static_cast<float*>(out)[index] = t4a_cuda_abs_complex(value);
+    t4a_cuda_flat_unary<float, t4a_cuda_c32>(vector_width, out, in, len, abs_complex_op<float>{});
     return;
   }
   if (dst_dtype == T4A_CUDA_F64 && src_dtype == T4A_CUDA_C64) {
-    const t4a_cuda_c64 value = static_cast<const t4a_cuda_c64*>(in)[index];
-    static_cast<double*>(out)[index] = t4a_cuda_abs_complex(value);
+    t4a_cuda_flat_unary<double, t4a_cuda_c64>(vector_width, out, in, len,
+                                              abs_complex_op<double>{});
     return;
   }
 }
@@ -408,14 +430,9 @@ extern "C" __global__ void t4a_cuda_binary(void* out, const void* lhs, const voi
 namespace {
 
 template <typename T>
-__device__ __forceinline__ void compare_body(void* out, const void* lhs, const void* rhs, int cmp,
-                                             long long len) {
-  long long index;
-  if (!t4a_cuda_tail_index(&index, len)) {
-    return;
-  }
-  const T x = static_cast<const T*>(lhs)[index];
-  const T y = static_cast<const T*>(rhs)[index];
+struct compare_op {
+  int cmp;
+  __device__ __forceinline__ unsigned char operator()(T x, T y) const {
   bool predicate = false;
   switch (cmp) {
     case T4A_CUDA_COMPARE_EQ:
@@ -437,8 +454,9 @@ __device__ __forceinline__ void compare_body(void* out, const void* lhs, const v
       predicate = false;
       break;
   }
-  static_cast<unsigned char*>(out)[index] = predicate ? 1u : 0u;
-}
+  return predicate ? 1u : 0u;
+  }
+};
 
 template <typename T>
 __device__ __forceinline__ void select_body(void* out, const void* pred, const void* on_true,
@@ -457,33 +475,36 @@ __device__ __forceinline__ void select_body(void* out, const void* pred, const v
 // the lower bound yields the lower bound and every other value the upper one. The
 // baseline left this to CubeCL's expansion; see the slice design.
 template <typename F>
-__device__ __forceinline__ void clamp_body(void* out, const void* in, const void* lower,
-                                           const void* upper, long long len) {
-  long long index;
-  if (!t4a_cuda_tail_index(&index, len)) {
-    return;
+struct clamp_op {
+  __device__ __forceinline__ F operator()(F x, F lo, F hi) const {
+    return t4a_cuda_clamp(x, lo, hi);
   }
-  static_cast<F*>(out)[index] = t4a_cuda_clamp(static_cast<const F*>(in)[index],
-                                               static_cast<const F*>(lower)[index],
-                                               static_cast<const F*>(upper)[index]);
-}
+};
 
 }  // namespace
 
+// Compare writes one byte per element; a pack of W bytes is aligned whenever the
+// T operands' packs are.
+template <typename T>
+__device__ __forceinline__ void compare_widths(int vector_width, void* out, const void* lhs,
+                                               const void* rhs, int cmp, long long len) {
+  t4a_cuda_flat_binary<unsigned char, T, T>(vector_width, out, lhs, rhs, len, compare_op<T>{cmp});
+}
+
 extern "C" __global__ void t4a_cuda_compare(void* out, const void* lhs, const void* rhs, int dtype,
-                                            int cmp, long long len) {
+                                            int cmp, long long len, int vector_width) {
   switch (dtype) {
     case T4A_CUDA_F32:
-      compare_body<float>(out, lhs, rhs, cmp, len);
+      compare_widths<float>(vector_width, out, lhs, rhs, cmp, len);
       break;
     case T4A_CUDA_F64:
-      compare_body<double>(out, lhs, rhs, cmp, len);
+      compare_widths<double>(vector_width, out, lhs, rhs, cmp, len);
       break;
     case T4A_CUDA_I32:
-      compare_body<int>(out, lhs, rhs, cmp, len);
+      compare_widths<int>(vector_width, out, lhs, rhs, cmp, len);
       break;
     case T4A_CUDA_I64:
-      compare_body<long long>(out, lhs, rhs, cmp, len);
+      compare_widths<long long>(vector_width, out, lhs, rhs, cmp, len);
       break;
     default:
       break;
@@ -511,13 +532,16 @@ extern "C" __global__ void t4a_cuda_select(void* out, const void* pred, const vo
 }
 
 extern "C" __global__ void t4a_cuda_clamp(void* out, const void* in, const void* lower,
-                                          const void* upper, int dtype, long long len) {
+                                          const void* upper, int dtype, long long len,
+                                          int vector_width) {
   switch (dtype) {
     case T4A_CUDA_F32:
-      clamp_body<float>(out, in, lower, upper, len);
+      t4a_cuda_flat_ternary<float, float, float, float>(vector_width, out, in, lower, upper, len,
+                                                       clamp_op<float>{});
       break;
     case T4A_CUDA_F64:
-      clamp_body<double>(out, in, lower, upper, len);
+      t4a_cuda_flat_ternary<double, double, double, double>(vector_width, out, in, lower, upper, len,
+                                                       clamp_op<double>{});
       break;
     default:
       break;

@@ -143,6 +143,7 @@ fn unary_bytes(
         Slot::i32(src.tag()),
         Slot::i32(op.tag()),
         Slot::i64(len),
+        Slot::i32(1),
     ];
     let before = launches();
     launch(
@@ -332,6 +333,7 @@ fn compare_run<T: Copy>(
         Slot::i32(dtype.tag()),
         Slot::i32(cmp.tag()),
         Slot::i64(len),
+        Slot::i32(1),
     ];
     let before = launches();
     launch(
@@ -400,6 +402,7 @@ fn clamp_run<T: Copy>(
         Slot::ptr(&high_buf),
         Slot::i32(dtype.tag()),
         Slot::i64(len),
+        Slot::i32(1),
     ];
     let before = launches();
     launch(
@@ -2380,6 +2383,7 @@ fn empty_and_single_element_domains_launch_once_or_not_at_all() {
         Slot::i32(DType::F64.tag()),
         Slot::i32(UnaryOp::Exp.tag()),
         Slot::i64(0),
+        Slot::i32(1),
     ];
     let before = launches();
     launch(
@@ -2422,6 +2426,7 @@ fn empty_and_single_element_domains_launch_once_or_not_at_all() {
                 Slot::i32(DType::F32.tag()),
                 Slot::i32(CompareOp::Eq.tag()),
                 Slot::i64(0),
+                Slot::i32(1),
             ],
         ),
         (
@@ -2446,6 +2451,7 @@ fn empty_and_single_element_domains_launch_once_or_not_at_all() {
                 Slot::ptr(&scratch),
                 Slot::i32(DType::F32.tag()),
                 Slot::i64(0),
+                Slot::i32(1),
             ],
         ),
     ] {

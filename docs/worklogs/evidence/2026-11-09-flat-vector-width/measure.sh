@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# usage: measure.sh <outdir> <rounds>
+# usage: flock /tmp/gpu-slot.lock taskset -c 0-7 measure.sh <outdir> <rounds>
+#
+# Run it under primerose's GPU slot lock and pinned to CPUs 0-7, as the other
+# evidence in docs/worklogs does; meta.txt records the affinity and whether the
+# lock is held by this process tree.
 #
 # Kernel-time measurement for tenferro-rs#2529 on one A100, one process at a time.
 # Arms, all at len = 1<<20:
@@ -31,6 +35,9 @@ CASES=(add_f64 exp_f64 tanh_f64 clamp_f64 compare_gt_f64)
   echo "base=$(git -C "$BASE" rev-parse HEAD)"
   nvcc --version | tail -1; nsys --version; python -c 'import torch; print("torch", torch.__version__, torch.version.cuda)'
   uptime
+  echo "command: $0 $*"
+  echo "affinity: $(taskset -pc $$)"
+  if flock -n /tmp/gpu-slot.lock true 2>/dev/null; then echo "gpu-slot.lock: NOT held (free to take)"; else echo "gpu-slot.lock: held"; fi
 } > "$OUT/meta.txt" 2>&1
 "$STATE" before > "$OUT/gpu_state.log" 2>&1
 ARMS=(rev13 w1 auto torch)

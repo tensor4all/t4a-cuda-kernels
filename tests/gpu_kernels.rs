@@ -8,9 +8,9 @@ mod gpu;
 
 use gpu::{as_bytes, download, launch, launches, read_bytes, upload, written, Buf, Session, Slot};
 use t4a_cuda_kernels::{
-    plan_contiguous_to_view, plan_copy_exact, plan_elementwise, plan_fill_zero,
-    plan_fill_zero_view, plan_materialize_strided, plan_strided_to_strided, plan_tiled_transpose,
-    CLayout, CTransposeConfig, DType, Entry, Layout, TransposeConfig,
+    plan_arithmetic, plan_contiguous_to_view, plan_copy_exact, plan_fill_zero, plan_fill_zero_view,
+    plan_materialize_strided, plan_strided_to_strided, plan_tiled_transpose, CLayout,
+    CTransposeConfig, DType, Entry, Layout, TransposeConfig,
 };
 
 const SENTINEL: u8 = 0xCD;
@@ -79,7 +79,7 @@ fn launch_binary(
     out: &Buf,
     len: i64,
 ) {
-    let plan = plan_elementwise(entry, dtype, len).unwrap();
+    let plan = plan_arithmetic(entry, dtype, len, 1).unwrap().launch;
     let mut slots = [
         Slot::ptr(out),
         Slot::ptr(lhs),
@@ -751,7 +751,9 @@ fn empty_requests_plan_and_launch_nothing() {
     for plan in [
         plan_fill_zero(DType::F32, 0).unwrap(),
         plan_copy_exact(DType::C64, 0).unwrap(),
-        plan_elementwise(Entry::Add, DType::F32, 0).unwrap(),
+        plan_arithmetic(Entry::Add, DType::F32, 0, 1)
+            .unwrap()
+            .launch,
         plan_tiled_transpose(DType::F32, TransposeConfig::DEFAULT, 0, 0, 0, 4, 2, 0, 0).unwrap(),
     ] {
         assert!(plan.is_empty());

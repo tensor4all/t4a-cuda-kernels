@@ -1,12 +1,13 @@
 //! Host-side validation, planning and manifest consistency. Needs no CUDA.
 
 use t4a_cuda_kernels::{
-    bytes, pack_gather_plan, pack_scatter_plan, plan_broadcast_in_dim, plan_concatenate_copy,
-    plan_contiguous_to_view, plan_copy_exact, plan_elementwise, plan_fill_zero,
-    plan_fill_zero_view, plan_materialize_strided, plan_strided_to_strided, plan_tiled_transpose,
-    CAxisValuesAny, CLayout, CTransposeConfig, DType, Entry, Error, GeneralEntry, Launch, Layout,
+    address_alignment, bytes, flat_vector_width, pack_gather_plan, pack_scatter_plan,
+    plan_arithmetic, plan_broadcast_in_dim, plan_concatenate_copy, plan_contiguous_to_view,
+    plan_copy_exact, plan_elementwise, plan_fill_zero, plan_fill_zero_view,
+    plan_materialize_strided, plan_strided_to_strided, plan_tiled_transpose, CAxisValuesAny,
+    CLayout, CTransposeConfig, DType, Entry, Error, FlatLaunch, GeneralEntry, Launch, Layout,
     RankVariant, TransposeConfig, WideLayout, ABI_REVISION, DEFAULT_SHARED_BYTES, FLAT_BLOCK,
-    MAX_RANK,
+    FLAT_VECTOR_WIDTHS, MAX_RANK, MAX_VECTOR_BYTES, WARP_SIZE,
 };
 
 #[test]
@@ -168,24 +169,24 @@ fn strided_to_strided_requires_equal_extents() {
 #[test]
 fn binary_entries_follow_the_dtype_matrix() {
     assert_eq!(
-        plan_elementwise(Entry::Add, DType::Bool, 4),
+        plan_arithmetic(Entry::Add, DType::Bool, 4, 1),
         Err(Error::UnsupportedDType)
     );
     assert_eq!(
-        plan_elementwise(Entry::Div, DType::I32, 4),
+        plan_arithmetic(Entry::Div, DType::I32, 4, 1),
         Err(Error::UnsupportedDType)
     );
     assert_eq!(
-        plan_elementwise(Entry::Div, DType::C64, 4),
+        plan_arithmetic(Entry::Div, DType::C64, 4, 1),
         Err(Error::UnsupportedDType)
     );
     for dtype in [DType::F32, DType::F64, DType::I32, DType::I64] {
-        assert!(plan_elementwise(Entry::Add, dtype, 4).is_ok());
-        assert!(plan_elementwise(Entry::Mul, dtype, 4).is_ok());
+        assert!(plan_arithmetic(Entry::Add, dtype, 4, 1).is_ok());
+        assert!(plan_arithmetic(Entry::Mul, dtype, 4, 1).is_ok());
     }
-    assert!(plan_elementwise(Entry::Sub, DType::C32, 4).is_ok());
+    assert!(plan_arithmetic(Entry::Sub, DType::C32, 4, 1).is_ok());
     assert_eq!(
-        plan_elementwise(Entry::TiledTranspose, DType::F32, 4),
+        plan_arithmetic(Entry::TiledTranspose, DType::F32, 4, 1),
         Err(Error::NotElementwise)
     );
     assert_eq!(plan_copy_exact(DType::Bool, 0).unwrap(), Launch::EMPTY);
@@ -1618,7 +1619,7 @@ fn unary_accepts_exactly_the_documented_pairs() {
         let mut accepted = DType::ALL
             .iter()
             .flat_map(|dst| DType::ALL.iter().map(move |src| (*dst, *src)))
-            .filter(|(dst, src)| plan_unary(op, *dst, *src, 3).is_ok())
+            .filter(|(dst, src)| plan_unary(op, *dst, *src, 3, 1).is_ok())
             .collect::<Vec<_>>();
         accepted.sort_by_key(|(dst, src)| (dst.tag(), src.tag()));
         accepted
@@ -1670,21 +1671,23 @@ fn unary_accepts_exactly_the_documented_pairs() {
     assert_eq!(pairs(UnaryOp::Conj), same(&[DType::C32, DType::C64]));
     // A same-dtype complex ABS is not an operation.
     assert_eq!(
-        plan_unary(UnaryOp::Abs, DType::C32, DType::C32, 4),
+        plan_unary(UnaryOp::Abs, DType::C32, DType::C32, 4, 1),
         Err(Error::UnsupportedOp)
     );
     assert_eq!(
-        plan_unary(UnaryOp::Neg, DType::Bool, DType::Bool, 4),
+        plan_unary(UnaryOp::Neg, DType::Bool, DType::Bool, 4, 1),
         Err(Error::UnsupportedOp)
     );
-    let launch = plan_unary(UnaryOp::Exp, DType::F32, DType::F32, 513).unwrap();
+    let launch = plan_unary(UnaryOp::Exp, DType::F32, DType::F32, 513, 1)
+        .unwrap()
+        .launch;
     assert_eq!(launch.grid, [3, 1, 1]);
     assert_eq!(launch.block, [FLAT_BLOCK, 1, 1]);
-    assert!(plan_unary(UnaryOp::Exp, DType::F32, DType::F32, 0)
+    assert!(plan_unary(UnaryOp::Exp, DType::F32, DType::F32, 0, 1)
         .unwrap()
         .is_empty());
     assert_eq!(
-        plan_unary(UnaryOp::Exp, DType::F32, DType::F32, -1),
+        plan_unary(UnaryOp::Exp, DType::F32, DType::F32, -1, 1),
         Err(Error::NegativeCount)
     );
 }
@@ -1839,23 +1842,26 @@ fn binary_accepts_exactly_the_documented_op_dtype_side_triples() {
 #[test]
 fn compare_select_and_clamp_reject_complex_and_bool() {
     for dtype in [DType::C32, DType::C64, DType::Bool] {
-        assert_eq!(plan_compare(dtype, 4), Err(Error::UnsupportedDType));
+        assert_eq!(plan_compare(dtype, 4, 1), Err(Error::UnsupportedDType));
         assert_eq!(plan_select(dtype, 4), Err(Error::UnsupportedDType));
-        assert_eq!(plan_clamp(dtype, 4), Err(Error::UnsupportedDType));
+        assert_eq!(plan_clamp(dtype, 4, 1), Err(Error::UnsupportedDType));
     }
     for dtype in [DType::F32, DType::F64, DType::I32, DType::I64] {
-        assert_eq!(plan_compare(dtype, 300).unwrap().grid, [2, 1, 1]);
+        assert_eq!(plan_compare(dtype, 300, 1).unwrap().launch.grid, [2, 1, 1]);
         assert_eq!(plan_select(dtype, 300).unwrap().grid, [2, 1, 1]);
     }
     assert_eq!(
-        plan_clamp(DType::F64, 256).unwrap().grid,
+        plan_clamp(DType::F64, 256, 1).unwrap().launch.grid,
         [1, 1, 1],
         "one block exactly"
     );
-    assert_eq!(plan_clamp(DType::F64, 257).unwrap().grid, [2, 1, 1]);
-    assert!(plan_compare(DType::F32, 0).unwrap().is_empty());
+    assert_eq!(
+        plan_clamp(DType::F64, 257, 1).unwrap().launch.grid,
+        [2, 1, 1]
+    );
+    assert!(plan_compare(DType::F32, 0, 1).unwrap().is_empty());
     assert_eq!(plan_select(DType::F32, -1), Err(Error::NegativeCount));
-    assert_eq!(plan_clamp(DType::F32, -1), Err(Error::NegativeCount));
+    assert_eq!(plan_clamp(DType::F32, -1, 1), Err(Error::NegativeCount));
 }
 
 #[test]

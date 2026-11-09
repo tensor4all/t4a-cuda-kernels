@@ -63,7 +63,7 @@ use std::cell::Cell;
 
 use gpu::{download, launch_async, launches, pub_sync, upload, written, Buf, Session, Slot};
 use t4a_cuda_kernels::{
-    plan_apply_reflector, plan_binary, plan_column_norms, plan_copy_exact, plan_elementwise,
+    plan_apply_reflector, plan_arithmetic, plan_binary, plan_column_norms, plan_copy_exact,
     plan_extract_r, plan_fused, plan_gather, plan_householder_explicit_v, plan_identity_shifted,
     plan_initialize_permutation, plan_lu_apply_pivots, plan_materialize_strided, plan_pad,
     plan_prefix_rank, plan_qr_apply_phase, plan_qr_phase, plan_reduction, plan_reflector,
@@ -471,7 +471,9 @@ fn bench_add_f32(case: &str, len: usize, filter: &[String]) {
     }
     let session = Session::new("arithmetic");
     let function = session.function(Entry::Add.name());
-    let plan = plan_elementwise(Entry::Add, DType::F32, len as i64).unwrap();
+    let plan = plan_arithmetic(Entry::Add, DType::F32, len as i64, 1)
+        .unwrap()
+        .launch;
     let mut rng = Rng::new(len as u64);
     let lhs: Vec<f32> = (0..len).map(|_| rng.f32()).collect();
     let rhs: Vec<f32> = (0..len).map(|_| rng.f32()).collect();
@@ -514,7 +516,9 @@ fn bench_exp_f32(case: &str, len: usize, filter: &[String]) {
     }
     let session = Session::new("elementwise");
     let function = session.function(Entry::Unary.name());
-    let plan = plan_unary(UnaryOp::Exp, DType::F32, DType::F32, len as i64).unwrap();
+    let plan = plan_unary(UnaryOp::Exp, DType::F32, DType::F32, len as i64, 1)
+        .unwrap()
+        .launch;
     let mut rng = Rng::new(0x5F5F_5555);
     let input: Vec<f32> = (0..len).map(|_| rng.f32()).collect();
     record_input_digest(&[gpu::as_bytes(&input)]);
@@ -556,7 +560,9 @@ fn bench_mul_c64(case: &str, len: usize, filter: &[String]) {
     }
     let session = Session::new("arithmetic");
     let function = session.function(Entry::Mul.name());
-    let plan = plan_elementwise(Entry::Mul, DType::C64, len as i64).unwrap();
+    let plan = plan_arithmetic(Entry::Mul, DType::C64, len as i64, 1)
+        .unwrap()
+        .launch;
     let mut rng = Rng::new(0x1111_2222);
     let lhs: Vec<C64> = (0..len).map(|_| rng.c64()).collect();
     let rhs: Vec<C64> = (0..len).map(|_| rng.c64()).collect();

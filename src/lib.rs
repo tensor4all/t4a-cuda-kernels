@@ -146,6 +146,13 @@ pub const MAX_GRID_YZ: u32 = 65_535;
 pub const MAX_GRID_X: u32 = i32::MAX as u32;
 /// Default per-block shared-memory budget on current CUDA architectures.
 pub const DEFAULT_SHARED_BYTES: u64 = 48 * 1024;
+/// Widest per-operand access a vectorized flat entry issues: one 128-bit load or
+/// store (`ld.global.v4.u32` / `v2.u64`), a hardware limit rather than a tuning value.
+pub const MAX_VECTOR_BYTES: usize = 16;
+/// Vector widths a vectorized flat entry accepts, widest first.
+pub const FLAT_VECTOR_WIDTHS: [u32; 3] = [4, 2, 1];
+/// Threads per warp: the granularity a flat block is rounded up to.
+pub const WARP_SIZE: u32 = 32;
 
 /// Element type of a kernel invocation, as a runtime tag in the C ABI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -236,6 +243,8 @@ pub enum Error {
     UnsupportedDType,
     /// `entry` is not a flat element-wise entry.
     NotElementwise,
+    /// `entry` takes a planned `vector_width`; plan it with its vectorized planner.
+    VectorWidthRequired,
     /// Grid, block or shared-memory request exceeds the device limits.
     LaunchLimit,
     /// Unsupported or inconsistent transpose configuration.
@@ -291,6 +300,9 @@ impl fmt::Display for Error {
             Error::BroadcastDestination => "destination axis with extent > 1 has stride 0",
             Error::UnsupportedDType => "entry does not support this dtype",
             Error::NotElementwise => "entry is not a flat element-wise entry",
+            Error::VectorWidthRequired => {
+                "entry takes a vector width: plan it with its vectorized planner"
+            }
             Error::LaunchLimit => "launch geometry exceeds the device limits",
             Error::InvalidTransposeConfig => "invalid or unsupported transpose configuration",
             Error::InvalidAxis => "axis outside the operand rank",
@@ -777,6 +789,21 @@ impl Entry {
     }
 
     /// Whether the entry is a flat element-wise kernel over `len` elements.
+    /// Whether the entry takes a trailing `vector_width` argument planned by
+    /// [`flat_vector_width`].
+    pub const fn takes_vector_width(self) -> bool {
+        matches!(
+            self,
+            Entry::Add
+                | Entry::Sub
+                | Entry::Mul
+                | Entry::Div
+                | Entry::Unary
+                | Entry::Compare
+                | Entry::Clamp
+        )
+    }
+
     pub const fn is_elementwise(self) -> bool {
         matches!(
             self,
@@ -1461,6 +1488,57 @@ fn check_dtype(entry: Entry, dtype: DType) -> Result<(), Error> {
     }
 }
 
+/// A flat element-wise plan: its launch geometry and the vector width the kernel
+/// must be given as its trailing `vector_width` argument.
+///
+/// Each thread owns one pack of `vector_width` consecutive elements or one tail
+/// element; width 1 is the one-element-per-thread geometry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FlatLaunch {
+    pub launch: Launch,
+    pub vector_width: u32,
+}
+
+impl FlatLaunch {
+    /// No work: the caller skips the launch.
+    pub fn is_empty(&self) -> bool {
+        self.launch.is_empty()
+    }
+}
+
+/// Largest power of two dividing every address in `addresses`, in bytes.
+///
+/// This is the `alignment` the vectorized flat planners take: pass every operand
+/// address the launch will use. An empty list or all-zero addresses impose no
+/// constraint and return `1 << 63`.
+pub fn address_alignment(addresses: &[u64]) -> u64 {
+    // STUB: no alignment is assumed until the rule lands.
+    let _ = addresses;
+    1
+}
+
+/// Vector width a flat entry uses for operands of `element_sizes` bytes.
+///
+/// STUB: always width 1 until the selection rule lands.
+pub fn flat_vector_width(element_sizes: &[usize], len: i64, alignment: u64) -> u32 {
+    let _ = (element_sizes, len, alignment);
+    1
+}
+
+/// Plan a vectorized flat launch over `len` elements whose widest operand pack is
+/// selected by [`flat_vector_width`].
+fn flat_vector_launch(
+    element_sizes: &[usize],
+    len: i64,
+    alignment: u64,
+) -> Result<FlatLaunch, Error> {
+    let vector_width = flat_vector_width(element_sizes, len, alignment);
+    Ok(FlatLaunch {
+        launch: flat_launch(len)?,
+        vector_width,
+    })
+}
+
 fn flat_launch(len: i64) -> Result<Launch, Error> {
     if len < 0 {
         return Err(Error::NegativeCount);
@@ -1587,13 +1665,37 @@ pub fn plan_concatenate_copy<'a>(
     Ok(flat_launch(len)?.with_variant(&[out, input], &[]))
 }
 
-/// Plan an element-wise entry over `len` contiguous elements.
+/// Plan a flat element-wise entry over `len` contiguous elements.
+///
+/// The entries with a trailing `vector_width` argument have their own planners
+/// ([`plan_arithmetic`], [`plan_unary`], [`plan_compare`], [`plan_clamp`]) and are
+/// rejected here with [`Error::VectorWidthRequired`], so no caller launches them
+/// without a planned width.
 pub fn plan_elementwise(entry: Entry, dtype: DType, len: i64) -> Result<Launch, Error> {
     if !entry.is_elementwise() {
         return Err(Error::NotElementwise);
     }
     check_dtype(entry, dtype)?;
     flat_launch(len)
+}
+
+/// Plan `t4a_cuda_add`, `t4a_cuda_sub`, `t4a_cuda_mul` or `t4a_cuda_div` over `len`
+/// contiguous elements.
+///
+/// `alignment` is [`address_alignment`] of the three operand addresses; pass `1`
+/// when they are unknown, which plans width 1. Any other entry is
+/// [`Error::NotElementwise`].
+pub fn plan_arithmetic(
+    entry: Entry,
+    dtype: DType,
+    len: i64,
+    alignment: u64,
+) -> Result<FlatLaunch, Error> {
+    if !matches!(entry, Entry::Add | Entry::Sub | Entry::Mul | Entry::Div) {
+        return Err(Error::NotElementwise);
+    }
+    check_dtype(entry, dtype)?;
+    flat_vector_launch(&[dtype.size()], len, alignment)
 }
 
 /// Plan [`Entry::FillZero`].
@@ -1982,11 +2084,19 @@ impl StridedOp {
 }
 
 /// Plan [`Entry::Unary`]: `len` elements transform from `src_dtype` to `dst_dtype`.
-pub fn plan_unary(op: UnaryOp, dst: DType, src: DType, len: i64) -> Result<Launch, Error> {
+///
+/// `alignment` is [`address_alignment`] of the output and input addresses.
+pub fn plan_unary(
+    op: UnaryOp,
+    dst: DType,
+    src: DType,
+    len: i64,
+    alignment: u64,
+) -> Result<FlatLaunch, Error> {
     if !op.accepts(dst, src) {
         return Err(Error::UnsupportedOp);
     }
-    flat_launch(len)
+    flat_vector_launch(&[dst.size(), src.size()], len, alignment)
 }
 
 /// Plan [`Entry::Binary`]. `len` counts elements; the `DivComplex` and `Mixed*`
@@ -2010,9 +2120,11 @@ pub fn plan_binary(
 }
 
 /// Plan [`Entry::Compare`]: `len` element pairs reduce to one byte each.
-pub fn plan_compare(dtype: DType, len: i64) -> Result<Launch, Error> {
+///
+/// `alignment` is [`address_alignment`] of the output and both input addresses.
+pub fn plan_compare(dtype: DType, len: i64, alignment: u64) -> Result<FlatLaunch, Error> {
     check_dtype(Entry::Compare, dtype)?;
-    flat_launch(len)
+    flat_vector_launch(&[dtype.size(), DType::Bool.size()], len, alignment)
 }
 
 /// Plan [`Entry::Select`]: `len` predicate bytes select between two operands.
@@ -2022,9 +2134,11 @@ pub fn plan_select(dtype: DType, len: i64) -> Result<Launch, Error> {
 }
 
 /// Plan [`Entry::Clamp`]: `len` elements with per-element bounds.
-pub fn plan_clamp(dtype: DType, len: i64) -> Result<Launch, Error> {
+///
+/// `alignment` is [`address_alignment`] of the output, input and both bound addresses.
+pub fn plan_clamp(dtype: DType, len: i64, alignment: u64) -> Result<FlatLaunch, Error> {
     check_dtype(Entry::Clamp, dtype)?;
-    flat_launch(len)
+    flat_vector_launch(&[dtype.size()], len, alignment)
 }
 
 /// Plan [`Entry::CombinedStrided`]: one logical domain (`out`'s extents) with a

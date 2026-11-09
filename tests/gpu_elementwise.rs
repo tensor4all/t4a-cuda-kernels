@@ -134,7 +134,7 @@ fn unary_bytes(
     out_bytes: usize,
     len: i64,
 ) -> Vec<u8> {
-    let plan = plan_unary(op, dst, src, len).unwrap();
+    let plan = plan_unary(op, dst, src, len, 1).unwrap().launch;
     let out = sentinel(session, out_bytes);
     let mut slots = [
         Slot::ptr(&out),
@@ -323,7 +323,7 @@ fn compare_run<T: Copy>(
     let len = lhs.len() as i64;
     let lhs_buf = upload(session, lhs);
     let rhs_buf = upload(session, rhs);
-    let plan = plan_compare(dtype, len).unwrap();
+    let plan = plan_compare(dtype, len, 1).unwrap().launch;
     let out = guard(session, len, DType::Bool);
     let mut slots = [
         Slot::ptr(&out),
@@ -391,7 +391,7 @@ fn clamp_run<T: Copy>(
     let in_buf = upload(session, input);
     let low_buf = upload(session, lower);
     let high_buf = upload(session, upper);
-    let plan = plan_clamp(dtype, len).unwrap();
+    let plan = plan_clamp(dtype, len, 1).unwrap().launch;
     let out = guard(session, len, dtype);
     let mut slots = [
         Slot::ptr(&out),
@@ -2369,7 +2369,9 @@ fn empty_and_single_element_domains_launch_once_or_not_at_all() {
     let err = written(&session, &[0u8; 4]);
     let scratch = written(&session, &[0u8; 64]);
 
-    let unary = plan_unary(UnaryOp::Exp, DType::F64, DType::F64, 0).unwrap();
+    let unary = plan_unary(UnaryOp::Exp, DType::F64, DType::F64, 0, 1)
+        .unwrap()
+        .launch;
     assert!(unary.is_empty());
     let mut slots = [
         Slot::ptr(&out),
@@ -2411,7 +2413,7 @@ fn empty_and_single_element_domains_launch_once_or_not_at_all() {
 
     for (plan, function, mut slots) in [
         (
-            plan_compare(DType::F32, 0).unwrap(),
+            plan_compare(DType::F32, 0, 1).unwrap().launch,
             "t4a_cuda_compare",
             vec![
                 Slot::ptr(&out),
@@ -2435,7 +2437,7 @@ fn empty_and_single_element_domains_launch_once_or_not_at_all() {
             ],
         ),
         (
-            plan_clamp(DType::F32, 0).unwrap(),
+            plan_clamp(DType::F32, 0, 1).unwrap().launch,
             "t4a_cuda_clamp",
             vec![
                 Slot::ptr(&out),

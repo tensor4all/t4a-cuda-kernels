@@ -3876,3 +3876,193 @@ int main() {{
         String::from_utf8_lossy(&ran.stdout).into_owned(),
     )
 }
+
+// --- flat vector width and tile (tenferro-rs#2529) ---------------------------
+
+/// An allocation base: CUDA allocations are at least 256-byte aligned.
+const ALLOCATION_BASE: u64 = 0x7f00_0000_0000;
+const ALIGNED: u64 = 256;
+const LARGE: i64 = 1 << 20;
+
+/// The tile invariants every vectorized flat plan keeps: each thread owns one
+/// pack or one tail element, the block is whole warps no larger than
+/// `FLAT_BLOCK`, and the grid covers the threads without an idle block.
+fn assert_tile_covers(plan: FlatLaunch, len: i64) {
+    let width = i64::from(plan.vector_width);
+    assert!(FLAT_VECTOR_WIDTHS.contains(&plan.vector_width));
+    let threads = len / width + len % width;
+    let block = plan.launch.block[0];
+    let grid = i64::from(plan.launch.grid[0]);
+    assert_eq!(plan.launch.block[1..], [1, 1]);
+    assert_eq!(plan.launch.grid[1..], [1, 1]);
+    assert!(block <= FLAT_BLOCK && block % WARP_SIZE == 0, "{plan:?}");
+    assert!(grid * i64::from(block) >= threads, "{plan:?} len {len}");
+    assert!(
+        (grid - 1) * i64::from(block) < threads,
+        "{plan:?} len {len}"
+    );
+}
+
+#[test]
+fn flat_vector_width_takes_one_128_bit_pack_per_operand() {
+    assert_eq!(MAX_VECTOR_BYTES, 16);
+    assert_eq!(flat_vector_width(&[1], LARGE, ALIGNED), 4, "Bool caps at 4");
+    for (dtype, width) in [
+        (DType::F32, 4),
+        (DType::I32, 4),
+        (DType::F64, 2),
+        (DType::I64, 2),
+        (DType::C32, 2),
+        (DType::C64, 1),
+    ] {
+        assert_eq!(flat_vector_width(&[dtype.size()], LARGE, ALIGNED), width);
+        let plan = plan_arithmetic(Entry::Add, dtype, LARGE, ALIGNED).unwrap();
+        assert_eq!(plan.vector_width, width, "{dtype:?}");
+        assert_tile_covers(plan, LARGE);
+    }
+}
+
+#[test]
+fn flat_vector_width_falls_back_with_the_alignment() {
+    // f32: a 4-pack needs 16 bytes, a 2-pack 8; anything less is width 1.
+    for (alignment, width) in [(16, 4), (8, 2), (4, 1), (2, 1), (1, 1)] {
+        assert_eq!(
+            flat_vector_width(&[4], LARGE, alignment),
+            width,
+            "{alignment}"
+        );
+    }
+    // f64: a 2-pack needs 16 bytes.
+    for (alignment, width) in [(32, 2), (16, 2), (8, 1)] {
+        assert_eq!(
+            flat_vector_width(&[8], LARGE, alignment),
+            width,
+            "{alignment}"
+        );
+    }
+    // An operand rebased by one f64 element off an allocation base.
+    let misaligned = address_alignment(&[ALLOCATION_BASE, ALLOCATION_BASE + 8, ALLOCATION_BASE]);
+    let plan = plan_arithmetic(Entry::Add, DType::F64, LARGE, misaligned).unwrap();
+    assert_eq!(plan.vector_width, 1);
+    assert_eq!(plan.launch, plan_fill_zero(DType::F64, LARGE).unwrap());
+}
+
+#[test]
+fn flat_vector_width_falls_back_for_short_lengths() {
+    for (len, width) in [(1, 1), (2, 2), (3, 2), (4, 4), (5, 4)] {
+        assert_eq!(flat_vector_width(&[4], len, ALIGNED), width, "len {len}");
+    }
+    let empty = plan_arithmetic(Entry::Add, DType::F32, 0, ALIGNED).unwrap();
+    assert!(empty.is_empty());
+    assert_eq!(empty.vector_width, 1);
+}
+
+#[test]
+fn flat_vector_width_uses_the_widest_operand() {
+    // Compare reads T and writes one byte.
+    assert_eq!(
+        plan_compare(DType::F32, LARGE, ALIGNED)
+            .unwrap()
+            .vector_width,
+        4
+    );
+    assert_eq!(
+        plan_compare(DType::F64, LARGE, ALIGNED)
+            .unwrap()
+            .vector_width,
+        2
+    );
+    // Complex magnitude reads the complex operand and writes its real part.
+    let abs32 = plan_unary(UnaryOp::Abs, DType::F32, DType::C32, LARGE, ALIGNED).unwrap();
+    assert_eq!(abs32.vector_width, 2);
+    let abs64 = plan_unary(UnaryOp::Abs, DType::F64, DType::C64, LARGE, ALIGNED).unwrap();
+    assert_eq!(abs64.vector_width, 1);
+    let exp = plan_unary(UnaryOp::Exp, DType::F64, DType::F64, LARGE, ALIGNED).unwrap();
+    assert_eq!(exp.vector_width, 2);
+    assert_eq!(
+        plan_clamp(DType::F64, LARGE, ALIGNED).unwrap().vector_width,
+        2
+    );
+    assert_eq!(
+        plan_clamp(DType::F32, LARGE, ALIGNED).unwrap().vector_width,
+        4
+    );
+}
+
+#[test]
+fn flat_vector_tile_follows_the_element_count() {
+    // A prime length: 250_000 packs of four plus a three-element tail.
+    let prime = plan_arithmetic(Entry::Add, DType::F32, 1_000_003, ALIGNED).unwrap();
+    assert_eq!(prime.vector_width, 4);
+    assert_eq!(prime.launch.block, [FLAT_BLOCK, 1, 1]);
+    assert_eq!(prime.launch.grid, [250_003u32.div_ceil(FLAT_BLOCK), 1, 1]);
+    // Ten f32: two packs and a two-element tail fit one warp, not a 256-thread block.
+    let small = plan_arithmetic(Entry::Add, DType::F32, 10, ALIGNED).unwrap();
+    assert_eq!(
+        (small.vector_width, small.launch.block, small.launch.grid),
+        (4, [WARP_SIZE, 1, 1], [1, 1, 1])
+    );
+    for dtype in [DType::F32, DType::F64, DType::C32, DType::C64] {
+        for len in [1, 2, 3, 31, 33, 255, 257, 1023, 65_537, 1_000_003] {
+            for alignment in [1, 4, 8, 16, ALIGNED] {
+                assert_tile_covers(
+                    plan_arithmetic(Entry::Mul, dtype, len, alignment).unwrap(),
+                    len,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn flat_vector_width_one_keeps_the_scalar_geometry_for_large_lengths() {
+    for len in [256, 257, 1_000_000] {
+        let scalar = plan_arithmetic(Entry::Sub, DType::F32, len, 1).unwrap();
+        assert_eq!(
+            scalar,
+            FlatLaunch {
+                launch: plan_fill_zero(DType::F32, len).unwrap(),
+                vector_width: 1
+            }
+        );
+    }
+}
+
+#[test]
+fn address_alignment_is_the_common_power_of_two() {
+    assert_eq!(
+        address_alignment(&[ALLOCATION_BASE, ALLOCATION_BASE + 512]),
+        ALLOCATION_BASE & ALLOCATION_BASE.wrapping_neg()
+    );
+    assert_eq!(address_alignment(&[256, 512]), 256);
+    assert_eq!(address_alignment(&[256, 260]), 4);
+    assert_eq!(address_alignment(&[0, 8]), 8);
+    assert_eq!(address_alignment(&[0]), 1 << 63);
+    assert_eq!(address_alignment(&[]), 1 << 63);
+}
+
+#[test]
+fn plan_elementwise_refuses_entries_that_take_a_vector_width() {
+    for entry in [
+        Entry::Add,
+        Entry::Sub,
+        Entry::Mul,
+        Entry::Div,
+        Entry::Unary,
+        Entry::Compare,
+        Entry::Clamp,
+    ] {
+        assert_eq!(
+            plan_elementwise(entry, DType::F32, 4),
+            Err(Error::VectorWidthRequired),
+            "{entry:?}"
+        );
+    }
+    assert!(plan_elementwise(Entry::Binary, DType::F32, 4).is_ok());
+    assert!(plan_elementwise(Entry::Select, DType::F32, 4).is_ok());
+    assert!(plan_elementwise(Entry::FillZero, DType::F32, 4).is_ok());
+    assert_eq!(
+        plan_arithmetic(Entry::Binary, DType::F32, 4, ALIGNED),
+        Err(Error::NotElementwise)
+    );
+}

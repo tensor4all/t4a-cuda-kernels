@@ -189,12 +189,14 @@ Evidence directory: `docs/worklogs/evidence/2026-11-09-combine-load-ahead/`.
 - **Host µs/op** (`campaign/table.md`):
   - `PROD` f32 1M 21.82 → 18.34 (0.841); `PROD` f64 1M 22.12 → 20.59 (0.931).
   - The other required 1M/16M cells are 0.939-1.007.
-- **Control gate: one control fails.** `reduce-sum-f32-axis-513` (many-output unit combine) is
-  at 1.037 against the 1.03 rule. That cell was 0.999 in a full paired campaign of the same
-  walk without the near-`LLONG_MAX` fallback (every control ≤ 1.010 there), and 1.024 with the
-  fallback inlined. The fallback is the cost. Whether to keep it (no new overflow at any
-  representable length) or drop it (all controls pass; an axis within `B * W` of `2^63` would
-  overflow `index`) is left to review.
+- **Control gate: one control exceeds it.** `reduce-sum-f32-axis-513` (many-output unit
+  combine) is at 1.037 against the 1.03 rule.
+  - **Cause.** The near-`LLONG_MAX` fallback: `axis_len > 2^63 - 1 - B*W`, with `B*W` at most
+    8192, so only a broadcast view can need it.
+  - **Without it.** The cell was 0.999 in a full paired campaign without the fallback (every
+    control ≤ 1.010 there), and 1.024 with the fallback inlined.
+  - **Decision.** The fallback is kept, correctness first: no counter overflows at any
+    representable axis length. The fallback-free walk is not the default.
 - **Not reached.** "Most of the 10.9 µs" for `PROD`: about 28 % of the f32 combine goes.
   - On one warp, the address arithmetic of a predicated batch (≈ 18 instructions per load in
     the f64 loop) is now comparable to the L2 latency.

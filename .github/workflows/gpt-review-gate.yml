@@ -41,11 +41,15 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
-          IS_PR: ${{ github.event.issue.pull_request != null }}
+          # `pull_request_target` carries `github.event.pull_request` and no `github.event.issue`, so the
+          # first draft's `issue.pull_request != null` test was false on every PR event and the gate exited
+          # success without reading the head. Key the skip on the one event where a comment may really be
+          # about a plain issue.
+          IS_COMMENT_ON_ISSUE: ${{ github.event_name == 'issue_comment' && github.event.issue.pull_request == null }}
         run: |
           set -euo pipefail
-          if [ "$IS_PR" != "true" ]; then
-            echo "not a pull request; nothing to gate"; exit 0
+          if [ "$IS_COMMENT_ON_ISSUE" = "true" ]; then
+            echo "comment on an issue, not a pull request; nothing to gate"; exit 0
           fi
 
           head=$(gh api "repos/$REPO/pulls/$NUMBER" --jq .head.sha)
@@ -60,11 +64,14 @@ jobs:
 
           matched=no
           if [ "$count" -gt 0 ]; then
+            # Strip the label and the backticks; the greedy `s/.*`//` of the first draft consumed through the
+            # closing backtick, left an empty string, and `case "$head" in "")` then matched every head.
             while IFS= read -r sha; do
               case "$head" in
                 "$sha"*) matched=yes ;;
               esac
-            done < <(printf '%s\n' "$reviews" | grep -oE 'Reviewed head: `[0-9a-f]{7,40}`' | sed 's/.*`//; s/`.*//' || true)
+            done < <(printf '%s\n' "$reviews" | grep -oE 'Reviewed head: `[0-9a-f]{7,40}`' \
+              | sed 's/Reviewed head: //' | tr -d '`' || true)
           fi
 
           if [ "$matched" = yes ]; then

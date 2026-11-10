@@ -354,8 +354,9 @@ __device__ __forceinline__ T t4a_cuda_partials_walk_scalar(const T* in,
                                                            long long start,
                                                            long long end,
                                                            int plane_width,
+                                                           int lane,
                                                            Fold fold) {
-  long long reduce_index = start + threadIdx.x;
+  long long reduce_index = start + lane;
   T acc = fold.seed(in[in_base + reduce_index * axis_stride]);
   for (reduce_index += plane_width; reduce_index < end; reduce_index += plane_width) {
     acc = fold(acc, in[in_base + reduce_index * axis_stride]);
@@ -462,11 +463,11 @@ template <typename Fold, typename T, bool Aligned>
 __device__ __noinline__ T t4a_cuda_partials_walk_vector(const T* chunk,
                                                         long long len,
                                                         int plane_width,
+                                                        int lane,
                                                         Fold fold) {
   constexpr int V = t4a_cuda_vector_lanes<T>::value;
   constexpr int B = t4a_cuda_vector_batch;
   using Vector = t4a_cuda_vector<T, V>;
-  const int lane = static_cast<int>(threadIdx.x);
   // INVARIANT: `groups >= plane_width` (t4a_cuda_vector_walk_applies), so group `lane`
   // exists; with `Aligned`, `chunk` is 16-byte aligned (t4a_cuda_partials_walk).
   const long long groups = len / V;
@@ -531,6 +532,7 @@ __device__ __forceinline__ T t4a_cuda_partials_walk(const T* in,
                                                     long long start,
                                                     long long end,
                                                     int plane_width,
+                                                    int lane,
                                                     Fold fold) {
   if constexpr (t4a_cuda_vector_walk_enabled<Fold, T>()) {
     // The stride comes first: `in + in_base + start` is an address inside the input only on
@@ -542,17 +544,40 @@ __device__ __forceinline__ T t4a_cuda_partials_walk(const T* in,
       // the 16-byte test only selects the load instruction, never the topology.
       if ((reinterpret_cast<unsigned long long>(chunk) & 15ull) == 0) {
         return t4a_cuda_partials_walk_vector<Fold, T, true>(chunk, end - start, plane_width,
-                                                            fold);
+                                                            lane, fold);
       }
       return t4a_cuda_partials_walk_vector<Fold, T, false>(chunk, end - start, plane_width,
-                                                           fold);
+                                                           lane, fold);
     }
   }
   return t4a_cuda_partials_walk_scalar<Fold, T>(in, in_base, axis_stride, start, end,
-                                                plane_width, fold);
+                                                plane_width, lane, fold);
 }
 
-// Pass 1 of a split reduction: one block per (output, split). The planner
+// Pass-1 block geometry (ABI revision 14). A block of `blockDim.x <= 32` threads is one plane
+// of that width, as before revision 14. A wider block (64, 128 or 256 threads) holds
+// `blockDim.x / 32` planes of 32 lanes: warp `w` of block `b` reduces cube `b * planes + w`,
+// and its lane `t` is `threadIdx.x % 32`, so each chunk is walked by one warp with the same
+// lane assignment as a one-warp block, and the partials do not depend on the block width.
+// Warps never communicate (the plane fold is warp shuffles only, and pass 1 has no shared
+// memory), so no `__syncthreads` is needed, and a warp past the last cube returns as a
+// whole before any shuffle.
+struct t4a_cuda_partials_plane {
+  long long cube;
+  int width;
+  int lane;
+};
+
+__device__ __forceinline__ t4a_cuda_partials_plane t4a_cuda_partials_plane_of_thread() {
+  const int width = blockDim.x < t4a_cuda_warp_width ? static_cast<int>(blockDim.x)
+                                                     : t4a_cuda_warp_width;
+  const long long planes = static_cast<long long>(blockDim.x) / width;
+  const int plane = static_cast<int>(threadIdx.x) / width;
+  return {static_cast<long long>(blockIdx.x) * planes + plane, width,
+          static_cast<int>(threadIdx.x) - plane * width};
+}
+
+// Pass 1 of a split reduction: one plane per (output, split). The planner
 // guarantees `chunk_len >= plane_width` and `chunk_len == axis_len / splits`, so
 // every lane seeds from inside its own chunk and only the last split absorbs the
 // remainder.
@@ -566,7 +591,8 @@ __device__ __forceinline__ void partials_body(const void* in_ptr,
                                               long long splits,
                                               long long chunk_len,
                                               Fold fold) {
-  const long long cube = blockIdx.x;
+  const t4a_cuda_partials_plane me = t4a_cuda_partials_plane_of_thread();
+  const long long cube = me.cube;
   const long long output_index = cube / splits;
   const long long split = cube % splits;
   if (output_index >= output_len) {
@@ -590,15 +616,15 @@ __device__ __forceinline__ void partials_body(const void* in_ptr,
     }
   }
 
-  const int plane_width = static_cast<int>(blockDim.x);
+  const int plane_width = me.width;
   const long long axis_stride = in_layout.strides[axis];
   const long long axis_len = in_layout.extents[axis];
   const long long start = split * chunk_len;
   const long long end = split + 1 == splits ? axis_len : start + chunk_len;
   const T acc = t4a_cuda_partials_walk<Fold, T>(in, in_base, axis_stride, start, end,
-                                                plane_width, fold);
+                                                plane_width, me.lane, fold);
   const T reduced = t4a_cuda_plane_fold_narrow(acc, plane_width, fold);
-  if (threadIdx.x == 0) {
+  if (me.lane == 0) {
     partials[partial_offset] = reduced;
   }
 }
@@ -693,7 +719,8 @@ __device__ __forceinline__ void partials_body_any(const void* in_ptr,
                                                   long long splits,
                                                   long long chunk_len,
                                                   Fold fold) {
-  const long long cube = blockIdx.x;
+  const t4a_cuda_partials_plane me = t4a_cuda_partials_plane_of_thread();
+  const long long cube = me.cube;
   const long long output_index = cube / splits;
   const long long split = cube % splits;
   if (output_index >= output_len) {
@@ -717,15 +744,15 @@ __device__ __forceinline__ void partials_body_any(const void* in_ptr,
     }
   }
 
-  const int plane_width = static_cast<int>(blockDim.x);
+  const int plane_width = me.width;
   const long long axis_stride = in_layout.strides[axis];
   const long long axis_len = in_layout.extents[axis];
   const long long start = split * chunk_len;
   const long long end = split + 1 == splits ? axis_len : start + chunk_len;
   const T acc = t4a_cuda_partials_walk<Fold, T>(in, in_base, axis_stride, start, end,
-                                                plane_width, fold);
+                                                plane_width, me.lane, fold);
   const T reduced = t4a_cuda_plane_fold_narrow(acc, plane_width, fold);
-  if (threadIdx.x == 0) {
+  if (me.lane == 0) {
     partials[partial_offset] = reduced;
   }
 }

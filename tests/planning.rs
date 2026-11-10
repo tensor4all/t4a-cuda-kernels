@@ -1016,8 +1016,9 @@ fn reduction_plan_applies_the_auto_policy() {
                     chunk_len: 256
                 }
             );
-            assert_eq!(pass1.grid, [8, 1, 1]);
-            assert_eq!(pass1.block, [32, 1, 1]);
+            // Eight (output, split) cubes, four 32-lane planes per block (revision 14).
+            assert_eq!(pass1.grid, [2, 1, 1]);
+            assert_eq!(pass1.block, [128, 1, 1]);
             assert_eq!(combine_strategy, ReduceStrategy::Unit);
             assert_eq!(combine_op, ReduceOp::Sum);
             assert_eq!(pass2.grid, [1, 1, 1]);
@@ -1076,7 +1077,8 @@ fn partials_plans_enforce_the_floor_split() {
         32,
     )
     .unwrap();
-    assert_eq!(launch.grid, [8, 1, 1]);
+    assert_eq!(launch.grid, [2, 1, 1]);
+    assert_eq!(launch.block, [128, 1, 1]);
 
     // A chunk shorter than a plane, or not the floor split, is refused: a lane
     // would seed outside its own slice.
@@ -3810,13 +3812,13 @@ int main() {{
   int wrong = 0;
   // extents=[512], strides=[0] over one element; second of two splits.
   if (t4a_cuda_partials_walk<Fold, float>(CheckedPtr<float>{{one, 1, 0}}, 0, 0, 256, 512, 32,
-                                          Fold{{}}) != 2.0f) {{
+                                          0, Fold{{}}) != 2.0f) {{
     std::printf("broadcast axis did not take the serial walk\n");
     ++wrong;
   }}
   // extents=[512], strides=[-1], offset=511; second of two splits.
   if (t4a_cuda_partials_walk<Fold, float>(CheckedPtr<float>{{many, 512, 0}}, 511, -1, 256, 512,
-                                          32, Fold{{}}) != 2.0f) {{
+                                          32, 0, Fold{{}}) != 2.0f) {{
     std::printf("reversed axis did not take the serial walk\n");
     ++wrong;
   }}
@@ -3827,7 +3829,7 @@ int main() {{
   // A contiguous chunk takes the vector walk and forms its chunk pointer, so the probe is not
   // vacuous.
   if (t4a_cuda_partials_walk<Fold, float>(CheckedPtr<float>{{many, 512, 0}}, 0, 1, 256, 512, 32,
-                                          Fold{{}}) != 1.0f) {{
+                                          0, Fold{{}}) != 1.0f) {{
     std::printf("contiguous chunk did not take the vector walk\n");
     ++wrong;
   }}
@@ -3869,4 +3871,46 @@ int main() {{
         ran.status.success(),
         String::from_utf8_lossy(&ran.stdout).into_owned(),
     )
+}
+
+/// Revision 14: split pass 1 packs `PARTIALS_PLANES_PER_BLOCK` 32-lane planes (one cube per
+/// warp) into a one-dimensional block, rounding the grid up; 8- and 16-lane planes keep one
+/// plane per block. Consumers launch `grid[0]` x `block[0]` (tenferro reads only `[0]`), so
+/// the extra planes must live in `block[0]`, never in `block[1]`.
+#[test]
+fn pass1_packs_whole_warps_into_one_dimensional_blocks() {
+    use t4a_cuda_kernels::{plan_reduce_partials, ReduceOp, Split, PARTIALS_PLANES_PER_BLOCK};
+    let planes = PARTIALS_PLANES_PER_BLOCK;
+    assert!(planes >= 1 && 32 * planes <= 1024);
+    // 3 outputs x 390 splits = 1170 cubes: not a multiple of any planes > 1, and a block
+    // straddles two outputs.
+    for (width, expect_planes) in [(32u32, planes), (16, 1), (8, 1)] {
+        let splits = 390i64;
+        let axis_len = splits * i64::from(width) * 8 + 3;
+        let input = Layout::compact(&[3, axis_len]).unwrap();
+        let partials = Layout::compact(&[3, splits]).unwrap();
+        let launch = plan_reduce_partials(
+            DType::F64,
+            ReduceOp::Sum,
+            &partials,
+            3 * splits,
+            &input,
+            3 * axis_len,
+            1,
+            Split {
+                splits,
+                chunk_len: axis_len / splits,
+            },
+            width,
+        )
+        .unwrap();
+        let cubes = 3 * splits as u32;
+        assert_eq!(launch.block, [width * expect_planes, 1, 1], "width {width}");
+        assert_eq!(
+            launch.grid,
+            [cubes.div_ceil(expect_planes), 1, 1],
+            "width {width}"
+        );
+        assert_eq!(launch.shared_bytes, 0);
+    }
 }

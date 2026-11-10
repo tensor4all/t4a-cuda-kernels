@@ -1,0 +1,32 @@
+### mutant max-operand-swap: exit 101
+
+running 1 test
+test split_reductions_match_the_ab7395c_golden_bit_for_bit ... FAILED
+
+failures:
+
+failures:
+    split_reductions_match_the_ab7395c_golden_bit_for_bit
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.41s
+
+    Finished `release` profile [optimized] target(s) in 0.53s
+     Running tests/gpu_reduce_golden.rs (/home/shinaoka/work/t4a-combine-mut-target/release/deps/gpu_reduce_golden-4669d4edb28852df)
+cases 1332  partials differ 4  finals differ: value/sign/nan-ness 0  unlisted nan-payload-only 8  listed nan-payload-only 48/48  listed but now equal 0
+partials differ: 3x100003-axis1|w32|F32|Max|NanPayloads|any
+partials differ: 3x100003-axis1|w32|F32|Max|NanPayloads|fast
+partials differ: 3x100003-axis1|w32|F64|Max|NanPayloads|any
+partials differ: 3x100003-axis1|w32|F64|Max|NanPayloads|fast
+nan payload differs: 3x100003-axis1|w32|F32|Max|NanPayloads|any	9901c0ffacfd7f3f3004c07f	golden 0001c07facfd7f3f9703c0ff
+nan payload differs: 3x100003-axis1|w32|F32|Max|NanPayloads|fast	9901c0ffacfd7f3f3004c07f	golden 0001c07facfd7f3f9703c0ff
+nan payload differs: 3x100003-axis1|w32|F64|Max|NanPayloads|any	991900000000f8ff3e8a7e91e3ffef3f304300000000f87f	golden 001000000000f87f3e8a7e91e3ffef3f973900000000f8ff
+nan payload differs: 3x100003-axis1|w32|F64|Max|NanPayloads|fast	991900000000f8ff3e8a7e91e3ffef3f304300000000f87f	golden 001000000000f87f3e8a7e91e3ffef3f973900000000f8ff
+nan payload differs: n8195|w32|F32|Max|NanPayloads|any	5303c0ff	golden 0001c07f
+nan payload differs: n8195|w32|F32|Max|NanPayloads|fast	5303c0ff	golden 0001c07f
+nan payload differs: n8195|w32|F64|Max|NanPayloads|any	533500000000f8ff	golden 001000000000f87f
+nan payload differs: n8195|w32|F64|Max|NanPayloads|fast	533500000000f8ff	golden 001000000000f87f
+
+thread 'split_reductions_match_the_ab7395c_golden_bit_for_bit' (436816) panicked at tests/gpu_reduce_golden.rs:663:5:
+split reductions are not bit-identical to the ab7395c golden
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+error: test failed, to rerun pass `--test gpu_reduce_golden`

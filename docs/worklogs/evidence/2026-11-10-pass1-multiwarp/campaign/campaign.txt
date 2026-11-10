@@ -1,0 +1,70 @@
+campaign 2026-11-10T17:45:34+09:00 reps=15 warmup_reps=3 cpus=24-31 observer=40-47
+measured L3 domain: cpu24 shares L3 with 24-31; driver affinity: 40-47
+L3 キャッシュ:                       256 MiB (8 インスタンス)
+base /home/shinaoka/work/arms-30/base-ab7395c
+cand /home/shinaoka/work/arms-30/cand-f21234e
+name, driver_version, clocks.current.sm [MHz], clocks.current.memory [MHz], temperature.gpu, utilization.gpu [%], memory.used [MiB]
+NVIDIA A100 80GB PCIe, 580.178.04, 210 MHz, 1512 MHz, 52, 0 %, 14 MiB
+Tue Nov 10 17:45:34 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.178.04             Driver Version: 580.178.04     CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA A100 80GB PCIe          Off |   00000000:81:00.0 Off |                    0 |
+| N/A   52C    P0             49W /  300W |      14MiB /  81920MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A            3700      G   /usr/lib/xorg/Xorg                        4MiB |
++-----------------------------------------------------------------------------------------+
+Cuda compilation tools, release 12.0, V12.0.140
+Build cuda_12.0.r12.0/compiler.32267302_0
+rep 1 warmup base cpus_busy=0.1% 2026-11-10T17:45:35+09:00
+rep 1 warmup cand cpus_busy=0.4% 2026-11-10T17:45:58+09:00
+rep 2 warmup cand cpus_busy=0.4% 2026-11-10T17:46:24+09:00
+rep 2 warmup base cpus_busy=0.1% 2026-11-10T17:46:49+09:00
+rep 3 warmup base cpus_busy=0.0% 2026-11-10T17:47:12+09:00
+rep 3 warmup cand cpus_busy=0.0% 2026-11-10T17:47:34+09:00
+rep 4 sample cand cpus_busy=0.1% 2026-11-10T17:47:59+09:00
+rep 4 sample base cpus_busy=2.0% 2026-11-10T17:48:25+09:00
+rep 5 sample base cpus_busy=1.9% 2026-11-10T17:48:47+09:00
+rep 5 sample cand cpus_busy=0.0% 2026-11-10T17:49:10+09:00
+rep 6 sample cand cpus_busy=0.0% 2026-11-10T17:49:35+09:00
+rep 6 sample base cpus_busy=0.0% 2026-11-10T17:50:00+09:00
+rep 7 sample base cpus_busy=0.0% 2026-11-10T17:50:22+09:00
+rep 7 sample cand cpus_busy=0.4% 2026-11-10T17:50:45+09:00
+rep 8 sample cand cpus_busy=0.0% 2026-11-10T17:51:10+09:00
+rep 8 sample base cpus_busy=0.0% 2026-11-10T17:51:34+09:00
+rep 9 sample base cpus_busy=1.4% 2026-11-10T17:51:56+09:00
+rep 9 sample cand cpus_busy=0.0% 2026-11-10T17:52:19+09:00
+rep 10 sample cand cpus_busy=0.8% 2026-11-10T17:52:44+09:00
+rep 10 sample base cpus_busy=0.1% 2026-11-10T17:53:08+09:00
+rep 11 sample base cpus_busy=0.2% 2026-11-10T17:53:31+09:00
+rep 11 sample cand cpus_busy=1.0% 2026-11-10T17:53:53+09:00
+rep 12 sample cand cpus_busy=2.5% 2026-11-10T17:54:17+09:00
+wait before rep 12 base: gpu=[] cpus 24-31 busy 5.7%
+rep 12 sample base cpus_busy=0.0% 2026-11-10T17:54:58+09:00
+rep 13 sample base cpus_busy=0.7% 2026-11-10T17:55:21+09:00
+rep 13 sample cand cpus_busy=0.5% 2026-11-10T17:55:43+09:00
+rep 14 sample cand cpus_busy=1.5% 2026-11-10T17:56:08+09:00
+rep 14 sample base cpus_busy=0.0% 2026-11-10T17:56:33+09:00
+rep 15 sample base cpus_busy=0.9% 2026-11-10T17:56:55+09:00
+rep 15 sample cand cpus_busy=0.1% 2026-11-10T17:57:17+09:00
+rep 16 sample cand cpus_busy=0.0% 2026-11-10T17:57:42+09:00
+rep 16 sample base cpus_busy=0.0% 2026-11-10T17:58:07+09:00
+rep 17 sample base cpus_busy=1.6% 2026-11-10T17:58:29+09:00
+rep 17 sample cand cpus_busy=1.0% 2026-11-10T17:58:51+09:00
+rep 18 sample cand cpus_busy=0.0% 2026-11-10T17:59:15+09:00
+rep 18 sample base cpus_busy=0.0% 2026-11-10T17:59:40+09:00
+end 2026-11-10T18:00:01+09:00
+name, clocks.current.sm [MHz], temperature.gpu, utilization.gpu [%], memory.used [MiB]
+NVIDIA A100 80GB PCIe, 1410 MHz, 57, 23 %, 14 MiB
+pid, process_name

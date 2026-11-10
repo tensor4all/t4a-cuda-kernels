@@ -1,0 +1,60 @@
+### mutant pass1-operand-swap: exit 101
+
+running 1 test
+test split_reductions_match_the_ab7395c_golden_bit_for_bit ... FAILED
+
+failures:
+
+failures:
+    split_reductions_match_the_ab7395c_golden_bit_for_bit
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.35s
+
+    Finished `release` profile [optimized] target(s) in 0.43s
+     Running tests/gpu_reduce_golden.rs (/home/shinaoka/work/t4a-combine-mut-target/release/deps/gpu_reduce_golden-4669d4edb28852df)
+cases 1332  partials differ 20  finals differ: value/sign/nan-ness 0  unlisted nan-payload-only 20  listed nan-payload-only 48/48  listed but now equal 0
+partials differ: n1000003|w16|F64|Max|NanPayloads|any
+partials differ: n1000003|w16|F64|Max|NanPayloads|fast
+partials differ: n1000003|w16|F64|Min|NanPayloads|any
+partials differ: n1000003|w16|F64|Min|NanPayloads|fast
+partials differ: n1000003|w8|F32|Max|NanPayloads|any
+partials differ: n1000003|w8|F32|Max|NanPayloads|fast
+partials differ: n1000003|w8|F32|Min|NanPayloads|any
+partials differ: n1000003|w8|F32|Min|NanPayloads|fast
+partials differ: n1000003|w8|F64|Max|NanPayloads|any
+partials differ: n1000003|w8|F64|Max|NanPayloads|fast
+partials differ: n1000003|w8|F64|Min|NanPayloads|any
+partials differ: n1000003|w8|F64|Min|NanPayloads|fast
+partials differ: n4194304|w32|F32|Max|NanPayloads|any
+partials differ: n4194304|w32|F32|Max|NanPayloads|fast
+partials differ: n4194304|w32|F32|Min|NanPayloads|any
+partials differ: n4194304|w32|F32|Min|NanPayloads|fast
+partials differ: n4194304|w32|F64|Max|NanPayloads|any
+partials differ: n4194304|w32|F64|Max|NanPayloads|fast
+partials differ: n4194304|w32|F64|Min|NanPayloads|any
+partials differ: n4194304|w32|F64|Min|NanPayloads|fast
+nan payload differs: n1000003|w16|F64|Max|NanPayloads|any	661600000000f87f	golden 001000000000f87f
+nan payload differs: n1000003|w16|F64|Max|NanPayloads|fast	661600000000f87f	golden 001000000000f87f
+nan payload differs: n1000003|w16|F64|Min|NanPayloads|any	661600000000f87f	golden 001000000000f87f
+nan payload differs: n1000003|w16|F64|Min|NanPayloads|fast	661600000000f87f	golden 001000000000f87f
+nan payload differs: n1000003|w8|F32|Max|NanPayloads|any	6601c07f	golden 0001c07f
+nan payload differs: n1000003|w8|F32|Max|NanPayloads|fast	6601c07f	golden 0001c07f
+nan payload differs: n1000003|w8|F32|Min|NanPayloads|any	6601c07f	golden 0001c07f
+nan payload differs: n1000003|w8|F32|Min|NanPayloads|fast	6601c07f	golden 0001c07f
+nan payload differs: n1000003|w8|F64|Max|NanPayloads|any	881800000000f87f	golden 001000000000f87f
+nan payload differs: n1000003|w8|F64|Max|NanPayloads|fast	881800000000f87f	golden 001000000000f87f
+nan payload differs: n1000003|w8|F64|Min|NanPayloads|any	881800000000f87f	golden 001000000000f87f
+nan payload differs: n1000003|w8|F64|Min|NanPayloads|fast	881800000000f87f	golden 001000000000f87f
+nan payload differs: n4194304|w32|F32|Max|NanPayloads|any	3202c07f	golden 0001c07f
+nan payload differs: n4194304|w32|F32|Max|NanPayloads|fast	3202c07f	golden 0001c07f
+nan payload differs: n4194304|w32|F32|Min|NanPayloads|any	3202c07f	golden 0001c07f
+nan payload differs: n4194304|w32|F32|Min|NanPayloads|fast	3202c07f	golden 0001c07f
+nan payload differs: n4194304|w32|F64|Max|NanPayloads|any	ba2b00000000f87f	golden 001000000000f87f
+nan payload differs: n4194304|w32|F64|Max|NanPayloads|fast	ba2b00000000f87f	golden 001000000000f87f
+nan payload differs: n4194304|w32|F64|Min|NanPayloads|any	ba2b00000000f87f	golden 001000000000f87f
+nan payload differs: n4194304|w32|F64|Min|NanPayloads|fast	ba2b00000000f87f	golden 001000000000f87f
+
+thread 'split_reductions_match_the_ab7395c_golden_bit_for_bit' (435831) panicked at tests/gpu_reduce_golden.rs:663:5:
+split reductions are not bit-identical to the ab7395c golden
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+error: test failed, to rerun pass `--test gpu_reduce_golden`

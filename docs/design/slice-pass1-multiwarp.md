@@ -69,17 +69,111 @@ inputs revision 13 refused.
 
 ## Planner rule: few, short cubes
 
-Unconditional 4-warp blocks were faster on the full-array 1M-class problems (4096 cubes of
-256 elements), but slower where one-warp blocks are already refilled warp by warp:
+The issue asked to keep multi-warp blocks to few cubes and short chunks. The planner does that:
+at most `2 * MAX_SPLITS` cubes, chunks of at most 1024 elements (`src/lib.rs`,
+`plan_reduce_partials`; `tests/planning.rs` pins both boundaries), and
+`PARTIALS_PLANES_PER_BLOCK = 4`.
 
-- many cubes: the 65,536-cube `reduce-*-4096sq-axis0` cases (+4 to +8 % pass-1 device time);
-- long chunks: the 10M and 16M full-array reductions (chunks longer than 1024 elements,
-  +1 to +3 %), which are bandwidth-bound walks.
+What the measurements say about the two limits (nsys device µs per launch, A100, CUDA 12.6,
+median of per-round medians; tables in `docs/worklogs/evidence/2026-11-10-pass1-multiwarp/`):
 
-So the planner keeps multi-warp blocks for at most `2 * MAX_SPLITS` cubes with chunks of at
-most 1024 elements (`src/lib.rs`, `plan_reduce_partials`; `tests/planning.rs` pins the
-boundaries). `PARTIALS_PLANES_PER_BLOCK` is 4.
+- **Long chunks.** On the 10M and 16M full-array reductions (chunks of 2441 to 4096
+  elements), unconditional 4-warp blocks were 1 to 3 % slower. The clock64 probe below
+  shows those warps run longer (median 51,194 clk against 41,929 clk), not that they hold
+  slots after finishing.
+- **Many cubes.** The earlier "+4 to +8 % on the 65,536-cube `4096sq-axis0` cases" was
+  measured with a kernel whose plane mapping used a 64-bit divide. That cost was paid by
+  one-warp launches too: f32 pass 1 took 64.70 µs at a029e80 against 57.79 µs at #29, with
+  the same grid of 65536 × 32. With the 32-bit mapping (f21234e), an experiment without the
+  cube limit makes pass 1 *faster* there:
 
-Cases outside the rule still run the new kernel with one-warp blocks, so they still pay for
-the plane mapping. A 64-bit divide there cost about 12 % of pass 1 on the 4096sq axis-0
-cases; `t4a_cuda_partials_plane_of_thread()` therefore uses 32-bit shifts only.
+  | case | base | f21234e | no cube limit |
+  |---|---:|---:|---:|
+  | f32 axis0 | 60.10 | 59.76 | 57.42 |
+  | i32 axis0 | 60.86 | 60.02 | 57.15 |
+  | f64 axis0 | 77.41 | 78.75 | 79.54 |
+  | c64 axis0 | 153.68 | 153.97 | 152.66 |
+
+  So the cube limit is a conservative choice, not a measured need. Lifting it is a possible
+  follow-up and would need its own control gate.
+
+## Measurement
+
+Device µs (pass 1 + combine) for `ab7395c` (base), #29 (`4ea91e6`) and this branch
+(`f21234e`); 3 rounds with rotated arm order (`nsys-final2.md`):
+
+| case | base | #29 | this | this/base |
+|---|---:|---:|---:|---:|
+| sum f32 full 1048576 | 13.22 | 12.90 | 11.52 | 0.871 |
+| prod f32 full 1048576 | 20.41 | 17.12 | 15.42 | 0.756 |
+| max f32 full 1048576 | 14.24 | 13.47 | 11.97 | 0.841 |
+| min f32 full 1048576 | 13.79 | 13.44 | 12.38 | 0.898 |
+| sum f64 full 1048576 | 13.63 | 13.09 | 12.22 | 0.897 |
+| prod f64 full 1048576 | 20.54 | 18.91 | 17.92 | 0.872 |
+| max f64 full 1048576 | 14.69 | 13.86 | 13.41 | 0.913 |
+| min f64 full 1048576 | 14.40 | 13.92 | 13.38 | 0.929 |
+| sum_squares f32 full 1048576 | 12.45 | 12.13 | 11.36 | 0.912 |
+| sum f32 full 1000000 | 12.42 | 12.67 | 11.23 | 0.904 |
+| sum f32 axis 512 | 13.92 | 14.21 | 13.22 | 0.950 |
+| sum f32 axis 513 | 14.24 | 14.79 | 13.70 | 0.962 |
+| sum f32 axis 600 | 13.92 | 14.30 | 13.31 | 0.956 |
+| max f32 4x131072 axis1 | 12.13 | 10.75 | 10.78 | 0.889 |
+| sum f32 4096sq axis0 | 65.06 | 62.94 | 65.18 | 1.002 |
+| sum f32 4096sq axis1 | 194.88 | 192.48 | 192.93 | 0.990 |
+| sum f64 4096sq axis0 | 82.69 | 85.32 | 84.61 | 1.023 |
+| sum c64 4096sq axis0 | 160.51 | 159.97 | 160.48 | 1.000 |
+| max i32 4096sq axis0 | 66.72 | 63.84 | 64.74 | 0.970 |
+| sum f32 full 10000000 | 35.23 | 35.62 | 35.42 | 1.005 |
+| sum f32 full 16777216 | 50.46 | 50.11 | 49.98 | 0.990 |
+| sum f64 full 16777216 | 88.45 | 88.32 | 88.74 | 1.003 |
+| prod f32 full 16777216 | 72.70 | 69.25 | 69.34 | 0.954 |
+| prod f64 full 16777216 | 102.31 | 100.16 | 101.06 | 0.988 |
+| max f32 full 16777216 | 52.03 | 51.04 | 51.23 | 0.985 |
+| min f64 full 16777216 | 89.54 | 91.46 | 89.95 | 1.005 |
+
+Every case is at or below the 1.03 control gate. `f64 4096sq axis0` (1.023) does not use
+multi-warp blocks; #29 alone is 1.032 there.
+
+End to end (host µs per call, paired campaign `ab7395c` against `f21234e`, 3 warm-up + 15
+repetitions alternating AB/BA, measured processes on CPUs 24-31, which is one L3 domain,
+because CPUs 0-7 were busy with another user's work; `campaign/table.md`). Selected rows:
+
+| case | base µs | this µs | ratio |
+|---|---:|---:|---:|
+| sum f32 full 1048576 | 14.734 | 13.044 | 0.885 |
+| prod f32 full 1048576 | 21.789 | 17.077 | 0.784 |
+| sum f64 full 1048576 | 15.321 | 13.154 | 0.859 |
+| sum f32 axis 513 | 15.453 | 14.789 | 0.957 |
+| sum f32 4096sq axis0 | 65.138 | 66.162 | 1.016 |
+| sum f32 4096sq axis1 | 193.568 | 195.469 | 1.010 |
+| max i32 4096sq axis0 | 65.202 | 64.488 | 0.989 |
+| sum f64 4096sq axis0 | 93.387 | 94.476 | 1.012 |
+| sum f32 full 10000000 | 39.919 | 40.633 | 1.018 |
+
+All 29 cases are at or below 1.03; the highest is 1.018.
+
+## Occupancy and the probe
+
+Pass 1 uses 54 registers per thread, so an SM holds at most 36 of its warps. Without a
+block limit, 4-warp blocks raise the resident warps per SM from 32 (the 32-block limit) to
+36. `ncu` could not be run: the driver has `RmProfilingAdminOnly: 1`, so the counters
+(`sm__warps_active` and others) need admin rights we do not have.
+
+As a substitute, a copy of the kernel records `clock64()` at start and end of every warp,
+and `%smid` (`probe/`; the clocks are SM-local, so only comparisons within one SM are made).
+It ran 20 launches per case:
+
+| case | planes | SM span (clk, median) | mean active warps/SM | slot time held by finished warps | span with < half-peak warps active |
+|---|---:|---:|---:|---:|---:|
+| full 1M (4096 cubes, chunk 256) | 1 | 6658 | 15.7 | 0.0 % | 48.6 % |
+| full 1M | 4 | 5014 | 24.0 | 2.4 % | 35.4 % |
+| 4096sq axis0 (65536 cubes, chunk 256) | 1 | 87276 | 22.6 | 0.0 % | 5.7 % |
+| 4096sq axis0 | 4 | 82272 | 25.4 | 3.8 % | 4.2 % |
+| full 16M (4096 cubes, chunk 4096) | 1 | 51358 | 30.2 | 0.0 % | 3.7 % |
+| full 16M | 4 | 55720 | 34.9 | 0.2 % | 2.3 % |
+
+On the 1M case, one-warp blocks leave the SM below half its peak warps for about half the
+span (the second-wave tail), and 4-warp blocks shorten the span by 25 %. The hypothesis that
+4-warp blocks lose on many cubes by holding slots after their warps finish is **not
+confirmed**: those slots are 3.8 % of the slot time, and the probe's 4-warp run is shorter.
+The probe kernel is the `a029e80` copy (64-bit divide), in both arms.

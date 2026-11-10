@@ -68,8 +68,12 @@ jobs:
           # MEMBER), so the accounts that may satisfy the gate are listed explicitly: the accounts that run
           # `scripts/gpt_review.sh` against this repository. Add a maintainer here when one starts reviewing.
           allowed=$(printf '%s' "$TRUSTED_REVIEWERS" | tr ',' '\n' | jq -R . | jq -s .)
-          reviews=$(gh api --paginate "repos/$REPO/issues/$NUMBER/comments" \
-            --jq --argjson allowed "$allowed" '.[] | select(([.user.login] | inside($allowed)) and (.body | contains("gpt-6.1-sol adversarial review"))) | .body' || true)
+          # `gh api --jq` takes only the filter, so `--argjson` has to go to `jq` through a pipe: passing it to
+          # `gh api` fails the whole call and the old `|| true` turned that into "no review" (found in review of
+          # 65f18b2). A failed query now fails the gate instead of reporting a missing review.
+          pages=$(gh api --paginate --slurp "repos/$REPO/issues/$NUMBER/comments?per_page=100")
+          reviews=$(printf '%s' "$pages" | jq -r --argjson allowed "$allowed" \
+            '.[][] | select(([.user.login] | inside($allowed)) and (.body | contains("gpt-6.1-sol adversarial review"))) | .body')
           count=$(printf '%s' "$reviews" | grep -c 'gpt-6.1-sol adversarial review' || true)
           echo "trusted review comments carrying the marker: $count"
 

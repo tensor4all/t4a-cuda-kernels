@@ -2,9 +2,8 @@ name: gpt review gate
 
 # A PR cannot merge until an adversarial review exists for its *current* head.
 #
-# Why a workflow and not a rule: `merge_guard.py` lives in one agent's habits, and on 2026-11-10 a parallel lane ran
-# `gh pr merge` seven seconds before that agent's review landed (t4a-cuda-kernels#31: merged 09:25:02Z, review
-# 09:25:09Z). A habit does not bind a second writer; a required status check does.
+# Why a workflow and not a rule: `merge_guard.py` lives in one agent's habits, so a second writer can merge while
+# that agent is still producing the review. A required status check binds every writer, whatever it remembers.
 #
 # What it reads: the marker the review tool writes (`<!-- gpt-6.1-sol adversarial review ... -->`) and the
 # `_Reviewed head: `<sha>`` line that pins the review to a commit. A review of an older head does not count — that is
@@ -57,6 +56,14 @@ jobs:
           head=$(gh api "repos/$REPO/pulls/$NUMBER" --jq .head.sha)
           draft=$(gh api "repos/$REPO/pulls/$NUMBER" --jq .draft)
           echo "head=$head draft=$draft"
+
+          # Invalidate any earlier success on this head *before* reading anything. If a query below fails, `set -e`
+          # exits before the final POST, and without this line the previous `success` would stay on the head (review
+          # of c7774a6). `pending` also blocks a merge, so an abandoned run cannot leave an approval behind.
+          gh api -X POST "repos/$REPO/statuses/$head" \
+            -f state=pending -f context="gpt review gate" \
+            -f description="evaluating ${head:0:8}" \
+            -f target_url="https://github.com/$REPO/actions/runs/$GITHUB_RUN_ID" >/dev/null
 
           # Every review comment, oldest first; keep the marker and the head it pinned.
           # Only comments written by someone with write access can satisfy the gate: the marker is plain text,

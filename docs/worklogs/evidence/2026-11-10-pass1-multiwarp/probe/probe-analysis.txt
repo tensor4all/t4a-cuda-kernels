@@ -1,0 +1,12 @@
+# 16M cubes=4096 chunk=4096 planes=1 grid=4096 block=32
+  SMs 108  warps/SM med 32.0  SM span med 51358 clk max 59922  warp dur med 41929 clk  mean active warps/SM med 30.2 (peak med 32.0)  slot time held by finished warps 0.0%  span with < half-peak active 3.7%
+# 16M cubes=4096 chunk=4096 planes=4 grid=1024 block=128
+  SMs 108  warps/SM med 36.0  SM span med 55720 clk max 61618  warp dur med 51194 clk  mean active warps/SM med 34.9 (peak med 36.0)  slot time held by finished warps 0.2%  span with < half-peak active 2.3%
+# full1M cubes=4096 chunk=256 planes=1 grid=4096 block=32
+  SMs 108  warps/SM med 38.0  SM span med 6658 clk max 8055  warp dur med 2815 clk  mean active warps/SM med 15.7 (peak med 31.0)  slot time held by finished warps 0.0%  span with < half-peak active 48.6%
+# full1M cubes=4096 chunk=256 planes=4 grid=1024 block=128
+  SMs 108  warps/SM med 36.0  SM span med 5014 clk max 6691  warp dur med 3246 clk  mean active warps/SM med 24.0 (peak med 36.0)  slot time held by finished warps 2.4%  span with < half-peak active 35.4%
+# sq cubes=65536 chunk=256 planes=1 grid=65536 block=32
+  SMs 108  warps/SM med 608.5  SM span med 87276 clk max 87741  warp dur med 3201 clk  mean active warps/SM med 22.6 (peak med 32.0)  slot time held by finished warps 0.0%  span with < half-peak active 5.7%
+# sq cubes=65536 chunk=256 planes=4 grid=16384 block=128
+  SMs 108  warps/SM med 608.0  SM span med 82272 clk max 82869  warp dur med 3361 clk  mean active warps/SM med 25.4 (peak med 36.0)  slot time held by finished warps 3.8%  span with < half-peak active 4.2%

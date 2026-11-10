@@ -1,0 +1,19 @@
+### mutant pass1-lane-not-per-warp: exit 101
+
+running 1 test
+test split_reductions_match_the_ab7395c_golden_bit_for_bit ... FAILED
+
+failures:
+
+failures:
+    split_reductions_match_the_ab7395c_golden_bit_for_bit
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.43s
+
+    Finished `release` profile [optimized] target(s) in 0.46s
+     Running tests/gpu_reduce_golden.rs (target/release/deps/gpu_reduce_golden-4669d4edb28852df)
+
+thread 'split_reductions_match_the_ab7395c_golden_bit_for_bit' (4107925) panicked at tests/gpu_reduce_golden.rs:444:9:
+n1048576: partial 1 was never written
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+error: test failed, to rerun pass `--test gpu_reduce_golden`

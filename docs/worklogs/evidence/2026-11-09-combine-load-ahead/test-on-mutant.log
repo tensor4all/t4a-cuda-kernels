@@ -1,0 +1,39 @@
+### mutant 1: steady-state batch folded in reverse (all ops)
+301c301
+<     for (int b = 0; b < B; ++b) {
+---
+>     for (int b = B - 1; b >= 0; --b) {
+test combine_inputs_exercise_every_special_class ... ok
+test combine_keeps_the_serial_lane_walk_bit_for_bit ... FAILED
+test wide_combine_matches_the_cpu_reference_for_each_dtype ... ok
+test wide_combine_folds_every_partial_for_every_wide_width ... ok
+
+--
+thread 'combine_keeps_the_serial_lane_walk_bit_for_bit' (3719448) panicked at tests/gpu_reduce.rs:3182:29:
+assertion `left == right` failed: F32 Max len 4096 lanes 32 AxisMajor general false pattern 9: got NaN, serial walk NaN
+--
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 26 filtered out; finished in 12.39s
+
+
+### mutant 2: only MAX/MIN fold the steady-state batch in reverse
+232a233,236
+> template <typename F> struct t4a_mutant_extremum { static constexpr bool value = false; };
+> template <> struct t4a_mutant_extremum<MaxFold> { static constexpr bool value = true; };
+> template <> struct t4a_mutant_extremum<MinFold> { static constexpr bool value = true; };
+> 
+301c305,306
+<     for (int b = 0; b < B; ++b) {
+---
+>     for (int i = 0; i < B; ++i) {
+>       const int b = t4a_mutant_extremum<Fold>::value ? B - 1 - i : i;
+test combine_inputs_exercise_every_special_class ... ok
+test combine_keeps_the_serial_lane_walk_bit_for_bit ... FAILED
+test wide_combine_matches_the_cpu_reference_for_each_dtype ... ok
+test wide_combine_folds_every_partial_for_every_wide_width ... ok
+
+--
+thread 'combine_keeps_the_serial_lane_walk_bit_for_bit' (3719833) panicked at tests/gpu_reduce.rs:3182:29:
+assertion `left == right` failed: F32 Max len 4096 lanes 32 AxisMajor general false pattern 9: got NaN, serial walk NaN
+--
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 26 filtered out; finished in 12.27s
+

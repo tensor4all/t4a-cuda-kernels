@@ -1,0 +1,32 @@
+     Running unittests src/lib.rs (target/release/deps/t4a_cuda_kernels-3aaff7def8a7f4a1)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/fusion.rs (target/release/deps/fusion-4a14477043ca0bd1)
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/gpu_convert.rs (target/release/deps/gpu_convert-4392506741bb0e57)
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.98s
+     Running tests/gpu_dynamic_rank.rs (target/release/deps/gpu_dynamic_rank-8969d43f58c80534)
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 97.22s
+     Running tests/gpu_elementwise.rs (target/release/deps/gpu_elementwise-ca9f651cf9077bed)
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.38s
+     Running tests/gpu_fusion.rs (target/release/deps/gpu_fusion-e9ee91a41ac117cd)
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.41s
+     Running tests/gpu_gather_scatter.rs (target/release/deps/gpu_gather_scatter-2aeb1ed94b8124c4)
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 67.43s
+     Running tests/gpu_kernels.rs (target/release/deps/gpu_kernels-1b1b5b0e2fcd6bd4)
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 42.88s
+     Running tests/gpu_linalg_aux.rs (target/release/deps/gpu_linalg_aux-2ae68dcedeaff2e7)
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.71s
+     Running tests/gpu_reduce.rs (target/release/deps/gpu_reduce-e2240c190517edf5)
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.37s
+     Running tests/gpu_remaining_families.rs (target/release/deps/gpu_remaining_families-8db3174fd80df4c4)
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 88.36s
+     Running tests/gpu_rrqr.rs (target/release/deps/gpu_rrqr-598ca18d5809ce1e)
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.54s
+     Running tests/gpu_slice_b.rs (target/release/deps/gpu_slice_b-9694ee6a6a75b3f5)
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 43.05s
+     Running tests/gpu_tril_dus.rs (target/release/deps/gpu_tril_dus-256649b464055367)
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.71s
+     Running tests/planning.rs (target/release/deps/planning-e278707fe5eb0a5a)
+test result: ok. 89 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+# exit 0

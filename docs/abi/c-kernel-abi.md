@@ -1,4 +1,4 @@
-# C kernel ABI (revision 13)
+# C kernel ABI (revision 14)
 
 Every entry is an `extern "C" __global__` CUDA function in `cuda/src/`. A caller
 loads the compiled module into its own context, looks the symbol up by the name
@@ -18,7 +18,7 @@ nothing, so the same text compiles under NVCC and NVRTC.
 
 ## Revision
 
-`T4A_CUDA_ABI_REVISION == 13`. Revision 2 added `t4a_cuda_axis_values` and the
+`T4A_CUDA_ABI_REVISION == 14`. Revision 2 added `t4a_cuda_axis_values` and the
 diagonal, windowing and validation-status entries; revision 3 added the reduction
 entries; revision 4 added gather and additive scatter; revision 5 added the dtype
 conversion entry; revision 6 added the elementwise, comparison and
@@ -34,7 +34,11 @@ revision 12 changes the *launch* contract of a split reduction's combine pass
 records the reassociation policy of `SUM`/`SUM_SQUARES`/`MAX`/`MIN`, with no new
 symbol, signature or struct; revision 13 fixes which elements a lane of split pass 1
 combines, and in what order, on a contiguous axis (the "Pass-1 lane assignment"
-section), with no new symbol, signature, struct or launch geometry.
+section), with no new symbol, signature, struct or launch geometry; revision 14 changes the
+*launch* contract of split pass 1 only: at `plane_width == 32` one block may carry several
+32-lane planes (the facade plans that only for few, short cubes), one `(output, split)` per warp, with each warp's lane assignment and fold
+exactly those of revision 13, so every partial is bit-identical. No new symbol, signature or
+struct, and a revision-13 launch (one plane per block) still computes the same partials.
 **Nothing in revisions 1-10 changed** — the 88 existing symbols, their signatures
 and the nine existing struct layouts are identical. Any
 change to a struct layout, an entry signature, an element type
@@ -278,8 +282,8 @@ Semantics:
   `__syncthreads()` follows, and lanes `0..warps` of warp 0 fold those results with
   mask `(1 << warps) - 1`. The partials axis is never split a second time, so the
   combine pass still folds the whole partials axis per output.
-- **Split pass 1** runs one block per `(output, split)` with
-  `cube = output_index * splits + split`, reduces the half-open axis range
+- **Split pass 1** runs one plane per `(output, split)` with
+  `cube = output_index * splits + split` (block geometry: next item), reduces the half-open axis range
   `[split*chunk_len, end)` with `end = axis_len` for the last split and
   `start + chunk_len` otherwise, and writes one partial at reduce-axis
   coordinate `split`. The partials layout keeps the output's non-axis extents and
@@ -287,6 +291,19 @@ Semantics:
   must hold at least one plane (`chunk_len >= plane_width`) and must be the floor
   split (`chunk_len == reduce_len / splits`), so every lane seeds inside its own
   slice; the last chunk absorbs `reduce_len % splits`.
+- **Split pass-1 block geometry (revision 14).** The block is one-dimensional. When
+  `blockDim.x <= 32` it is one plane of `blockDim.x` lanes and `cube = blockIdx.x`, as in
+  revision 13. When `blockDim.x` is 64, 128 or 256 it holds `blockDim.x / 32` planes of 32
+  lanes: thread `i` is lane `i % 32` of plane `i / 32`, and that plane reduces cube
+  `blockIdx.x * (blockDim.x / 32) + i / 32`. A plane whose cube is
+  `>= output_len * splits` returns as a whole warp. Planes never share data (the plane fold
+  is warp shuffles, there is no shared memory and no barrier), so the partial of every cube
+  is the revision-13 partial bit for bit. The facade returns
+  `block = (32 * PARTIALS_PLANES_PER_BLOCK, 1, 1)` and
+  `grid = ceil(output_len * splits / PARTIALS_PLANES_PER_BLOCK)` only for 32-lane planes
+  with `output_len * splits <= PARTIALS_MULTIWARP_MAX_CUBES` (8192) and
+  `chunk_len <= PARTIALS_MULTIWARP_MAX_CHUNK` (1024). Otherwise it returns the revision-13
+  geometry `block = (plane_width, 1, 1)`, `grid = output_len * splits`.
 - **Pass 2** is `t4a_cuda_reduce` over the partials, with `SUM` when pass 1 was
   `SUM_SQUARES` and the same op otherwise, and is never split again.
 - **Pass-1 lane assignment (revision 13).** `W` is the block width (`plane_width`)
@@ -344,8 +361,8 @@ Semantics:
   lane and across the plane, so a NaN anywhere in the axis yields NaN. The NaN
   payload is not part of the contract; only "is NaN" is.
 - **Launch geometry.** Unit: `grid = ceil(output_len/plane_width)`. Plane:
-  `grid = output_len`. Pass 1: `grid = output_len * splits`, `block =
-  plane_width`. Pass 2 is whatever `ReductionPlan` reports — that is `Unit` with
+  `grid = output_len`. Pass 1: see "Split pass-1 block geometry (revision 14)"; a
+  revision-13 caller's `grid = output_len * splits`, `block = plane_width` stays valid. Pass 2 is whatever `ReductionPlan` reports — that is `Unit` with
   `grid = ceil(output_len/plane_width)` for a short partials axis (two partials,
   for example) and `Plane` otherwise — and its block is `plane_width`, or
   `64..512` for the wide combine of revision 12. A caller must launch the
@@ -1026,7 +1043,7 @@ identical.
 | --- | --- | --- | --- |
 | flat entries | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |
 | revision 11 (`tril_view`, `triu_view`, `dynamic_update_slice`) | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |
-| reductions | see the revision-3 section | `(plane_width, 1, 1)`, or `(64..512, 1, 1)` for a split reduction's combine pass (revision 12) | 0 for the baseline geometries; the wide combine block allocates 16 accumulators of the element type as static shared memory (≤ 256 B for `C64`) |
+| reductions | see the revision-3 section | `(plane_width, 1, 1)`, or `(64..512, 1, 1)` for a split reduction's combine pass (revision 12), or `(32 * PARTIALS_PLANES_PER_BLOCK, 1, 1)` for split pass 1 with 32-lane planes, at most 8192 cubes and chunks of at most 1024 (revision 14) | 0 for the baseline geometries; the wide combine block allocates 16 accumulators of the element type as static shared memory (≤ 256 B for `C64`) |
 | gather / scatter add / convert | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |
 | unary / binary / compare / select / clamp / combined strided | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |
 | revision 7 linalg auxiliaries | `(ceil(domain/256), 1, 1)` | `(256, 1, 1)` | 0 |

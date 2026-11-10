@@ -1,0 +1,6 @@
+Preparing worktree (detached HEAD ab7395c)
+symbols present in both trees: 94
+identical: 92
+added by this branch: 0
+DIFFERS  reduce.txt: t4a_cuda_reduce -- SASS differs
+DIFFERS  reduce.txt: t4a_cuda_reduce_any -- SASS differs

@@ -1,0 +1,114 @@
+# Old-vs-new byte comparison of t4a_cuda_reduce / t4a_cuda_reduce_any (strategy PLANE).
+# A100 80GB PCIe, driver 580.178.04, CUDA 12.6 (V12.6.85). Cubins:
+#   old.cubin    = nvcc -std=c++17 -cubin -arch=sm_80 -I cuda/include  ab7395c:cuda/src/reduce.cu
+#   new.cubin    = the same on this branch's cuda/src/reduce.cu
+#   mutant.cubin = this branch with the steady-state batch folded in reverse (all ops);
+#   mutant-extrema.cubin = the same for MAX/MIN only
+#                  (`for (int b = B - 1; b >= 0; --b)` in the second fold loop): the fail path.
+# $ g++ -O2 -std=c++17 -I/usr/local/cuda-12.6/include combine-old-vs-new.cpp \
+#       -L/usr/local/cuda-12.6/lib64/stubs -lcuda -o combine-old-vs-new
+# $ ./combine-old-vs-new old.cubin new.cubin   (then old/old, old/mutant, old/mutant-extrema)
+# Per route: 15 geometries x 3 layouts (axis-major, strided, reversed) x 2 entries x 48 outputs.
+# Exit 0: all compared, no value/nanness difference; 1: a value/nanness difference; 2: CUDA
+# failure or incomplete comparison. "payload-only" = both NaN, different bits (outside the ABI
+# Payload differences are tolerated only on F64/C64 SUM/PROD/SUM_SQUARES; elsewhere they count as payload-violation (a failure). Counts are outputs.
+### old vs new
+F32  SUM          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+F64  SUM          outputs   4320  value 0  nanness 0  payload-only 340  payload-violation 0
+I32  SUM          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+I64  SUM          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+C32  SUM          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+C64  SUM          outputs   4320  value 0  nanness 0  payload-only 462  payload-violation 0
+F32  PROD         outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+F64  PROD         outputs   4320  value 0  nanness 0  payload-only 370  payload-violation 0
+I32  PROD         outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+I64  PROD         outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+C32  PROD         outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+C64  PROD         outputs   4320  value 0  nanness 0  payload-only 206  payload-violation 0
+F32  SUM_SQUARES  outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+F64  SUM_SQUARES  outputs   4320  value 0  nanness 0  payload-only 104  payload-violation 0
+F32  MAX          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+F64  MAX          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+I32  MAX          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+I64  MAX          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+F32  MIN          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+F64  MIN          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+I32  MIN          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+I64  MIN          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+total outputs 95040 (planned 95040)  value 0  nanness 0  payload-only 1482  payload-violation 0
+# exit 0
+### old vs old
+F32  SUM          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+F64  SUM          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+I32  SUM          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+I64  SUM          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+C32  SUM          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+C64  SUM          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+F32  PROD         outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+F64  PROD         outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+I32  PROD         outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+I64  PROD         outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+C32  PROD         outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+C64  PROD         outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+F32  SUM_SQUARES  outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+F64  SUM_SQUARES  outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+F32  MAX          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+F64  MAX          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+I32  MAX          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+I64  MAX          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+F32  MIN          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+F64  MIN          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+I32  MIN          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+I64  MIN          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+total outputs 95040 (planned 95040)  value 0  nanness 0  payload-only 0  payload-violation 0
+# exit 0
+### old vs mutant
+F32  SUM          outputs   4320  value 84  nanness 2  payload-only 0  payload-violation 0
+F64  SUM          outputs   4320  value 170  nanness 0  payload-only 336  payload-violation 0
+I32  SUM          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+I64  SUM          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+C32  SUM          outputs   4320  value 360  nanness 6  payload-only 0  payload-violation 0
+C64  SUM          outputs   4320  value 398  nanness 10  payload-only 432  payload-violation 0
+F32  PROD         outputs   4320  value 184  nanness 2  payload-only 0  payload-violation 0
+F64  PROD         outputs   4320  value 338  nanness 6  payload-only 366  payload-violation 0
+I32  PROD         outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+I64  PROD         outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+C32  PROD         outputs   4320  value 48  nanness 0  payload-only 0  payload-violation 0
+C64  PROD         outputs   4320  value 194  nanness 0  payload-only 242  payload-violation 0
+F32  SUM_SQUARES  outputs   4320  value 82  nanness 0  payload-only 0  payload-violation 0
+F64  SUM_SQUARES  outputs   4320  value 86  nanness 0  payload-only 148  payload-violation 0
+F32  MAX          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 48
+F64  MAX          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 46
+I32  MAX          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+I64  MAX          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+F32  MIN          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 48
+F64  MIN          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 44
+I32  MIN          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+I64  MIN          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+total outputs 95040 (planned 95040)  value 1944  nanness 26  payload-only 1524  payload-violation 186
+# exit 1
+### old vs mutant-extrema
+F32  SUM          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+F64  SUM          outputs   4320  value 0  nanness 0  payload-only 340  payload-violation 0
+I32  SUM          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+I64  SUM          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+C32  SUM          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+C64  SUM          outputs   4320  value 0  nanness 0  payload-only 462  payload-violation 0
+F32  PROD         outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+F64  PROD         outputs   4320  value 0  nanness 0  payload-only 370  payload-violation 0
+I32  PROD         outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+I64  PROD         outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+C32  PROD         outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+C64  PROD         outputs   4320  value 0  nanness 0  payload-only 206  payload-violation 0
+F32  SUM_SQUARES  outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+F64  SUM_SQUARES  outputs   4320  value 0  nanness 0  payload-only 104  payload-violation 0
+F32  MAX          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 48
+F64  MAX          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 46
+I32  MAX          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+I64  MAX          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+F32  MIN          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 48
+F64  MIN          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 44
+I32  MIN          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+I64  MIN          outputs   4320  value 0  nanness 0  payload-only 0  payload-violation 0
+total outputs 95040 (planned 95040)  value 0  nanness 0  payload-only 1482  payload-violation 186
+# exit 1

@@ -1,0 +1,16 @@
+# ptxas resource usage of cuda/src/reduce.cu, CUDA 12.6 (V12.6.85); spill/stack lines summarized per tree
+# $ nvcc -std=c++17 -cubin -arch=sm_80 -I cuda/include --ptxas-options=-v -o /dev/null cuda/src/reduce.cu
+
+## base ab7395c
+'t4a_cuda_reduce_partials_any' Used 54 registers, used 0 barriers, 472 bytes cmem[0], 56 bytes cmem[2]
+'t4a_cuda_reduce_any' Used 43 registers, used 1 barriers, 2496 bytes smem, 464 bytes cmem[0], 56 bytes cmem[2]
+'t4a_cuda_reduce_partials' Used 54 registers, used 0 barriers, 696 bytes cmem[0], 72 bytes cmem[2]
+'t4a_cuda_reduce' Used 40 registers, used 1 barriers, 2496 bytes smem, 688 bytes cmem[0], 80 bytes cmem[2]
+stack/spill lines: 104, of which all-zero: 104
+
+## this branch
+'t4a_cuda_reduce_partials_any' Used 54 registers, used 0 barriers, 472 bytes cmem[0], 56 bytes cmem[2]
+'t4a_cuda_reduce_any' Used 61 registers, used 1 barriers, 2496 bytes smem, 464 bytes cmem[0], 56 bytes cmem[2]
+'t4a_cuda_reduce_partials' Used 54 registers, used 0 barriers, 696 bytes cmem[0], 72 bytes cmem[2]
+'t4a_cuda_reduce' Used 61 registers, used 1 barriers, 2496 bytes smem, 688 bytes cmem[0], 80 bytes cmem[2]
+stack/spill lines: 148, of which all-zero: 148

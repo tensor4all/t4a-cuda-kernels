@@ -1,0 +1,4 @@
+==PROF== Connected to process 428838 (/home/shinaoka/work/arms-30/cand-f21234e)
+==ERROR== ERR_NVGPUCTRPERM - The user does not have permission to access NVIDIA GPU Performance Counters on the target device 0. For instructions on enabling permissions and to get more information see https://developer.nvidia.com/ERR_NVGPUCTRPERM
+BENCH_META case=reduce-sum-f32-full-1048576 kernels=t4a_cuda_reduce_partials|t4a_cuda_reduce launches_per_iter=2 scratch_bytes=16384 host_waits_per_iter=0 transfer_bytes_per_iter=0 device_allocations_per_iter=0 zero_fills_per_iter=0 boundary_barriers=1 host_ns_per_op=336846.860 input_digest=0x31a804a0ea2b5c70 check=ok
+==PROF== Disconnected from process 428838

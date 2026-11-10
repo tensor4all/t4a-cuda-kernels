@@ -8,8 +8,8 @@ use gpu::{
     Buf, Session, Slot,
 };
 use t4a_cuda_kernels::{
-    plan_reduce, plan_reduce_partials, plan_reduction, split_policy, CLayout, DType, Layout,
-    ReduceOp, ReduceStrategy, ReductionPlan,
+    plan_reduce, plan_reduce_partials, plan_reduction, split_policy, CLayout, CLayoutAny, DType,
+    Layout, ReduceOp, ReduceStrategy, ReductionPlan,
 };
 
 const SENTINEL: u8 = 0xCD;
@@ -2597,4 +2597,640 @@ fn pass1_overflow_follows_the_revision_13_grouping() {
             "lead {lead}: cancelling groups give +0"
         );
     }
+}
+
+// --- Combine-pass serial walk, bit for bit (docs/design/slice-combine-load-ahead.md) -------
+//
+// The combine pass (`t4a_cuda_reduce`, strategy `PLANE`) may issue its loads ahead of the
+// folds, but must fold exactly as the serial walk does: lane `t` seeds from element `t` and
+// folds `t + k*W` in increasing `k`, then the xor tree combines the lanes (through shared
+// memory across warps for a block wider than one warp). The emulation below is that order in
+// IEEE arithmetic, with the device's NaN conventions:
+// - an f32 arithmetic NaN result is the canonical NaN;
+// - an f64 one keeps the payload of its NaN operand (quieted), or is the default NaN
+//   `0xfff8...` when neither operand is NaN. With two NaN operands the device keeps the second
+//   instruction operand's payload, and the instruction operand order is the compiler's choice,
+//   so the emulation's "accumulator first" is a convention, checked only where at most one NaN
+//   meets in a lane (`combine_bits_pinned`);
+// - the NaN-propagating extrema select an operand (payload kept, `lhs` first) and order
+//   `-0.0 < +0.0`.
+// The inputs are chosen so that a different order changes the bits: NaN payloads, infinities,
+// signed zeros, overflow and underflow mid-walk, subnormals.
+
+/// A floating element type of the combine emulation.
+trait CombineValue: Probe + PartialEq + std::fmt::Debug {
+    const CANONICAL_NAN_BITS: u64;
+    /// Whether an arithmetic NaN result keeps an operand's payload (f64) or is canonical (f32).
+    const KEEPS_PAYLOAD: bool;
+    const QUIET_BIT: u64;
+    fn bits(self) -> u64;
+    fn from_f64(value: f64) -> Self;
+    fn from_bits64(bits: u64) -> Self;
+    fn is_nan(self) -> bool;
+    fn is_zero(self) -> bool;
+    fn is_sign_positive(self) -> bool;
+    fn raw_add(self, other: Self) -> Self;
+    fn raw_mul(self, other: Self) -> Self;
+    fn less(self, other: Self) -> bool;
+    /// Largest finite value, smallest positive subnormal and the exponent range the
+    /// near-overflow inputs use.
+    fn max_finite() -> Self;
+    fn min_subnormal() -> Self;
+    fn max_exponent() -> i32;
+    /// NaN with a distinct payload per `tag` (sign bit set when `negative`).
+    fn payload_nan(tag: u64, negative: bool) -> Self;
+}
+
+impl CombineValue for f32 {
+    const CANONICAL_NAN_BITS: u64 = 0x7fff_ffff;
+    const KEEPS_PAYLOAD: bool = false;
+    const QUIET_BIT: u64 = 0x0040_0000;
+    fn bits(self) -> u64 {
+        u64::from(self.to_bits())
+    }
+    fn from_f64(value: f64) -> f32 {
+        value as f32
+    }
+    fn from_bits64(bits: u64) -> f32 {
+        f32::from_bits(bits as u32)
+    }
+    fn is_nan(self) -> bool {
+        f32::is_nan(self)
+    }
+    fn is_zero(self) -> bool {
+        self == 0.0
+    }
+    fn is_sign_positive(self) -> bool {
+        f32::is_sign_positive(self)
+    }
+    fn raw_add(self, other: f32) -> f32 {
+        self + other
+    }
+    fn raw_mul(self, other: f32) -> f32 {
+        self * other
+    }
+    fn less(self, other: f32) -> bool {
+        self < other
+    }
+    fn max_finite() -> f32 {
+        f32::MAX
+    }
+    fn min_subnormal() -> f32 {
+        f32::from_bits(1)
+    }
+    fn max_exponent() -> i32 {
+        127
+    }
+    fn payload_nan(tag: u64, negative: bool) -> f32 {
+        let sign = if negative { 0x8000_0000 } else { 0 };
+        f32::from_bits(sign | 0x7fc0_0000 | (0x1234 + tag as u32))
+    }
+}
+
+impl CombineValue for f64 {
+    const CANONICAL_NAN_BITS: u64 = 0xfff8_0000_0000_0000;
+    const KEEPS_PAYLOAD: bool = true;
+    const QUIET_BIT: u64 = 0x0008_0000_0000_0000;
+    fn bits(self) -> u64 {
+        self.to_bits()
+    }
+    fn from_f64(value: f64) -> f64 {
+        value
+    }
+    fn from_bits64(bits: u64) -> f64 {
+        f64::from_bits(bits)
+    }
+    fn is_nan(self) -> bool {
+        f64::is_nan(self)
+    }
+    fn is_zero(self) -> bool {
+        self == 0.0
+    }
+    fn is_sign_positive(self) -> bool {
+        f64::is_sign_positive(self)
+    }
+    fn raw_add(self, other: f64) -> f64 {
+        self + other
+    }
+    fn raw_mul(self, other: f64) -> f64 {
+        self * other
+    }
+    fn less(self, other: f64) -> bool {
+        self < other
+    }
+    fn max_finite() -> f64 {
+        f64::MAX
+    }
+    fn min_subnormal() -> f64 {
+        f64::from_bits(1)
+    }
+    fn max_exponent() -> i32 {
+        1023
+    }
+    fn payload_nan(tag: u64, negative: bool) -> f64 {
+        let sign = if negative { 1u64 << 63 } else { 0 };
+        f64::from_bits(sign | 0x7ff8_0000_0000_0000 | (0x1234_5678 + tag))
+    }
+}
+
+/// Arithmetic as the device rounds it: IEEE round-to-nearest; a NaN result is canonical (f32)
+/// or keeps a NaN operand's payload, quieted (f64; the default NaN when neither operand is NaN,
+/// as in `inf - inf`). For two f64 NaN operands this picks `lhs` by convention; see the section
+/// comment above.
+fn device_arith<T: CombineValue>(lhs: T, rhs: T, value: T) -> T {
+    if !value.is_nan() {
+        return value;
+    }
+    if T::KEEPS_PAYLOAD {
+        for operand in [lhs, rhs] {
+            if operand.is_nan() {
+                return T::from_bits64(operand.bits() | T::QUIET_BIT);
+            }
+        }
+    }
+    T::from_bits64(T::CANONICAL_NAN_BITS)
+}
+
+/// `t4a_cuda_nan_max`/`t4a_cuda_nan_min`: a NaN `lhs`, then a NaN `rhs`, else
+/// `fmax`/`fmin` with `-0.0 < +0.0`.
+fn device_extremum<T: CombineValue>(lhs: T, rhs: T, max: bool) -> T {
+    if lhs.is_nan() {
+        return lhs;
+    }
+    if rhs.is_nan() {
+        return rhs;
+    }
+    if lhs.is_zero() && rhs.is_zero() {
+        let positive = lhs.is_sign_positive() || rhs.is_sign_positive();
+        let negative = !lhs.is_sign_positive() || !rhs.is_sign_positive();
+        return match (max, positive, negative) {
+            (true, true, _) | (false, true, false) => T::from_f64(0.0),
+            _ => T::from_f64(-0.0),
+        };
+    }
+    if max == rhs.less(lhs) {
+        lhs
+    } else {
+        rhs
+    }
+}
+
+/// `SumSquaresFold::seed`: the square rounded once (`__fmaf_rn(x, x, 0)`).
+fn device_square<T: CombineValue>(value: T) -> T {
+    device_arith(value, value, value.raw_mul(value).raw_add(T::from_f64(0.0)))
+}
+
+/// `Fold::operator()`: the accumulator folds one more element.
+fn device_fold<T: CombineValue>(op: ReduceOp, acc: T, value: T) -> T {
+    match op {
+        ReduceOp::Sum => device_arith(acc, value, acc.raw_add(value)),
+        ReduceOp::Prod => device_arith(acc, value, acc.raw_mul(value)),
+        ReduceOp::SumSquares => {
+            let square = device_square(value);
+            device_arith(acc, square, acc.raw_add(square))
+        }
+        ReduceOp::Max => device_extremum(acc, value, true),
+        ReduceOp::Min => device_extremum(acc, value, false),
+    }
+}
+
+/// `Fold::combine`: two lane accumulators (sum of squares adds, it does not square again).
+fn device_combine<T: CombineValue>(op: ReduceOp, lhs: T, rhs: T) -> T {
+    match op {
+        ReduceOp::SumSquares => device_arith(lhs, rhs, lhs.raw_add(rhs)),
+        _ => device_fold(op, lhs, rhs),
+    }
+}
+
+/// The xor tree over `lanes` with offsets `1, 2, ... < width`: every lane combines its own
+/// value (left) with its partner's (right), as `t4a_cuda_plane_fold_narrow` does.
+fn device_xor_tree<T: CombineValue>(op: ReduceOp, mut lanes: Vec<T>, width: usize) -> Vec<T> {
+    let mut offset = 1;
+    while offset < width {
+        lanes = (0..lanes.len())
+            .map(|lane| device_combine(op, lanes[lane], lanes[lane ^ offset]))
+            .collect();
+        offset <<= 1;
+    }
+    lanes
+}
+
+/// The combine pass's result for one output: the serial lane walk over `axis`, then the
+/// plane fold of `t4a_cuda_plane_fold` (narrow, or wide through the per-warp results).
+fn combine_reference<T: CombineValue>(op: ReduceOp, axis: &[T], width: usize) -> T {
+    let lanes: Vec<T> = (0..width)
+        .map(|lane| {
+            let seed = axis[lane];
+            let mut acc = if op == ReduceOp::SumSquares {
+                device_square(seed)
+            } else {
+                seed
+            };
+            let mut index = lane + width;
+            while index < axis.len() {
+                acc = device_fold(op, acc, axis[index]);
+                index += width;
+            }
+            acc
+        })
+        .collect();
+    if width <= 32 {
+        return device_xor_tree(op, lanes, width)[0];
+    }
+    let warps = width / 32;
+    let warp_results: Vec<T> = lanes
+        .chunks(32)
+        .map(|warp| device_xor_tree(op, warp.to_vec(), 32)[0])
+        .collect();
+    device_xor_tree(op, warp_results, warps)[0]
+}
+
+/// A deterministic hash in `[0, 1)` of `(column, index)`.
+fn unit_hash(column: usize, index: usize) -> f64 {
+    let mut state = (column as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        ^ (index as u64).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    state ^= state >> 31;
+    state = state.wrapping_mul(0x94d0_49bb_1331_11eb);
+    state ^= state >> 29;
+    (state >> 11) as f64 / (1u64 << 53) as f64
+}
+
+/// Number of input patterns, one per output of a launch.
+const COMBINE_PATTERNS: usize = 11;
+
+/// Element `index` of an axis of `len` under input pattern `column`.
+fn combine_input<T: CombineValue>(column: usize, index: usize, len: usize, width: usize) -> T {
+    let h = unit_hash(column, index);
+    // Near 1 with an occasional tiny addend: the sum's rounding depends on the order, the
+    // product stays finite.
+    let rounding = 1.0 + (h - 0.5) * 2f64.powi(-7);
+    let base = if index % 7 == 3 {
+        T::from_f64(rounding * 2f64.powi(-30))
+    } else {
+        T::from_f64(rounding)
+    };
+    match column {
+        0 => base,
+        // NaNs with distinct payloads meeting inside lane 7's walk: its seed and its elements
+        // 1 and 3.
+        1 => match index {
+            7 => T::payload_nan(1, false),
+            _ if index == width + 7 => T::payload_nan(2, false),
+            _ if index == 3 * width + 7 => T::payload_nan(3, true),
+            _ => base,
+        },
+        // Both infinities and a zero: the sum is NaN, the product is NaN (`inf * 0`).
+        2 => match index {
+            7 => T::from_f64(f64::INFINITY),
+            11 => T::from_f64(0.0),
+            _ if index == len - 2 => T::from_f64(f64::NEG_INFINITY),
+            _ => base,
+        },
+        // Negative zeros only: the sum stays -0.0, the product's sign is the count's parity.
+        3 => T::from_f64(-0.0),
+        // Mixed signed zeros.
+        4 => T::from_f64(if h < 0.5 { -0.0 } else { 0.0 }),
+        // Near-overflow magnitudes with random signs: partial sums overflow or not depending
+        // on the order.
+        5 => {
+            let magnitude = T::max_finite();
+            let scale = T::from_f64((0.5 + h * 0.5) / 16.0);
+            let value = magnitude.raw_mul(scale);
+            if unit_hash(column + 100, index) < 0.5 {
+                value.raw_mul(T::from_f64(-1.0))
+            } else {
+                value
+            }
+        }
+        // Wide random exponents: partial products overflow to inf or underflow to zero
+        // depending on the order (and `inf * 0` makes NaN).
+        6 => {
+            let span = f64::from(T::max_exponent() / 5);
+            let exponent = ((h - 0.5) * 2.0 * span).round() as i32;
+            let mantissa = 1.0 + unit_hash(column + 200, index);
+            T::from_f64(mantissa * 2f64.powi(exponent))
+        }
+        // A single NaN with a payload, in lane 5's second element: one NaN operand, so its
+        // payload (quieted) is the result whatever the operand order of the folds.
+        8 => {
+            if index == width + 5 {
+                T::payload_nan(4, true)
+            } else {
+                base
+            }
+        }
+        // Two NaNs after a finite seed, alone in their output so the xor tree cannot mask them:
+        // lane 11's elements 17 and 18 (pattern 9: one steady-state batch for both the
+        // 16-element F32 and the 8-element F64 batch) or lane 9's elements 1 and 2 (pattern
+        // 10: the first batch). The extrema keep the first NaN in fold order, so their bits
+        // pin the order of the folds inside a batch.
+        9 | 10 => {
+            let (lane, first) = if column == 9 { (11, 17) } else { (9, 1) };
+            match index {
+                _ if index == first * width + lane => T::payload_nan(5 + column as u64, false),
+                _ if index == (first + 1) * width + lane => T::payload_nan(7 + column as u64, true),
+                _ => base,
+            }
+        }
+        // Subnormals of both signs: the sum and the extrema stay subnormal, the product
+        // underflows to a signed zero.
+        7 => {
+            let value = T::min_subnormal().raw_mul(T::from_f64((1 + index % 97) as f64));
+            if h < 0.5 {
+                value.raw_mul(T::from_f64(-1.0))
+            } else {
+                value
+            }
+        }
+        _ => unreachable!("{column} is not an input pattern"),
+    }
+}
+
+/// How the `COMBINE_PATTERNS` reduced axes sit in memory.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum CombineLayout {
+    /// `[len, outputs]`, the reduced axis contiguous (the partials of a full reduction).
+    AxisMajor,
+    /// `[outputs, len]` reduced over axis 1: the reduced axis has stride `outputs`.
+    Strided,
+    /// `[len, outputs]` with axis stride -1 from offset `len - 1`: element `k` of output `o`
+    /// sits at `(len - 1 - k) + o * len`.
+    Reversed,
+    /// `[len, outputs]` with axis stride 0: one element per output, read `len` times.
+    Broadcast,
+}
+
+/// The input layout, the reduced axis and the host buffer holding `axes` under `kind`.
+fn combine_operand<T: CombineValue>(
+    axes: &[Vec<T>],
+    kind: CombineLayout,
+) -> (Layout, usize, Vec<T>) {
+    let outputs = axes.len();
+    let n = axes[0].len();
+    let (len, count) = (n as i64, outputs as i64);
+    match kind {
+        CombineLayout::AxisMajor => (
+            Layout::compact(&[len, count]).unwrap(),
+            0,
+            (0..n * outputs)
+                .map(|flat| axes[flat / n][flat % n])
+                .collect(),
+        ),
+        CombineLayout::Strided => (
+            Layout::compact(&[count, len]).unwrap(),
+            1,
+            (0..n * outputs)
+                .map(|flat| axes[flat % outputs][flat / outputs])
+                .collect(),
+        ),
+        CombineLayout::Reversed => (
+            Layout::new(&[len, count], &[-1, len], len - 1).unwrap(),
+            0,
+            (0..n * outputs)
+                .map(|flat| axes[flat / n][n - 1 - flat % n])
+                .collect(),
+        ),
+        CombineLayout::Broadcast => (
+            Layout::new(&[len, count], &[0, 1], 0).unwrap(),
+            0,
+            axes.iter().map(|axis| axis[0]).collect(),
+        ),
+    }
+}
+
+/// Launch the combine entry (`t4a_cuda_reduce` or `t4a_cuda_reduce_any`) with strategy
+/// `PLANE` and `width` lanes over the outputs of `in_layout` reduced along `axis`, and return
+/// the outputs.
+#[allow(clippy::too_many_arguments)]
+fn run_combine<T: CombineValue>(
+    session: &Session,
+    host: &[T],
+    in_layout: &Layout,
+    axis: usize,
+    width: u32,
+    op: ReduceOp,
+    general: bool,
+) -> Vec<T> {
+    let mut out_extents = in_layout.extents().to_vec();
+    let len = out_extents[axis];
+    out_extents[axis] = 1;
+    let out_layout = Layout::compact(&out_extents).unwrap();
+    let outputs = out_layout.element_count().unwrap();
+    let plan = plan_reduce(
+        T::DTYPE,
+        op,
+        ReduceStrategy::Plane,
+        &out_layout,
+        outputs,
+        in_layout,
+        len * outputs,
+        axis as u32,
+        width,
+    )
+    .unwrap();
+    assert_eq!(plan.block, [width, 1, 1]);
+    assert_eq!(plan.grid, [outputs as u32, 1, 1]);
+    let src = upload(session, host);
+    let dst = sentinel(session, outputs as usize * std::mem::size_of::<T>());
+    if general {
+        let geometry = [
+            upload(session, out_layout.extents()),
+            upload(session, out_layout.strides()),
+            upload(session, in_layout.extents()),
+            upload(session, in_layout.strides()),
+        ];
+        let out_any = CLayoutAny::new(
+            out_layout.as_ref(),
+            geometry[0].as_ptr(),
+            geometry[1].as_ptr(),
+        )
+        .unwrap();
+        let in_any = CLayoutAny::new(
+            in_layout.as_ref(),
+            geometry[2].as_ptr(),
+            geometry[3].as_ptr(),
+        )
+        .unwrap();
+        let mut slots = [
+            Slot::ptr(&dst),
+            Slot::ptr(&src),
+            Slot::i32(T::DTYPE.tag()),
+            Slot::i32(op.tag()),
+            Slot::i32(ReduceStrategy::Plane.tag()),
+            Slot::layout_any(&out_any),
+            Slot::layout_any(&in_any),
+            Slot::i32(axis as i32),
+            Slot::i64(outputs),
+        ];
+        launch(
+            session.function("t4a_cuda_reduce_any"),
+            &plan,
+            session.stream(),
+            &mut slots,
+        );
+    } else {
+        let out_c = CLayout::new(&out_layout);
+        let in_c = CLayout::new(in_layout);
+        let mut slots = reduce_slots(
+            &dst,
+            &src,
+            T::DTYPE,
+            op,
+            ReduceStrategy::Plane,
+            &out_c,
+            &in_c,
+            axis as i32,
+            outputs,
+        );
+        launch(
+            session.function("t4a_cuda_reduce"),
+            &plan,
+            session.stream(),
+            &mut slots,
+        );
+    }
+    download::<T>(session, &dst, outputs as usize)
+}
+
+/// Whether the emulation pins `pattern`'s result bit for bit under `op` on a `len`-long axis of
+/// `width` lanes. The one exception: two distinct f64 NaN payloads actually meeting in one
+/// lane's `SUM`/`PROD`/`SUM_SQUARES` walk, i.e. both NaNs of pattern 1, 9 or 10 inside the axis
+/// (a shorter axis holds one NaN and stays bit-exact). An
+/// f64 add or multiply of two NaNs keeps one operand's payload, and which one is the
+/// compiler's choice of operand order per instruction: at `ab7395c` it already differs between
+/// the loop's remainder and unrolled iterations, so the same lane keeps a different payload
+/// at lengths 3001 and 4096. The ABI leaves the payload out of the contract
+/// (docs/abi/c-kernel-abi.md, "NaN"), so there only "is NaN" is checked. The extrema select
+/// their NaN in source order and stay bit-exact on that pattern too.
+fn combine_bits_pinned<T: CombineValue>(
+    op: ReduceOp,
+    pattern: usize,
+    len: i64,
+    width: u32,
+) -> bool {
+    let w = i64::from(width);
+    let second_nan = match pattern {
+        1 => w + 7,
+        9 => 18 * w + 11,
+        10 => 2 * w + 9,
+        _ => return true,
+    };
+    let collides = len > second_nan;
+    !collides || !T::KEEPS_PAYLOAD || matches!(op, ReduceOp::Max | ReduceOp::Min)
+}
+
+fn check_combine_serial_walk<T: CombineValue>(session: &Session) {
+    // (axis length, lanes): the planner's combine of 4096 partials (`PROD` on one warp, the
+    // others on 512 lanes), ragged partial counts, lanes holding only their seed
+    // (`axis_len == plane_width`) or one or two elements, and short direct-plane axes.
+    let geometries: [(i64, u32); 10] = [
+        (4_096, 32),
+        (4_096, 512),
+        (3_001, 32),
+        (3_001, 512),
+        (1_000, 128),
+        (513, 512),
+        (512, 512),
+        (511, 32),
+        (40, 32),
+        (32, 32),
+    ];
+    let ops = [
+        ReduceOp::Sum,
+        ReduceOp::Prod,
+        ReduceOp::Max,
+        ReduceOp::Min,
+        ReduceOp::SumSquares,
+    ];
+    let kinds = [
+        CombineLayout::AxisMajor,
+        CombineLayout::Strided,
+        CombineLayout::Reversed,
+        CombineLayout::Broadcast,
+    ];
+    let mut compared = 0usize;
+    for (len, width) in geometries {
+        let n = len as usize;
+        for kind in kinds {
+            let axes: Vec<Vec<T>> = (0..COMBINE_PATTERNS)
+                .map(|column| {
+                    let axis: Vec<T> = (0..n)
+                        .map(|index| combine_input::<T>(column, index, n, width as usize))
+                        .collect();
+                    if kind == CombineLayout::Broadcast {
+                        vec![axis[0]; n]
+                    } else {
+                        axis
+                    }
+                })
+                .collect();
+            let (in_layout, axis, host) = combine_operand(&axes, kind);
+            for op in ops {
+                let expected: Vec<T> = axes
+                    .iter()
+                    .map(|values| combine_reference(op, values, width as usize))
+                    .collect();
+                for general in [false, true] {
+                    let got = run_combine(session, &host, &in_layout, axis, width, op, general);
+                    for (pattern, (got, want)) in got.iter().zip(&expected).enumerate() {
+                        let context = format!(
+                            "{:?} {op:?} len {len} lanes {width} {kind:?} general {general} \
+                             pattern {pattern}: got {got:?}, serial walk {want:?}",
+                            T::DTYPE
+                        );
+                        if combine_bits_pinned::<T>(op, pattern, len, width) || !want.is_nan() {
+                            assert_eq!(got.bits(), want.bits(), "{context}");
+                        } else {
+                            assert!(got.is_nan() && want.is_nan(), "{context}");
+                        }
+                        compared += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(
+        compared,
+        geometries.len() * kinds.len() * ops.len() * 2 * COMBINE_PATTERNS
+    );
+}
+
+#[test]
+fn combine_keeps_the_serial_lane_walk_bit_for_bit() {
+    let session = Session::new("reduce");
+    check_combine_serial_walk::<f32>(&session);
+    check_combine_serial_walk::<f64>(&session);
+}
+
+#[test]
+fn combine_inputs_exercise_every_special_class() {
+    // The bit-for-bit test is only as strong as its inputs: make sure the emulated results
+    // actually contain each class the order can change.
+    let len = 4_096usize;
+    // NaN payload kept, canonical NaN, +-inf, -0.0, subnormal, an order-sensitive near-overflow
+    // sum (it differs from the left-to-right sum of the same values).
+    let mut seen = [false; 6];
+    for (op, width) in [
+        (ReduceOp::Sum, 512usize),
+        (ReduceOp::Prod, 32),
+        (ReduceOp::Max, 512),
+        (ReduceOp::Min, 512),
+    ] {
+        for column in 0..COMBINE_PATTERNS {
+            let axis: Vec<f64> = (0..len)
+                .map(|index| combine_input::<f64>(column, index, len, width))
+                .collect();
+            let result = combine_reference(op, &axis, width);
+            seen[0] |= result.is_nan() && result.to_bits() != f64::CANONICAL_NAN_BITS;
+            seen[1] |= result.to_bits() == f64::CANONICAL_NAN_BITS;
+            seen[2] |= result.is_infinite();
+            seen[3] |= result.to_bits() == (-0.0f64).to_bits();
+            seen[4] |= result.is_subnormal();
+            if column == 5 && op == ReduceOp::Sum {
+                let sequential = axis.iter().skip(1).fold(axis[0], |acc, &x| acc + x);
+                seen[5] |= sequential.to_bits() != result.to_bits();
+            }
+        }
+    }
+    assert_eq!(seen, [true; 6], "classes the combine inputs reach");
 }

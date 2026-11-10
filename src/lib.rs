@@ -135,7 +135,7 @@ pub mod source {
 /// device memory, selected through [`RankVariant`].
 pub const MAX_RANK: usize = 8;
 /// Version of the C ABI described by this crate.
-pub const ABI_REVISION: u32 = 13;
+pub const ABI_REVISION: u32 = 14;
 /// Threads per block for the flat (element-wise) entries.
 pub const FLAT_BLOCK: u32 = 256;
 /// Lanes per block for the plane-reduction entries: one 32-lane plane per block.
@@ -3030,6 +3030,8 @@ pub fn plan_scatter_add<'a>(
 /// Supported warp-plane widths. Every NVIDIA target has 32; 8 and 16 are
 /// accepted so the subwarp paths stay covered and testable.
 pub const PLANE_WIDTHS: [u32; 3] = [8, 16, 32];
+/// Lanes per warp; a pass-1 block wider than this holds one plane per warp.
+const WARP_WIDTH: u32 = 32;
 /// Baseline floor-split constant: each chunk keeps at least `plane_width * 8`
 /// elements, so every lane always seeds from inside its own chunk.
 pub const MIN_CHUNK_PLANES: i64 = 8;
@@ -3041,6 +3043,19 @@ pub const MAX_SPLITS: i64 = 4096;
 const COMBINE_BLOCK_WIDTHS: [u32; 4] = [64, 128, 256, 512];
 /// Widest block a combine pass may use; `t4a_cuda_plane_fold` holds one result per warp.
 const MAX_BLOCK_WIDTH: u32 = 512;
+/// Planes (one warp each) per multi-warp split pass-1 block (ABI revision 14). One 32-thread
+/// block per `(output, split)` left the full-array reduction's 4096 cubes at about 38 blocks
+/// per SM against the 32-resident-block limit; several warps per block lift that limit without
+/// changing which lanes fold which elements. Narrower planes keep one plane per block.
+pub const PARTIALS_PLANES_PER_BLOCK: u32 = 4;
+/// Multi-warp pass-1 blocks are planned only up to this many cubes (`output_len * splits`).
+/// On the A100 they measured faster up to 8192 cubes (about two waves of resident warps) and
+/// slower at 65536 (`reduce-*-4096sq-*`: +4 to +8 % pass-1 device time), where one-warp blocks
+/// are refilled warp by warp (docs/design/slice-pass1-multiwarp.md).
+pub const PARTIALS_MULTIWARP_MAX_CUBES: i64 = 2 * MAX_SPLITS;
+/// Multi-warp pass-1 blocks are planned only for chunks up to this many elements. Longer
+/// chunks are bandwidth-bound walks (16M and 10M full-array: +1 to +3 % with multi-warp).
+pub const PARTIALS_MULTIWARP_MAX_CHUNK: i64 = 1024;
 /// Partials below this count keep the baseline combine geometry.
 const WIDE_COMBINE_MIN_SPLITS: i64 = 64;
 /// Folds per lane a wide combine block aims for when it sizes itself from `splits`.
@@ -3393,13 +3408,22 @@ pub fn plan_reduce_partials<'a>(
         .map_err(|_| Error::NegativeCount)?
         .checked_mul(u64::try_from(split.splits).map_err(|_| Error::Overflow)?)
         .ok_or(Error::Overflow)?;
-    let blocks = u32::try_from(blocks).map_err(|_| Error::LaunchLimit)?;
-    if blocks > MAX_GRID_X {
+    // The cube count keeps its revision-13 bound, so revision 14 refuses exactly what 13 did.
+    let cubes = u32::try_from(blocks).map_err(|_| Error::LaunchLimit)?;
+    if cubes > MAX_GRID_X {
         return Err(Error::LaunchLimit);
     }
+    let planes = if plane_width == WARP_WIDTH
+        && i64::from(cubes) <= PARTIALS_MULTIWARP_MAX_CUBES
+        && split.chunk_len <= PARTIALS_MULTIWARP_MAX_CHUNK
+    {
+        PARTIALS_PLANES_PER_BLOCK
+    } else {
+        1
+    };
     Ok(Launch {
-        grid: [blocks, 1, 1],
-        block: [plane_width, 1, 1],
+        grid: [cubes.div_ceil(planes), 1, 1],
+        block: [plane_width * planes, 1, 1],
         shared_bytes: 0,
         variant: RankVariant::select(&[partials_layout, in_layout], &[]),
     })

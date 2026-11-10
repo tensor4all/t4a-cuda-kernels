@@ -46,6 +46,11 @@ name = "planning"
 path = "tests/planning.rs"
 
 [[test]]
+name = "gpu_reduce_golden"
+path = "tests/gpu_reduce_golden.rs"
+required-features = ["gpu-tests"]
+
+[[test]]
 name = "gpu_kernels"
 path = "tests/gpu_kernels.rs"
 required-features = ["gpu-tests"]

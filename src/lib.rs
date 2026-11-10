@@ -3043,12 +3043,19 @@ pub const MAX_SPLITS: i64 = 4096;
 const COMBINE_BLOCK_WIDTHS: [u32; 4] = [64, 128, 256, 512];
 /// Widest block a combine pass may use; `t4a_cuda_plane_fold` holds one result per warp.
 const MAX_BLOCK_WIDTH: u32 = 512;
-/// Planes (one warp each) per split pass-1 block at `plane_width == 32` (ABI revision 14). One
-/// 32-thread block per `(output, split)` left the full-array reduction's 4096 cubes at about 38
-/// blocks per SM against the 32-resident-block limit; several warps per block lift that
-/// limit without changing which lanes fold which elements. Narrower planes keep one plane per
-/// block.
+/// Planes (one warp each) per multi-warp split pass-1 block (ABI revision 14). One 32-thread
+/// block per `(output, split)` left the full-array reduction's 4096 cubes at about 38 blocks
+/// per SM against the 32-resident-block limit; several warps per block lift that limit without
+/// changing which lanes fold which elements. Narrower planes keep one plane per block.
 pub const PARTIALS_PLANES_PER_BLOCK: u32 = 4;
+/// Multi-warp pass-1 blocks are planned only up to this many cubes (`output_len * splits`).
+/// On the A100 they measured faster up to 8192 cubes (about two waves of resident warps) and
+/// slower at 65536 (`reduce-*-4096sq-*`: +4 to +8 % pass-1 device time), where one-warp blocks
+/// are refilled warp by warp (docs/design/slice-pass1-multiwarp.md).
+pub const PARTIALS_MULTIWARP_MAX_CUBES: i64 = 2 * MAX_SPLITS;
+/// Multi-warp pass-1 blocks are planned only for chunks up to this many elements. Longer
+/// chunks are bandwidth-bound walks (16M and 10M full-array: +1 to +3 % with multi-warp).
+pub const PARTIALS_MULTIWARP_MAX_CHUNK: i64 = 1024;
 /// Partials below this count keep the baseline combine geometry.
 const WIDE_COMBINE_MIN_SPLITS: i64 = 64;
 /// Folds per lane a wide combine block aims for when it sizes itself from `splits`.
@@ -3406,7 +3413,10 @@ pub fn plan_reduce_partials<'a>(
     if cubes > MAX_GRID_X {
         return Err(Error::LaunchLimit);
     }
-    let planes = if plane_width == WARP_WIDTH {
+    let planes = if plane_width == WARP_WIDTH
+        && i64::from(cubes) <= PARTIALS_MULTIWARP_MAX_CUBES
+        && split.chunk_len <= PARTIALS_MULTIWARP_MAX_CHUNK
+    {
         PARTIALS_PLANES_PER_BLOCK
     } else {
         1

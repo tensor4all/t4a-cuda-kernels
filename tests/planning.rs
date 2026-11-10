@@ -3914,3 +3914,51 @@ fn pass1_packs_whole_warps_into_one_dimensional_blocks() {
         assert_eq!(launch.shared_bytes, 0);
     }
 }
+
+/// Multi-warp pass-1 blocks only where they measured faster: at most
+/// `PARTIALS_MULTIWARP_MAX_CUBES` cubes and chunks of at most `PARTIALS_MULTIWARP_MAX_CHUNK`
+/// elements. Outside that range the revision-13 one-plane block is planned.
+#[test]
+fn pass1_plans_multi_warp_blocks_only_for_few_short_cubes() {
+    use t4a_cuda_kernels::{
+        plan_reduce_partials, ReduceOp, Split, PARTIALS_MULTIWARP_MAX_CHUNK,
+        PARTIALS_MULTIWARP_MAX_CUBES, PARTIALS_PLANES_PER_BLOCK,
+    };
+    let planes = PARTIALS_PLANES_PER_BLOCK;
+    let plan = |outputs: i64, splits: i64, chunk: i64| {
+        let axis_len = splits * chunk;
+        let input = Layout::compact(&[axis_len, outputs]).unwrap();
+        let partials = Layout::compact(&[splits, outputs]).unwrap();
+        plan_reduce_partials(
+            DType::F32,
+            ReduceOp::Sum,
+            &partials,
+            splits * outputs,
+            &input,
+            axis_len * outputs,
+            0,
+            Split {
+                splits,
+                chunk_len: chunk,
+            },
+            32,
+        )
+        .unwrap()
+    };
+    let max_cubes = PARTIALS_MULTIWARP_MAX_CUBES;
+    let max_chunk = PARTIALS_MULTIWARP_MAX_CHUNK;
+    // At the cube bound (`[513, 4096]`-like: 2 splits per output) and above it.
+    let at = plan(max_cubes / 2, 2, 256);
+    assert_eq!(at.block, [32 * planes, 1, 1]);
+    assert_eq!(at.grid, [(max_cubes as u32).div_ceil(planes), 1, 1]);
+    let above = plan(max_cubes / 2 + 1, 2, 256);
+    assert_eq!(above.block, [32, 1, 1]);
+    assert_eq!(above.grid, [max_cubes as u32 + 2, 1, 1]);
+    // At the chunk bound (one output, 4096 splits) and above it.
+    let short = plan(1, 4096, max_chunk);
+    assert_eq!(short.block, [32 * planes, 1, 1]);
+    assert_eq!(short.grid, [4096u32.div_ceil(planes), 1, 1]);
+    let long = plan(1, 4096, max_chunk + 1);
+    assert_eq!(long.block, [32, 1, 1]);
+    assert_eq!(long.grid, [4096, 1, 1]);
+}

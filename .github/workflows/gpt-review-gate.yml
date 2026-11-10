@@ -57,10 +57,15 @@ jobs:
           echo "head=$head draft=$draft"
 
           # Every review comment, oldest first; keep the marker and the head it pinned.
+          # Only comments written by someone with write access can satisfy the gate: the marker is plain text,
+          # so a filter on text alone lets any account that can comment manufacture a passing "review"
+          # (the adversarial review of 13b9ab1 showed the extraction and match returning yes on a hand-written
+          # comment). `author_association` is set by GitHub from the commenter's relation to the repo, not by
+          # the commenter, so it cannot be forged with the body.
           reviews=$(gh api --paginate "repos/$REPO/issues/$NUMBER/comments" \
-            --jq '.[] | select(.body | contains("gpt-6.1-sol adversarial review")) | .body' || true)
+            --jq '.[] | select((.author_association == "OWNER" or .author_association == "MEMBER" or .author_association == "COLLABORATOR") and (.body | contains("gpt-6.1-sol adversarial review"))) | .body' || true)
           count=$(printf '%s' "$reviews" | grep -c 'gpt-6.1-sol adversarial review' || true)
-          echo "review comments carrying the marker: $count"
+          echo "trusted review comments carrying the marker: $count"
 
           matched=no
           if [ "$count" -gt 0 ]; then

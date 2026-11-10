@@ -1,0 +1,127 @@
+name: gpt review gate
+
+# A PR cannot merge until an adversarial review exists for its *current* head.
+#
+# Why a workflow and not a rule: `merge_guard.py` lives in one agent's habits, so a second writer can merge while
+# that agent is still producing the review. A required status check binds every writer, whatever it remembers.
+#
+# What it reads: the marker the review tool writes (`<!-- gpt-6.1-sol adversarial review ... -->`) and the
+# `_Reviewed head: `<sha>`` line that pins the review to a commit. A review of an older head does not count — that is
+# the whole point, since a head that moved is a different tree.
+#
+# Why `pull_request_target` plus `issue_comment`: the gate has to re-evaluate when a review is posted, and a comment
+# does not trigger `pull_request`. Writing a commit status from the comment path is what turns a comment into a
+# branch-protection signal. Nothing here checks out or runs PR code, so the `pull_request_target` caveat (secrets and
+# a writable token on untrusted code) does not apply: no code is executed.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, edited]
+  issue_comment:
+    types: [created, edited, deleted]
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+  statuses: write
+
+concurrency:
+  group: gpt-review-gate-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: gpt review gate
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require a review of the current head
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          # `pull_request_target` carries `github.event.pull_request` and no `github.event.issue`, so the
+          # first draft's `issue.pull_request != null` test was false on every PR event and the gate exited
+          # success without reading the head. Key the skip on the one event where a comment may really be
+          # about a plain issue.
+          IS_COMMENT_ON_ISSUE: ${{ github.event_name == 'issue_comment' && github.event.issue.pull_request == null }}
+          # Only these accounts can satisfy the gate (see the comment on the comments query below).
+          TRUSTED_REVIEWERS: shinaoka,MartinMikkelsen
+        run: |
+          set -euo pipefail
+          if [ "$IS_COMMENT_ON_ISSUE" = "true" ]; then
+            echo "comment on an issue, not a pull request; nothing to gate"; exit 0
+          fi
+
+          head=$(gh api "repos/$REPO/pulls/$NUMBER" --jq .head.sha)
+          draft=$(gh api "repos/$REPO/pulls/$NUMBER" --jq .draft)
+          echo "head=$head draft=$draft"
+
+          # Invalidate any earlier success on this head *before* reading anything. If a query below fails, `set -e`
+          # exits before the final POST, and without this line the previous `success` would stay on the head (review
+          # of c7774a6). `pending` also blocks a merge, so an abandoned run cannot leave an approval behind.
+          gh api -X POST "repos/$REPO/statuses/$head" \
+            -f state=pending -f context="gpt review gate" \
+            -f description="evaluating ${head:0:8}" \
+            -f target_url="https://github.com/$REPO/actions/runs/$GITHUB_RUN_ID" >/dev/null
+
+          # Every review comment, oldest first; keep the marker and the head it pinned.
+          # Only comments written by someone with write access can satisfy the gate: the marker is plain text,
+          # so a filter on text alone lets any account that can comment manufacture a passing "review"
+          # (the adversarial review of 13b9ab1 showed the extraction and match returning yes on a hand-written
+          # comment). `author_association` is set by GitHub from the commenter's relation to the repo, not by
+          # the commenter, so it cannot be forged with the body.
+          # `author_association` does not prove write access (an organisation member with read-only access is
+          # MEMBER), so the accounts that may satisfy the gate are listed explicitly: the accounts that run
+          # `scripts/gpt_review.sh` against this repository. Add a maintainer here when one starts reviewing.
+          allowed=$(printf '%s' "$TRUSTED_REVIEWERS" | tr ',' '\n' | jq -R . | jq -s .)
+          # `gh api --jq` takes only the filter, so `--argjson` has to go to `jq` through a pipe: passing it to
+          # `gh api` fails the whole call and the old `|| true` turned that into "no review" (found in review of
+          # 65f18b2). A failed query now fails the gate instead of reporting a missing review.
+          pages=$(gh api --paginate --slurp "repos/$REPO/issues/$NUMBER/comments?per_page=100")
+          reviews=$(printf '%s' "$pages" | jq -r --argjson allowed "$allowed" \
+            '.[][] | select(([.user.login] | inside($allowed)) and (.body | contains("gpt-6.1-sol adversarial review"))) | .body')
+          count=$(printf '%s' "$reviews" | grep -c 'gpt-6.1-sol adversarial review' || true)
+          echo "trusted review comments carrying the marker: $count"
+
+          # For each trusted review: the head it names and its verdict counts. The verdict matters: a review that
+          # says NEEDS_CHANGES: 1 is still a review of the head, and counting it as approval would let a blocked PR
+          # merge (review of cff8d23). The *last* review naming this head is the one that counts, so a re-review
+          # after a fix replaces the earlier verdict. A missing count is not "0": it is unreadable and fails closed.
+          matched=no; last_crit=; last_needs=; last_sha=
+          if [ "$count" -gt 0 ]; then
+            while IFS=$'\t' read -r sha crit needs; do
+              [ -n "${sha:-}" ] || continue
+              case "$head" in
+                "$sha"*) matched=yes; last_crit="$crit"; last_needs="$needs"; last_sha="$sha" ;;
+              esac
+            done < <(printf '%s' "$pages" | jq -r --argjson allowed "$allowed" '
+              def count($k): ((capture($k + ": (?<v>none|[0-9]+)") // {}) | .v // "?") | if . == "none" then "0" else . end;
+              .[][]
+              | select(([.user.login] | inside($allowed)) and (.body | contains("gpt-6.1-sol adversarial review")))
+              | [ ((.body | (capture("Reviewed head: `(?<s>[0-9a-f]{7,40})`") // {}) | .s // "")),
+                  (.body | count("CRITICAL")), (.body | count("NEEDS_CHANGES")) ]
+              | @tsv')
+          fi
+
+          if [ "$matched" = yes ] && [ "$last_crit" = 0 ] && [ "$last_needs" = 0 ]; then
+            verdict=yes
+            desc="an adversarial review of ${head:0:8} reports 0 critical, 0 needs-changes"
+            echo "OK $desc"
+          elif [ "$matched" = yes ]; then
+            verdict=no
+            desc="the review of ${head:0:8} reports CRITICAL: ${last_crit:-?} NEEDS_CHANGES: ${last_needs:-?}"
+            echo "::error::$desc"
+          else
+            verdict=no
+            desc="no review of ${head:0:8}; post one with scripts/gpt_review.sh, or the merge waits"
+            echo "::error::$desc"
+          fi
+
+          gh api -X POST "repos/$REPO/statuses/$head" \
+            -f state="$([ "$verdict" = yes ] && echo success || echo failure)" \
+            -f context="gpt review gate" \
+            -f description="$desc" \
+            -f target_url="https://github.com/$REPO/actions/runs/$GITHUB_RUN_ID" >/dev/null
+
+          [ "$verdict" = yes ]

@@ -215,6 +215,12 @@ fn line_base(extents: &[i64], axis: usize, mut o: i64) -> i64 {
 /// (the same lane twice), chunks that share a lane of every combine width, and the end.
 fn nan_positions(axis_len: i64, splits: i64, chunk: i64) -> Vec<i64> {
     let mut out = vec![0, 1, 33];
+    // Lane 0 of every pass-1 walk, every 32 elements of chunk 0: the scalar walk's lane 0, and
+    // (for 4- and 8-byte elements) lane 0 of the vector walk's first batch and its whole-batch
+    // body, so NaNs with different payloads meet inside one lane's fold.
+    for k in 1..32i64 {
+        out.push(32 * k);
+    }
     for k in [5i64, 37, 69, 133, 517, 1029] {
         if k < splits {
             out.push(k * chunk + 7);
@@ -222,6 +228,7 @@ fn nan_positions(axis_len: i64, splits: i64, chunk: i64) -> Vec<i64> {
     }
     out.push(axis_len - 1);
     out.retain(|&p| p < axis_len);
+    out.sort_unstable();
     out.dedup();
     out
 }

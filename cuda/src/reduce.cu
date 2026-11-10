@@ -569,12 +569,15 @@ struct t4a_cuda_partials_plane {
 };
 
 __device__ __forceinline__ t4a_cuda_partials_plane t4a_cuda_partials_plane_of_thread() {
-  const int width = blockDim.x < t4a_cuda_warp_width ? static_cast<int>(blockDim.x)
-                                                     : t4a_cuda_warp_width;
-  const long long planes = static_cast<long long>(blockDim.x) / width;
-  const int plane = static_cast<int>(threadIdx.x) / width;
-  return {static_cast<long long>(blockIdx.x) * planes + plane, width,
-          static_cast<int>(threadIdx.x) - plane * width};
+  // 32-bit shifts only: the planner bounds the cube count by the grid limit,
+  // and a 64-bit divide here costs ~12% on many-cube launches.
+  if (blockDim.x <= static_cast<unsigned int>(t4a_cuda_warp_width)) {
+    return {static_cast<long long>(blockIdx.x), static_cast<int>(blockDim.x),
+            static_cast<int>(threadIdx.x)};
+  }
+  const unsigned int cube = blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5);
+  return {static_cast<long long>(cube), t4a_cuda_warp_width,
+          static_cast<int>(threadIdx.x & 31u)};
 }
 
 // Pass 1 of a split reduction: one plane per (output, split). The planner

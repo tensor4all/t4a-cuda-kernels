@@ -84,30 +84,44 @@ jobs:
           count=$(printf '%s' "$reviews" | grep -c 'gpt-6.1-sol adversarial review' || true)
           echo "trusted review comments carrying the marker: $count"
 
-          matched=no
+          # For each trusted review: the head it names and its verdict counts. The verdict matters: a review that
+          # says NEEDS_CHANGES: 1 is still a review of the head, and counting it as approval would let a blocked PR
+          # merge (review of cff8d23). The *last* review naming this head is the one that counts, so a re-review
+          # after a fix replaces the earlier verdict. A missing count is not "0": it is unreadable and fails closed.
+          matched=no; last_crit=; last_needs=; last_sha=
           if [ "$count" -gt 0 ]; then
-            # Strip the label and the backticks; the greedy `s/.*`//` of the first draft consumed through the
-            # closing backtick, left an empty string, and `case "$head" in "")` then matched every head.
-            while IFS= read -r sha; do
+            while IFS=$'\t' read -r sha crit needs; do
+              [ -n "${sha:-}" ] || continue
               case "$head" in
-                "$sha"*) matched=yes ;;
+                "$sha"*) matched=yes; last_crit="$crit"; last_needs="$needs"; last_sha="$sha" ;;
               esac
-            done < <(printf '%s\n' "$reviews" | grep -oE 'Reviewed head: `[0-9a-f]{7,40}`' \
-              | sed 's/Reviewed head: //' | tr -d '`' || true)
+            done < <(printf '%s' "$pages" | jq -r --argjson allowed "$allowed" '
+              def count($k): ((capture($k + ": (?<v>none|[0-9]+)") // {}) | .v // "?") | if . == "none" then "0" else . end;
+              .[][]
+              | select(([.user.login] | inside($allowed)) and (.body | contains("gpt-6.1-sol adversarial review")))
+              | [ ((.body | (capture("Reviewed head: `(?<s>[0-9a-f]{7,40})`") // {}) | .s // "")),
+                  (.body | count("CRITICAL")), (.body | count("NEEDS_CHANGES")) ]
+              | @tsv')
           fi
 
-          if [ "$matched" = yes ]; then
-            desc="an adversarial review of ${head:0:8} exists"
+          if [ "$matched" = yes ] && [ "$last_crit" = 0 ] && [ "$last_needs" = 0 ]; then
+            verdict=yes
+            desc="an adversarial review of ${head:0:8} reports 0 critical, 0 needs-changes"
             echo "OK $desc"
+          elif [ "$matched" = yes ]; then
+            verdict=no
+            desc="the review of ${head:0:8} reports CRITICAL: ${last_crit:-?} NEEDS_CHANGES: ${last_needs:-?}"
+            echo "::error::$desc"
           else
+            verdict=no
             desc="no review of ${head:0:8}; post one with scripts/gpt_review.sh, or the merge waits"
             echo "::error::$desc"
           fi
 
           gh api -X POST "repos/$REPO/statuses/$head" \
-            -f state="$([ "$matched" = yes ] && echo success || echo failure)" \
+            -f state="$([ "$verdict" = yes ] && echo success || echo failure)" \
             -f context="gpt review gate" \
             -f description="$desc" \
             -f target_url="https://github.com/$REPO/actions/runs/$GITHUB_RUN_ID" >/dev/null
 
-          [ "$matched" = yes ]
+          [ "$verdict" = yes ]

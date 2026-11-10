@@ -46,6 +46,8 @@ jobs:
           # success without reading the head. Key the skip on the one event where a comment may really be
           # about a plain issue.
           IS_COMMENT_ON_ISSUE: ${{ github.event_name == 'issue_comment' && github.event.issue.pull_request == null }}
+          # Only these accounts can satisfy the gate (see the comment on the comments query below).
+          TRUSTED_REVIEWERS: shinaoka,MartinMikkelsen
         run: |
           set -euo pipefail
           if [ "$IS_COMMENT_ON_ISSUE" = "true" ]; then
@@ -62,8 +64,12 @@ jobs:
           # (the adversarial review of 13b9ab1 showed the extraction and match returning yes on a hand-written
           # comment). `author_association` is set by GitHub from the commenter's relation to the repo, not by
           # the commenter, so it cannot be forged with the body.
+          # `author_association` does not prove write access (an organisation member with read-only access is
+          # MEMBER), so the accounts that may satisfy the gate are listed explicitly: the accounts that run
+          # `scripts/gpt_review.sh` against this repository. Add a maintainer here when one starts reviewing.
+          allowed=$(printf '%s' "$TRUSTED_REVIEWERS" | tr ',' '\n' | jq -R . | jq -s .)
           reviews=$(gh api --paginate "repos/$REPO/issues/$NUMBER/comments" \
-            --jq '.[] | select((.author_association == "OWNER" or .author_association == "MEMBER" or .author_association == "COLLABORATOR") and (.body | contains("gpt-6.1-sol adversarial review"))) | .body' || true)
+            --jq --argjson allowed "$allowed" '.[] | select(([.user.login] | inside($allowed)) and (.body | contains("gpt-6.1-sol adversarial review"))) | .body' || true)
           count=$(printf '%s' "$reviews" | grep -c 'gpt-6.1-sol adversarial review' || true)
           echo "trusted review comments carrying the marker: $count"
 

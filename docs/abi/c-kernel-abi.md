@@ -35,8 +35,8 @@ records the reassociation policy of `SUM`/`SUM_SQUARES`/`MAX`/`MIN`, with no new
 symbol, signature or struct; revision 13 fixes which elements a lane of split pass 1
 combines, and in what order, on a contiguous axis (the "Pass-1 lane assignment"
 section), with no new symbol, signature, struct or launch geometry; revision 14 changes the
-*launch* contract of split pass 1 only: at `plane_width == 32` one block carries several
-32-lane planes, one `(output, split)` per warp, with each warp's lane assignment and fold
+*launch* contract of split pass 1 only: at `plane_width == 32` one block may carry several
+32-lane planes (the facade plans that only for few, short cubes), one `(output, split)` per warp, with each warp's lane assignment and fold
 exactly those of revision 13, so every partial is bit-identical. No new symbol, signature or
 struct, and a revision-13 launch (one plane per block) still computes the same partials.
 **Nothing in revisions 1-10 changed** — the 88 existing symbols, their signatures
@@ -300,8 +300,10 @@ Semantics:
   is warp shuffles, there is no shared memory and no barrier), so the partial of every cube
   is the revision-13 partial bit for bit. The facade returns
   `block = (32 * PARTIALS_PLANES_PER_BLOCK, 1, 1)` and
-  `grid = ceil(output_len * splits / PARTIALS_PLANES_PER_BLOCK)` for 32-lane planes, and
-  `block = (plane_width, 1, 1)`, `grid = output_len * splits` for 8 and 16.
+  `grid = ceil(output_len * splits / PARTIALS_PLANES_PER_BLOCK)` only for 32-lane planes
+  with `output_len * splits <= PARTIALS_MULTIWARP_MAX_CUBES` (8192) and
+  `chunk_len <= PARTIALS_MULTIWARP_MAX_CHUNK` (1024). Otherwise it returns the revision-13
+  geometry `block = (plane_width, 1, 1)`, `grid = output_len * splits`.
 - **Pass 2** is `t4a_cuda_reduce` over the partials, with `SUM` when pass 1 was
   `SUM_SQUARES` and the same op otherwise, and is never split again.
 - **Pass-1 lane assignment (revision 13).** `W` is the block width (`plane_width`)
@@ -1041,7 +1043,7 @@ identical.
 | --- | --- | --- | --- |
 | flat entries | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |
 | revision 11 (`tril_view`, `triu_view`, `dynamic_update_slice`) | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |
-| reductions | see the revision-3 section | `(plane_width, 1, 1)`, or `(64..512, 1, 1)` for a split reduction's combine pass (revision 12), or `(32 * PARTIALS_PLANES_PER_BLOCK, 1, 1)` for split pass 1 with 32-lane planes (revision 14) | 0 for the baseline geometries; the wide combine block allocates 16 accumulators of the element type as static shared memory (≤ 256 B for `C64`) |
+| reductions | see the revision-3 section | `(plane_width, 1, 1)`, or `(64..512, 1, 1)` for a split reduction's combine pass (revision 12), or `(32 * PARTIALS_PLANES_PER_BLOCK, 1, 1)` for split pass 1 with 32-lane planes, at most 8192 cubes and chunks of at most 1024 (revision 14) | 0 for the baseline geometries; the wide combine block allocates 16 accumulators of the element type as static shared memory (≤ 256 B for `C64`) |
 | gather / scatter add / convert | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |
 | unary / binary / compare / select / clamp / combined strided | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |
 | revision 7 linalg auxiliaries | `(ceil(domain/256), 1, 1)` | `(256, 1, 1)` | 0 |

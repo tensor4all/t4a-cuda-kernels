@@ -21,5 +21,7 @@ A100 80GB on primerose, CUDA 12.6. Arms are `bench_kernels` built from frozen wo
 - `sass-diff-vs-4ea91e6.log`: `scripts/sass-diff.sh 4ea91e6`.
 - `ncu-attempt.log`: `ERR_NVGPUCTRPERM` (`RmProfilingAdminOnly: 1`); no counters could be
   read.
+- `planner-red-green.log`, `planner-red.diff`: `pass1_plans_multi_warp_blocks_only_for_few_short_cubes`, red with the rule removed and green on `6c04abe`.
+- `cargo-test-full-6c04abe.log`: `cargo test -j8` and `cargo test -j8 --features gpu-tests` on `6c04abe`, both exit 0.
 - `probe/`: the clock64/smid substitute for ncu (`driver.cu`, `reduce_probe.cu`,
   `analyze.py`) and its output.

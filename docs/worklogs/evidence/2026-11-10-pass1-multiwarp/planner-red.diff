@@ -1,0 +1,13 @@
+diff --git a/src/lib.rs b/src/lib.rs
+index 69e6a43..d84a82f 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -3414,8 +3414,6 @@ pub fn plan_reduce_partials<'a>(
+         return Err(Error::LaunchLimit);
+     }
+     let planes = if plane_width == WARP_WIDTH
+-        && i64::from(cubes) <= PARTIALS_MULTIWARP_MAX_CUBES
+-        && split.chunk_len <= PARTIALS_MULTIWARP_MAX_CHUNK
+     {
+         PARTIALS_PLANES_PER_BLOCK
+     } else {

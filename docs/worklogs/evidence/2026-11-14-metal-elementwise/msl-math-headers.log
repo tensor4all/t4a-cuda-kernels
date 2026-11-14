@@ -1,0 +1,22 @@
+# Why EXPM1, LOG1P, ERF and a hypot-based |z| are refused: the MSL standard library
+# of this OS does not define them. Header directory:
+/System/Library/PrivateFrameworks/GPUCompiler.framework/Versions/32023/Libraries/lib/clang/32023.886/include/metal
+
+$ grep -n 'METAL_FUNC float \(expm1\|log1p\|erf\|hypot\)(' metal_math
+(no match)
+
+$ grep -c 'expm1\|log1p\|erf\|hypot' metal_math
+0
+
+# What it does define, for the tags this slice serves:
+exp      3
+log      3
+sin      3
+cos      3
+tanh     3
+sqrt     3
+rsqrt    3
+pow      3
+fmod     3
+fabs     3
+divide   3

@@ -21,6 +21,7 @@
 use core::fmt;
 
 pub mod fusion;
+pub mod metal;
 
 pub use fusion::{
     artifact_key, emit_fusion, plan_fused, ArtifactKey, EmittedFusion, FusionInstruction,

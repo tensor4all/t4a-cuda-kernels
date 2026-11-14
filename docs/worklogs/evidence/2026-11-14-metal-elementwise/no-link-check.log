@@ -1,0 +1,12 @@
+# No build-time framework linking: the device test binary must not depend on
+# Metal, MetalPerformanceShaders or Accelerate.
+
+binary: target/debug/build/t4a-cuda-kernels/81f435bcbb6695a3/out/metal_kernels-81f435bcbb6695a3
+
+$ otool -L <binary>
+target/debug/build/t4a-cuda-kernels/81f435bcbb6695a3/out/metal_kernels-81f435bcbb6695a3:
+	/usr/lib/libiconv.2.dylib (compatibility version 7.0.0, current version 7.0.0)
+	/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1356.0.0)
+
+$ otool -L <binary> | tail -n +2 | grep -Ei 'metal|metalperformance|accelerate'
+(no match: the requirement)

@@ -20,6 +20,12 @@ CUDA context, stream, buffers, module loading and completion. The default
 build and its tests must work without a CUDA installation; device compilation
 and GPU runs are explicit.
 
+The Metal source set beside `cuda/` follows the same boundary: this crate ships
+MSL text (`metal/`) and plans it, and the caller owns the device, the library, the
+`MTLComputePipelineState` and completion, through `t4a-metal-runtime`. Nothing here
+links Metal, MetalPerformanceShaders or Accelerate at build time, and the Metal
+dtype set is f32 + Complex32 only.
+
 ## Workflow
 
 - Read the workspace rules in `../AGENTS.md` and the shared
@@ -42,6 +48,7 @@ cargo fmt --check
 cargo clippy -j 16 --all-targets -- -D warnings
 cargo test -j 16                     # CPU-only: planning, validation, manifest
 cargo test -j 16 --features gpu-tests  # local A100: nvcc -> cubin -> driver API
+cargo test -j 16 --features gpu-tests-metal  # local Apple GPU: MSL -> MTLibrary
 ```
 
 GPU evidence must record the GPU model, driver and toolkit versions, the exact

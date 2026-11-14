@@ -1,0 +1,8 @@
+$ cargo fmt --check
+(no diff)
+
+$ cargo clippy -j 8 --locked --all-targets -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.79s
+
+$ cargo clippy -j 8 --locked --all-targets --features gpu-tests-metal -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.01s

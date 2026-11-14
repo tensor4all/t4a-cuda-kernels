@@ -1,0 +1,197 @@
+// t4a-cuda-kernels: the Metal element-wise module — zero, exact copy, the four
+// arithmetic entries and the unary entry, for f32 and Complex32.
+//
+// The entry semantics are those of `cuda/src/arithmetic.cu` and
+// `cuda/src/elementwise.cu` in this repository, and therefore of
+// tenferro-rs@14bc1ab933e3c7a9c966e08355670331ab9d993c
+// `crates/tenferro-gpu/src/kernels/elementwise.rs`. Copyright (c) 2026 Hiroshi
+// Shinaoka and tenferro-rs contributors; MIT OR Apache-2.0.
+//
+// Every entry is a flat launch over `len` logical elements of one dtype and
+// guards its tail: the caller's dispatch covers threadgroups * threads per
+// threadgroup positions, which is not `len`, and Metal does not bound-check an
+// index. See docs/abi/c-kernel-abi.md, "Metal", for the operand and alias rules.
+
+#include <t4a/abi.msl>
+
+// --- zero ------------------------------------------------------------------
+
+kernel void t4a_metal_fill_zero(device uchar* out [[buffer(0)]],
+                                constant int& dtype [[buffer(1)]],
+                                constant long& len [[buffer(2)]],
+                                uint index [[thread_position_in_grid]]) {
+  if (!t4a_metal_reaches(index, len)) {
+    return;
+  }
+  if (dtype == T4A_METAL_C32) {
+    device t4a_metal_c32* dst = reinterpret_cast<device t4a_metal_c32*>(out);
+    dst[index] = t4a_metal_zero_c32();
+    return;
+  }
+  if (dtype == T4A_METAL_F32) {
+    device float* dst = reinterpret_cast<device float*>(out);
+    dst[index] = 0.0f;
+  }
+}
+
+// --- exact copy ------------------------------------------------------------
+
+// Elements are copied as 32-bit words, not through an arithmetic type, so every
+// bit survives: a NaN payload, a signed zero and a subnormal all move unchanged.
+kernel void t4a_metal_copy_exact(device uchar* out [[buffer(0)]],
+                                 device const uchar* in [[buffer(1)]],
+                                 constant int& dtype [[buffer(2)]],
+                                 constant long& len [[buffer(3)]],
+                                 uint index [[thread_position_in_grid]]) {
+  if (!t4a_metal_reaches(index, len)) {
+    return;
+  }
+  if (dtype == T4A_METAL_C32) {
+    // Two words per element. The element type is 4-aligned, so a 64-bit word
+    // would be a misaligned access for an odd word offset. The word index is
+    // 64-bit before it is scaled by two, so that the last admissible element
+    // (`len == u32::MAX`) cannot wrap.
+    device uint* dst = reinterpret_cast<device uint*>(out);
+    device const uint* src = reinterpret_cast<device const uint*>(in);
+    const ulong word = 2 * ulong(index);
+    dst[word] = src[word];
+    dst[word + 1] = src[word + 1];
+    return;
+  }
+  if (dtype == T4A_METAL_F32) {
+    device uint* dst = reinterpret_cast<device uint*>(out);
+    device const uint* src = reinterpret_cast<device const uint*>(in);
+    dst[index] = src[index];
+  }
+}
+
+// --- arithmetic ------------------------------------------------------------
+
+// `dst[i] = lhs[i] op rhs[i]` for the two served dtypes. Complex32 multiplication
+// is the schoolbook form of `t4a_cuda_mul<t4a_cuda_c32>`, not a scaling or a
+// conjugate trick, so a fused chain and a per-op launch agree.
+kernel void t4a_metal_add(device uchar* out [[buffer(0)]],
+                          device const uchar* lhs [[buffer(1)]],
+                          device const uchar* rhs [[buffer(2)]],
+                          constant int& dtype [[buffer(3)]],
+                          constant long& len [[buffer(4)]],
+                          uint index [[thread_position_in_grid]]) {
+  if (!t4a_metal_reaches(index, len)) {
+    return;
+  }
+  if (dtype == T4A_METAL_C32) {
+    device t4a_metal_c32* dst = reinterpret_cast<device t4a_metal_c32*>(out);
+    device const t4a_metal_c32* a = reinterpret_cast<device const t4a_metal_c32*>(lhs);
+    device const t4a_metal_c32* b = reinterpret_cast<device const t4a_metal_c32*>(rhs);
+    dst[index] = t4a_metal_add_c32(a[index], b[index]);
+    return;
+  }
+  if (dtype == T4A_METAL_F32) {
+    device float* dst = reinterpret_cast<device float*>(out);
+    device const float* a = reinterpret_cast<device const float*>(lhs);
+    device const float* b = reinterpret_cast<device const float*>(rhs);
+    dst[index] = a[index] + b[index];
+  }
+}
+
+kernel void t4a_metal_sub(device uchar* out [[buffer(0)]],
+                          device const uchar* lhs [[buffer(1)]],
+                          device const uchar* rhs [[buffer(2)]],
+                          constant int& dtype [[buffer(3)]],
+                          constant long& len [[buffer(4)]],
+                          uint index [[thread_position_in_grid]]) {
+  if (!t4a_metal_reaches(index, len)) {
+    return;
+  }
+  if (dtype == T4A_METAL_C32) {
+    device t4a_metal_c32* dst = reinterpret_cast<device t4a_metal_c32*>(out);
+    device const t4a_metal_c32* a = reinterpret_cast<device const t4a_metal_c32*>(lhs);
+    device const t4a_metal_c32* b = reinterpret_cast<device const t4a_metal_c32*>(rhs);
+    dst[index] = t4a_metal_sub_c32(a[index], b[index]);
+    return;
+  }
+  if (dtype == T4A_METAL_F32) {
+    device float* dst = reinterpret_cast<device float*>(out);
+    device const float* a = reinterpret_cast<device const float*>(lhs);
+    device const float* b = reinterpret_cast<device const float*>(rhs);
+    dst[index] = a[index] - b[index];
+  }
+}
+
+kernel void t4a_metal_mul(device uchar* out [[buffer(0)]],
+                          device const uchar* lhs [[buffer(1)]],
+                          device const uchar* rhs [[buffer(2)]],
+                          constant int& dtype [[buffer(3)]],
+                          constant long& len [[buffer(4)]],
+                          uint index [[thread_position_in_grid]]) {
+  if (!t4a_metal_reaches(index, len)) {
+    return;
+  }
+  if (dtype == T4A_METAL_C32) {
+    device t4a_metal_c32* dst = reinterpret_cast<device t4a_metal_c32*>(out);
+    device const t4a_metal_c32* a = reinterpret_cast<device const t4a_metal_c32*>(lhs);
+    device const t4a_metal_c32* b = reinterpret_cast<device const t4a_metal_c32*>(rhs);
+    dst[index] = t4a_metal_mul_c32(a[index], b[index]);
+    return;
+  }
+  if (dtype == T4A_METAL_F32) {
+    device float* dst = reinterpret_cast<device float*>(out);
+    device const float* a = reinterpret_cast<device const float*>(lhs);
+    device const float* b = reinterpret_cast<device const float*>(rhs);
+    dst[index] = a[index] * b[index];
+  }
+}
+
+// Division is f32 only: Complex32 division needs the baseline's scaled
+// Baudin-Smith form, which this revision does not carry (the CUDA arithmetic
+// module defers it the same way), and the facade rejects Complex32 with a typed
+// error instead of computing something else.
+kernel void t4a_metal_div(device uchar* out [[buffer(0)]],
+                          device const uchar* lhs [[buffer(1)]],
+                          device const uchar* rhs [[buffer(2)]],
+                          constant int& dtype [[buffer(3)]],
+                          constant long& len [[buffer(4)]],
+                          uint index [[thread_position_in_grid]]) {
+  if (!t4a_metal_reaches(index, len)) {
+    return;
+  }
+  if (dtype == T4A_METAL_F32) {
+    device float* dst = reinterpret_cast<device float*>(out);
+    device const float* a = reinterpret_cast<device const float*>(lhs);
+    device const float* b = reinterpret_cast<device const float*>(rhs);
+    dst[index] = metal::precise::divide(a[index], b[index]);
+  }
+}
+
+// --- unary -----------------------------------------------------------------
+
+// `dst_dtype` and `src_dtype` are separate because `abs` of a Complex32 operand
+// writes f32; that pair is the only unequal one, as in the CUDA entry.
+kernel void t4a_metal_unary(device uchar* out [[buffer(0)]],
+                            device const uchar* in [[buffer(1)]],
+                            constant int& dst_dtype [[buffer(2)]],
+                            constant int& src_dtype [[buffer(3)]],
+                            constant int& op [[buffer(4)]],
+                            constant long& len [[buffer(5)]],
+                            uint index [[thread_position_in_grid]]) {
+  if (!t4a_metal_reaches(index, len)) {
+    return;
+  }
+  if (dst_dtype == T4A_METAL_F32 && src_dtype == T4A_METAL_C32) {
+    device float* dst = reinterpret_cast<device float*>(out);
+    device const t4a_metal_c32* src = reinterpret_cast<device const t4a_metal_c32*>(in);
+    dst[index] = t4a_metal_abs_c32(src[index]);
+    return;
+  }
+  if (dst_dtype == T4A_METAL_F32 && src_dtype == T4A_METAL_F32) {
+    device float* dst = reinterpret_cast<device float*>(out);
+    device const float* src = reinterpret_cast<device const float*>(in);
+    dst[index] = t4a_metal_unary_f32(op, src[index]);
+    return;
+  }
+  if (dst_dtype == T4A_METAL_C32 && src_dtype == T4A_METAL_C32) {
+    device t4a_metal_c32* dst = reinterpret_cast<device t4a_metal_c32*>(out);
+    device const t4a_metal_c32* src = reinterpret_cast<device const t4a_metal_c32*>(in);
+    dst[index] = t4a_metal_unary_c32(op, src[index]);
+  }
+}

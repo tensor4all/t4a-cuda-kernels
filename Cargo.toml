@@ -15,6 +15,7 @@ categories = ["hardware-support", "science"]
 include = [
     "/src/**",
     "/cuda/**",
+    "/metal/**",
     "/tests/**",
     "/examples/**",
     "/README.md",
@@ -30,6 +31,10 @@ default = []
 # An invoked GPU test on a host without a usable device fails; it never silently
 # passes.
 gpu-tests = ["dep:cudarc"]
+# Tests that compile the MSL sources with the run-time Metal compiler and run them
+# on an Apple GPU. An invoked Metal test on a host without a device fails; it
+# never silently passes.
+gpu-tests-metal = ["dep:t4a-metal-runtime"]
 
 [dependencies]
 # Only the GPU tests use it; the library itself has no dependency.
@@ -40,6 +45,26 @@ cudarc = { version = "=0.19.8", default-features = false, features = [
     "cuda-12060",
     "nvrtc",
 ], optional = true }
+# The Metal device lane only. MSL needs a device and a run-time compiler, and this
+# is the run-time-loaded runtime that provides both; it opens Metal with `dlopen`,
+# so nothing is linked at build time and the default build does not use it.
+t4a-metal-runtime = { git = "https://github.com/tensor4all/t4a-gpu-backend", rev = "b8dee5e99c1936225e50d57a4a237527ffd5d67f", version = "=0.1.0", optional = true }
+
+# Both GPU dependencies are used only by the test targets their features select, so
+# this crate's own code has none of them: cargo's unused-dependency lint cannot see
+# a test target and would report them even though the feature that pulls one in is
+# exactly what uses it.
+[lints.cargo]
+unused_dependencies = "allow"
+
+[[test]]
+name = "metal_planning"
+path = "tests/metal_planning.rs"
+
+[[test]]
+name = "metal_kernels"
+path = "tests/metal_kernels.rs"
+required-features = ["gpu-tests-metal"]
 
 [[test]]
 name = "planning"

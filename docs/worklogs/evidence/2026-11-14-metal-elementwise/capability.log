@@ -1,0 +1,28 @@
+# Apple GPU and OS of the device lane
+$ sw_vers
+ProductName:		macOS
+ProductVersion:		26.7.2
+BuildVersion:		25G332
+
+$ system_profiler SPHardwareDataType | head -6
+2026-11-15 04:44:25.117 system_profiler[77833:197865199] hw.cpufamily: 0xf76c5b1a
+
+      Model Name: MacBook Pro
+      Model Identifier: Mac17,6
+      Model Number: Z1N2000WEJ/A
+      Chip: Apple M5 Max
+      Total Number of Cores: 18 (6 Super and 12 Performance)
+      Memory: 128 GB
+
+$ ls /System/Library/Frameworks | grep -Ei 'metal|accelerate'
+Accelerate.framework
+Metal.framework
+MetalFX.framework
+MetalKit.framework
+MetalPerformancePrimitives.framework
+MetalPerformanceShaders.framework
+MetalPerformanceShadersGraph.framework
+
+# The MSL headers this OS exposes to the run-time compiler
+/System/Library/PrivateFrameworks/GPUCompiler.framework/Versions/32023/Libraries/lib/clang/32023.886/include/metal
+/System/Library/PrivateFrameworks/GPUCompiler.framework/Versions/A/Libraries/lib/clang/3.5/include/metal

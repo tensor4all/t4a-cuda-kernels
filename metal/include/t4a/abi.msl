@@ -1,0 +1,223 @@
+// t4a-cuda-kernels: shared Metal Shading Language header for the `t4a_metal_*` entries.
+//
+// The entry semantics are those of `cuda/src/elementwise.cu` and
+// `cuda/src/arithmetic.cu` in this repository, and therefore of
+// tenferro-rs@14bc1ab933e3c7a9c966e08355670331ab9d993c
+// `crates/tenferro-gpu/src/kernels/elementwise.rs` and `helpers.rs`.
+// Copyright (c) 2026 Hiroshi Shinaoka and tenferro-rs contributors;
+// MIT OR Apache-2.0.
+//
+// Metal has no wider floating type and no complex type, so this header is f32 and
+// Complex32 only: Complex32 is a pair of f32 components at the layout of
+// `num_complex::Complex32` (size 8, alignment 4). A dtype tag outside that set is
+// the caller's error, and the Rust facade rejects it before planning.
+
+#ifndef T4A_METAL_ABI_MSL
+#define T4A_METAL_ABI_MSL
+
+#include <metal_stdlib>
+
+using namespace metal;
+
+// Revision of this header and of the entry set it describes. Metal's revision is
+// independent of the CUDA ABI revision in `t4a/abi.cuh`.
+#define T4A_METAL_ABI_REVISION 1
+
+// Dtype tags: the values of `t4a_cuda_kernels::DType::tag()`.
+#define T4A_METAL_F32 0
+#define T4A_METAL_C32 5
+
+// Unary operation tags: the values of `t4a_cuda_kernels::UnaryOp::tag()`.
+// `EXPM1`, `LOG1P` and `ERF` keep their numbers for the reader's convenience but
+// are not implemented: this MSL library has no such functions, and the facade
+// rejects those tags before a launch (see docs/abi/c-kernel-abi.md, "Metal").
+#define T4A_METAL_UNARY_NEG 0
+#define T4A_METAL_UNARY_EXP 1
+#define T4A_METAL_UNARY_LOG 2
+#define T4A_METAL_UNARY_SIN 3
+#define T4A_METAL_UNARY_COS 4
+#define T4A_METAL_UNARY_TANH 5
+#define T4A_METAL_UNARY_SQRT 6
+#define T4A_METAL_UNARY_RSQRT 7
+#define T4A_METAL_UNARY_EXPM1 8
+#define T4A_METAL_UNARY_LOG1P 9
+#define T4A_METAL_UNARY_ERF 10
+#define T4A_METAL_UNARY_ABS 11
+#define T4A_METAL_UNARY_SIGN 12
+#define T4A_METAL_UNARY_CONJ 13
+
+struct t4a_metal_c32 {
+  float re;
+  float im;
+};
+
+// The host counterpart is two f32 components; a `float2` member would make the
+// element type alignment 8 and misalign every binding whose byte offset is 4.
+static_assert(sizeof(t4a_metal_c32) == 8, "t4a_metal_c32 size");
+static_assert(alignof(t4a_metal_c32) == 4, "t4a_metal_c32 alignment");
+
+// --- index -----------------------------------------------------------------
+
+// True when `index` addresses an element of the buffer. Every entry guards with
+// this: a tiled dispatch covers threadgroups * threads-per-threadgroup threads,
+// which is not the element count, and Metal does not bound-check an index.
+// `index` is a 32-bit `uint`, which is why the planner refuses a length above
+// `u32::MAX`: the position of an element has to be representable.
+static inline bool t4a_metal_reaches(uint index, long len) {
+  return (long)index < len;
+}
+// --- classification --------------------------------------------------------
+
+// NaN and infinity by bit pattern, not by comparison. The runtime compiles with
+// Metal's default options, where fast math is on and `x != x` or `isnan(x)` may be
+// folded under the assumption that no operand is a NaN; a bit test cannot be.
+static inline bool t4a_metal_is_nan32(float value) {
+  return (as_type<uint>(value) & 0x7fffffffu) > 0x7f800000u;
+}
+
+static inline bool t4a_metal_is_inf32(float value) {
+  return (as_type<uint>(value) & 0x7fffffffu) == 0x7f800000u;
+}
+
+// --- Complex32 arithmetic --------------------------------------------------
+
+static inline t4a_metal_c32 t4a_metal_zero_c32(void) {
+  t4a_metal_c32 value = {0.0f, 0.0f};
+  return value;
+}
+
+static inline t4a_metal_c32 t4a_metal_neg_c32(t4a_metal_c32 value) {
+  t4a_metal_c32 result = {-value.re, -value.im};
+  return result;
+}
+
+static inline t4a_metal_c32 t4a_metal_conj_c32(t4a_metal_c32 value) {
+  t4a_metal_c32 result = {value.re, -value.im};
+  return result;
+}
+
+static inline t4a_metal_c32 t4a_metal_add_c32(t4a_metal_c32 lhs, t4a_metal_c32 rhs) {
+  t4a_metal_c32 value = {lhs.re + rhs.re, lhs.im + rhs.im};
+  return value;
+}
+
+static inline t4a_metal_c32 t4a_metal_sub_c32(t4a_metal_c32 lhs, t4a_metal_c32 rhs) {
+  t4a_metal_c32 value = {lhs.re - rhs.re, lhs.im - rhs.im};
+  return value;
+}
+
+static inline t4a_metal_c32 t4a_metal_mul_c32(t4a_metal_c32 lhs, t4a_metal_c32 rhs) {
+  t4a_metal_c32 value = {lhs.re * rhs.re - lhs.im * rhs.im,
+                         lhs.re * rhs.im + lhs.im * rhs.re};
+  return value;
+}
+
+// |z|. This library has no `hypot`, and `sqrt(re*re + im*im)` overflows and
+// underflows where the reference (`hypotf`) does not, so scale by the larger
+// magnitude first. The three ordered outcomes are the C standard's for hypot: an
+// infinite component wins over a NaN one, any other NaN propagates, and (0, 0) is
+// +0. The precedence is explicit because `fmax(NaN, 0)` is 0 under fast math,
+// which would otherwise return 0 for (NaN, 0).
+static inline float t4a_metal_abs_c32(t4a_metal_c32 value) {
+  const float re = metal::precise::fabs(value.re);
+  const float im = metal::precise::fabs(value.im);
+  if (t4a_metal_is_inf32(re) || t4a_metal_is_inf32(im)) {
+    return INFINITY;
+  }
+  if (t4a_metal_is_nan32(re) || t4a_metal_is_nan32(im)) {
+    return NAN;
+  }
+  const float scale = metal::precise::fmax(re, im);
+  if (scale == 0.0f) {
+    return 0.0f;
+  }
+  const float r = metal::precise::divide(re, scale);
+  const float i = metal::precise::divide(im, scale);
+  return scale * metal::precise::sqrt(r * r + i * i);
+}
+
+// --- f32 sign --------------------------------------------------------------
+
+// The baseline returns the literal +0 for either signed zero (not f32::signum)
+// and propagates NaN unchanged; `elementwise.cu` (unary_float, T4A_CUDA_UNARY_SIGN)
+// has the same rule.
+static inline float t4a_metal_sign_f32(float value) {
+  if (t4a_metal_is_nan32(value)) {
+    return value;
+  }
+  if (value == 0.0f) {
+    return 0.0f;
+  }
+  return value > 0.0f ? 1.0f : -1.0f;
+}
+
+// z / |z|, and +0 for either signed zero, as `unary_complex` in
+// `cuda/src/elementwise.cu` does.
+static inline t4a_metal_c32 t4a_metal_sign_c32(t4a_metal_c32 value) {
+  if (value.re == 0.0f && value.im == 0.0f) {
+    return t4a_metal_zero_c32();
+  }
+  const float magnitude = t4a_metal_abs_c32(value);
+  // A magnitude of zero is not only the exact (0, 0): fast math flushes a subnormal
+  // magnitude to zero, and dividing by that zero would return a direction of inf or
+  // NaN for an operand whose magnitude is the only thing that vanished. Zero is the
+  // consistent answer, and it is the one `abs` already gives.
+  if (magnitude == 0.0f) {
+    return t4a_metal_zero_c32();
+  }
+  t4a_metal_c32 result = {metal::precise::divide(value.re, magnitude),
+                          metal::precise::divide(value.im, magnitude)};
+  return result;
+}
+
+// --- unary -----------------------------------------------------------------
+
+// `metal::precise::*` rather than the bare names: the runtime compiles with
+// Metal's default compile options, where fast math is enabled, so the bare names
+// would select the approximate form. The precise entry point is the higher-accuracy
+// form of this call (the device lane's bar is 8 ulp for a transcendental); it does
+// not change the mode of the surrounding expressions (see the note on
+// `t4a_metal_abs_c32` above).
+static inline float t4a_metal_unary_f32(int op, float x) {
+  switch (op) {
+    case T4A_METAL_UNARY_NEG:
+      return -x;
+    case T4A_METAL_UNARY_EXP:
+      return metal::precise::exp(x);
+    case T4A_METAL_UNARY_LOG:
+      return metal::precise::log(x);
+    case T4A_METAL_UNARY_SIN:
+      return metal::precise::sin(x);
+    case T4A_METAL_UNARY_COS:
+      return metal::precise::cos(x);
+    case T4A_METAL_UNARY_TANH:
+      return metal::precise::tanh(x);
+    case T4A_METAL_UNARY_SQRT:
+      return metal::precise::sqrt(x);
+    case T4A_METAL_UNARY_RSQRT:
+      return metal::precise::rsqrt(x);
+    case T4A_METAL_UNARY_ABS:
+      return metal::precise::fabs(x);
+    case T4A_METAL_UNARY_SIGN:
+      return t4a_metal_sign_f32(x);
+    default:
+      // T4A_METAL_UNARY_CONJ is the identity on a real element, and the tags this
+      // library cannot serve are rejected on the host before the launch.
+      return x;
+  }
+}
+
+static inline t4a_metal_c32 t4a_metal_unary_c32(int op, t4a_metal_c32 value) {
+  switch (op) {
+    case T4A_METAL_UNARY_NEG:
+      return t4a_metal_neg_c32(value);
+    case T4A_METAL_UNARY_CONJ:
+      return t4a_metal_conj_c32(value);
+    case T4A_METAL_UNARY_SIGN:
+      return t4a_metal_sign_c32(value);
+    default:
+      return value;
+  }
+}
+
+#endif  // T4A_METAL_ABI_MSL

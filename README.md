@@ -16,6 +16,13 @@ is fully ported, and the fused-expression emitter (`fusion` module) replaces the
 baseline's run-time CubeCL IR generation with a source emitter plus an artifact key;
 compiling and loading remain the caller's service, as the design requires.
 
+Beside the CUDA set, `metal/` carries a Metal (MSL) source set and
+`t4a_cuda_kernels::metal` plans it: ABI revision 1, the flat elementwise family
+(`fill_zero`, `copy_exact`, `add`, `sub`, `mul`, `div`, `unary`) in f32 and
+Complex32, with an explicit refusal for everything else. Metal is a second ABI, not
+a revision of the CUDA one; see [the Metal section of the ABI
+document](docs/abi/c-kernel-abi.md#metal-the-t4a_metal_-entries).
+
 | Entry | Ported from | Dtypes |
 | --- | --- | --- |
 | `t4a_cuda_fill_zero`, `_fill_zero_view` | `fill_zero_kernel`, `fill_zero_view_kernel` | all |
@@ -71,6 +78,8 @@ with NVRTC and observed compile counts.
 - [Local GPU evidence: linalg auxiliaries](docs/worklogs/2026-10-21-linalg-aux-slice.md)
 - [Slice plan: rank-revealing QR primitives](docs/design/slice-rrqr.md)
 - [Slice plan: fused-expression emitter](docs/design/slice-fusion-emitter.md)
+- [Slice plan: Metal source set and planning](docs/design/slice-metal-elementwise.md)
+- [Local GPU evidence: Metal elementwise](docs/worklogs/2026-11-14-metal-elementwise-slice.md)
 - [Local GPU evidence: RRQR primitives](docs/worklogs/2026-10-21-rrqr-slice.md)
 - [Third-party notices](THIRD_PARTY_NOTICES.md)
 - [Migration design](docs/design/cubecl-kernel-port.md)
@@ -100,7 +109,9 @@ see the [preparation/cache contract](docs/design/cubecl-kernel-port.md#preparati
 and `tests/gpu_fusion.rs` for the reference consumer with observed NVRTC counts.
 
 Device compilation/testing is explicit; the default build and its tests do not
-initialize CUDA. Published on crates.io as [`t4a-cuda-kernels`](https://crates.io/crates/t4a-cuda-kernels).
+initialize CUDA. The Metal device suite is the same: behind `gpu-tests-metal`, and
+only compiled on a host without Apple frameworks (it fails fast if run there).
+Published on crates.io as [`t4a-cuda-kernels`](https://crates.io/crates/t4a-cuda-kernels).
 
 ## Continuous integration
 
@@ -109,16 +120,20 @@ and every pull request, on GitHub-hosted runners, never on a GPU.
 
 | Job | What it proves |
 | --- | --- |
-| `rust` | `cargo fmt --check`, `cargo clippy --all-targets -D warnings`, the host test lane (`cargo test`), and that the device test suites still build (`cargo test --features gpu-tests --no-run`) |
+| `rust` | `cargo fmt --check`, `cargo clippy --all-targets -D warnings`, the host test lane (`cargo test`), and that the device test suites still build (`cargo test --features gpu-tests --no-run` and `--features gpu-tests-metal --no-run`) |
 | `kernel-compile` | every `cuda/src/*.cu` compiles with `nvcc -std=c++17 -cubin -arch=sm_80 -I cuda/include`, using the CUDA 12.6.3 toolkit installed by `Jimver/cuda-toolkit` (installer cached between runs) on `ubuntu-22.04` |
 
 The host test lane is exactly the test set that needs no CUDA: each `tests/gpu_*.rs`
 target declares `required-features = ["gpu-tests"]`, so a default `cargo test` runs
 `tests/planning.rs` (88 host-planning tests) and `tests/fusion.rs` (7 emitter
-tests) and nothing that touches a device. The `gpu-tests` feature binds `cudarc`
-and its suites need a real device, so CI only compiles them. Numerical validation of
+tests) and nothing that touches a device. `tests/metal_kernels.rs` is the same shape
+for Metal (`required-features = ["gpu-tests-metal"]`), so the host lane runs
+`tests/metal_planning.rs` and never opens a Metal device. The `gpu-tests` feature
+binds `cudarc` and `gpu-tests-metal` binds `t4a-metal-runtime`; both suites need a
+real device, so CI only compiles them. Numerical validation of
 the kernels runs on the maintainer's local A100 (`cargo test --features gpu-tests`)
-and is recorded in `docs/worklogs/`; this repository has no hosted GPU gate, by
+and, for Metal, on the local M5 Max (`cargo test --features gpu-tests-metal`), and is
+recorded in `docs/worklogs/`; this repository has no hosted GPU gate, by
 design rather than by omission.
 
 ## Related repositories

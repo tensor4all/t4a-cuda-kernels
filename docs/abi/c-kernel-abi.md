@@ -16,6 +16,10 @@ validity.
 Header: [`cuda/include/t4a/abi.cuh`](../../cuda/include/t4a/abi.cuh). It includes
 nothing, so the same text compiles under NVCC and NVRTC.
 
+The Metal (MSL) entry set is a separate ABI beside this one, with its own header
+and revision; it is documented at the end of this file under "Metal: the
+`t4a_metal_*` entries".
+
 ## Revision
 
 `T4A_CUDA_ABI_REVISION == 14`. Revision 2 added `t4a_cuda_axis_values` and the
@@ -1071,3 +1075,153 @@ argument. `t4a-cuda-runtime`'s `Arg` currently exposes scalar and pointer
 arguments only, so connecting this ABI to that runtime requires generic
 by-value argument support (or a raw launch) there. This crate deliberately does
 not reshape the metadata into a device upload to avoid that work.
+
+## Metal: the `t4a_metal_*` entries
+
+The Metal entry set is a second ABI beside the CUDA one, and it is not a
+revision of it: Metal kernels are MSL (`kernel void`, `[[buffer(n)]]`), which is
+not CUDA-source compatible, and `T4A_METAL_ABI_REVISION == 1` is independent of
+`T4A_CUDA_ABI_REVISION == 14`. Header:
+[`metal/include/t4a/abi.msl`](../../metal/include/t4a/abi.msl). A wrong-vendor
+lookup fails by name, as the vendor-prefix rule requires.
+
+The library is compiled at run time from the text this crate ships
+(`t4a_cuda_kernels::metal::source`). `newLibraryWithSource:` has no include path,
+so a module carries an `#include <t4a/abi.msl>` line for a file-based compile and
+`metal::source::compose` removes it while prepending the header; the SHA-256 of
+the composed text identifies the artifact.
+
+### Dtypes
+
+| Tag | Dtype | Element |
+| --- | --- | --- |
+| 0 | `F32` | `float` |
+| 5 | `C32` | `struct { float re; float im; }` — size 8, alignment 4, the same layout as `t4a_cuda_c32` and `num_complex::Complex32` |
+
+Anything else is refused by `metal::plan_*` with `UnsupportedDType` before a
+launch: MSL rejects a wider floating type, and f64/Complex64 work belongs to the
+paired `CpuEngine` (that routing is the engine's, in the design's §4; the shared
+`UnsupportedDType` message is the generic one, since the CUDA entries use it too).
+`Entry::Div` serves f32 here: the CUDA dtype table has F32 and F64, this set has no
+F64, and Complex32 division is out of this revision on both sides.
+
+### Entries
+
+Every entry is one flat launch over `len` logical elements. Parameters are bound
+by index in the order below; `dtype`, `op`, `dst_dtype`, `src_dtype` are
+`constant int&` (4 bytes) and `len` is `constant long&` (8 bytes), passed with
+`MTLComputeCommandEncoder setBytes:length:atIndex:`.
+
+| MSL kernel | Buffers | Scalars |
+| --- | --- | --- |
+| `t4a_metal_fill_zero` | 0 `out` | 1 `dtype`, 2 `len` |
+| `t4a_metal_copy_exact` | 0 `out`, 1 `in` | 2 `dtype`, 3 `len` |
+| `t4a_metal_add` | 0 `out`, 1 `lhs`, 2 `rhs` | 3 `dtype`, 4 `len` |
+| `t4a_metal_sub` | as `add` | as `add` |
+| `t4a_metal_mul` | as `add` | as `add` |
+| `t4a_metal_div` | as `add` | as `add`; f32 only |
+| `t4a_metal_unary` | 0 `out`, 1 `in` | 2 `dst_dtype`, 3 `src_dtype`, 4 `op`, 5 `len` |
+
+`t4a_metal_unary` takes two dtype tags because `abs` of a Complex32 operand writes
+f32; that is the only unequal pair, as in the CUDA entry.
+
+### Unary operation tags
+
+The values are those of `t4a_cuda_kernels::UnaryOp::tag()`, so one Rust enum
+describes both vendors. `metal::UNARY_OPS` is the subset MSL implements.
+
+| Tag | Operation | f32 | C32 |
+| --- | --- | --- | --- |
+| 0 | `NEG` | ✔ | ✔ |
+| 1 | `EXP` | ✔ | — |
+| 2 | `LOG` | ✔ | — |
+| 3 | `SIN` | ✔ | — |
+| 4 | `COS` | ✔ | — |
+| 5 | `TANH` | ✔ | — |
+| 6 | `SQRT` | ✔ | — |
+| 7 | `RSQRT` | ✔ | — |
+| 8 | `EXPM1` | rejected | rejected |
+| 9 | `LOG1P` | rejected | rejected |
+| 10 | `ERF` | rejected | rejected |
+| 11 | `ABS` | ✔ | ✔ → f32 |
+| 12 | `SIGN` | ✔ | ✔ |
+| 13 | `CONJ` | rejected | ✔ |
+
+`EXPM1`, `LOG1P` and `ERF` keep their numbers so the table reads against the CUDA
+one, but this MSL library provides no such function — measured against
+`…/GPUCompiler.framework/Versions/32023/…/metal/metal_math`, which has `exp`,
+`log`, `sin`, `cos`, `tanh`, `sqrt`, `rsqrt`, `pow`, `fmod`, `fabs` and `divide`
+and nothing for the three. The facade refuses them with `UnsupportedOp` instead of
+computing an approximation. `CONJ` on a real dtype is refused by
+`UnaryOp::accepts`, as on the CUDA side.
+
+### Numerics
+
+Measured on an M5 Max and asserted by the device lane, not inferred:
+
+- Bit-exact, integer for integer: `fill_zero`, `copy_exact` (copied as 32-bit
+  words, so a NaN payload, a signed zero and a subnormal all move unchanged), the seven
+  f32 arithmetic and sign entries (`ADD`, `SUB`, `MUL`, `DIV`, `NEG`, `ABS`, `SIGN`)
+  over normal-range operands, and `ADD`/`SUB` of Complex32 — the device lane asserts
+  0 ulp for each. `DIV` is the correctly rounded IEEE quotient, so it matches the
+  CUDA entry bit for bit. (`CONJ` is complex-only: `UnaryOp::accepts` refuses the f32
+  pair, as on the CUDA side.)
+- **Subnormals flush to zero.** The runtime compiles with Metal's default options,
+  where fast math is enabled, and this device flushes a subnormal operand and a
+  subnormal result (`smallest + smallest` is `0`, not `2 * smallest`). The CUDA
+  entries do not flush — nvcc runs without `--use_fast_math` — so this is a measured
+  difference between the backends on identical inputs, and the device lane asserts it
+  so it cannot change silently. `MTLCompileOptions.fastMathEnabled = NO` would remove
+  it, and `t4a-metal-runtime` does not expose compile options yet.
+- Within a few ulp, not bit-exact: the transcendental unary operations, which the
+  device lane bounds at 8 ulp against the host's libm, and Complex32 `MUL`, which is
+  three IEEE operations the compiler may fuse.
+
+`metal::precise::*` is used for every transcendental and for every division whose
+result is part of the contract, because the compile flag is not the caller's to set
+here. Classification never goes through `x != x` or `isnan(x)`: it tests the bit
+pattern, which a fast-math assumption cannot fold.
+
+`SIGN` returns the literal `+0` for either signed zero and propagates NaN, like the
+baseline. `SIGN` of a Complex32 operand whose magnitude flushes to zero is also that
+zero: a direction built by dividing by the vanished magnitude would be `inf`/`NaN`,
+and `ABS` already answers zero. `ABS` of a Complex32 operand is a scaled magnitude, not `sqrt(re²+im²)`,
+because MSL has no `hypot`; the order of its three outcomes is the C standard's for
+`hypotf` — an infinite component wins over a NaN one (which `fmax(NaN, 0) == 0`
+would otherwise swallow), any other NaN propagates, and `(0, 0)` is `+0`.
+
+### Overlap and aliasing
+
+- `fill_zero` writes only its destination.
+- `copy_exact` writes only its destination, which must be disjoint from `in`.
+- `add`, `sub`, `mul`, `div` and `unary` write every destination element exactly
+  once from read-only operands; a destination that overlaps an operand is
+  undefined (in-place use is not part of revision 1, as on the CUDA side).
+- Every entry fully overwrites `[0, len)` and writes nothing at or beyond `len`.
+
+### Launch geometry
+
+`threadgroups = ceil(len / 256)`, `threads_per_threadgroup = 256`, which is eight
+SIMD groups of the Metal SIMD-group width 32. Every kernel guards its own tail
+(`index >= len`), because Metal does not bound-check an index and the product
+covers more positions than elements when `len` is not a multiple of 256: the
+runtime's tiled dispatch is the correct form here and its exact-coverage form is
+not. `len == 0` plans a zero grid and the caller skips the launch.
+
+`len <= u32::MAX` is a planning precondition: every kernel reads its position as a
+32-bit `uint`, so a longer domain would name elements no thread can reach. The
+facade refuses it with `LaunchLimit`, and it widens the index to 64 bits before any
+other scaling (the two-word copy, for example), so the last admissible element
+cannot wrap.
+
+### What this set deliberately does not contain
+
+- **GEMM and contractions**: they go through `MPSMatrixMultiplication`, which is
+  U5 of tensor4all/tenferro-rs#2402 and belongs to the engine, not to a kernel
+  catalogue. No MSL contraction kernel exists here and none should be added.
+- **FFT and linalg**: later units of the same design; until they land the engine
+  returns a typed `Unsupported`.
+- **The op-tag elementwise entry** (`T4A_CUDA_BINARY_*` with `scalar_side`),
+  `compare`, `select` and `clamp`: not part of this source set yet.
+- **Complex32 division**: the baseline keeps a scaled Baudin-Smith form, and this
+  revision does not carry it (the CUDA arithmetic module defers it the same way).

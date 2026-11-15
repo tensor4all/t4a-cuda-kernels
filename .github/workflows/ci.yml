@@ -52,7 +52,10 @@ jobs:
       - name: The committed lockfile is current
         run: cargo metadata --locked --offline --format-version 1 > /dev/null
 
+      # The device test suite is compiled with its feature, so the lints see it too:
+      # without it `--all-targets` skips `tests/metal_kernels.rs` entirely.
       - run: cargo clippy -j 4 --locked --all-targets -- -D warnings
+      - run: cargo clippy -j 4 --locked --all-targets --features gpu-tests-metal -- -D warnings
 
       - name: Host tests (no CUDA, no Metal device)
         run: cargo test -j 4 --locked

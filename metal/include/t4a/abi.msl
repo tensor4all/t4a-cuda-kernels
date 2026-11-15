@@ -1,16 +1,19 @@
 // t4a-cuda-kernels: shared Metal Shading Language header for the `t4a_metal_*` entries.
 //
-// The entry semantics are those of `cuda/src/elementwise.cu` and
-// `cuda/src/arithmetic.cu` in this repository, and therefore of
-// tenferro-rs@14bc1ab933e3c7a9c966e08355670331ab9d993c
-// `crates/tenferro-gpu/src/kernels/elementwise.rs` and `helpers.rs`.
-// Copyright (c) 2026 Hiroshi Shinaoka and tenferro-rs contributors;
-// MIT OR Apache-2.0.
+// The entry semantics are those of `cuda/src/elementwise.cu`, `arithmetic.cu`,
+// `movement.cu`, `diagonal.cu`, `convert.cu` and `reduce.cu` in this repository,
+// and therefore of tenferro-rs@14bc1ab933e3c7a9c966e08355670331ab9d993c
+// `crates/tenferro-gpu/src/kernels/*.rs`. Copyright (c) 2026 Hiroshi Shinaoka and
+// tenferro-rs contributors; MIT OR Apache-2.0.
 //
 // Metal has no wider floating type and no complex type, so this header is f32 and
 // Complex32 only: Complex32 is a pair of f32 components at the layout of
 // `num_complex::Complex32` (size 8, alignment 4). A dtype tag outside that set is
 // the caller's error, and the Rust facade rejects it before planning.
+//
+// Revision 2 adds the layout and dimension mirrors, the binary/compare/reduction
+// tags and their helpers, and the movement/convert entry set; revision 1 was the
+// flat element-wise family alone.
 
 #ifndef T4A_METAL_ABI_MSL
 #define T4A_METAL_ABI_MSL
@@ -21,7 +24,13 @@ using namespace metal;
 
 // Revision of this header and of the entry set it describes. Metal's revision is
 // independent of the CUDA ABI revision in `t4a/abi.cuh`.
-#define T4A_METAL_ABI_REVISION 1
+#define T4A_METAL_ABI_REVISION 2
+
+// Rank a by-value layout can carry, and the flat threadgroup width. The width is
+// compile-time because the reduction fold's `threadgroup` array is sized from it;
+// `metal::THREADGROUP` in the Rust facade must equal it, which a host test checks.
+#define T4A_METAL_MAX_RANK 8
+#define T4A_METAL_THREADGROUP 256
 
 // Dtype tags: the values of `t4a_cuda_kernels::DType::tag()`.
 #define T4A_METAL_F32 0
@@ -46,6 +55,46 @@ using namespace metal;
 #define T4A_METAL_UNARY_SIGN 12
 #define T4A_METAL_UNARY_CONJ 13
 
+// Binary operation tags: the values of `t4a_cuda_kernels::BinaryOp::tag()`. The
+// checked integer and mixed real/complex tags keep their numbers but are not
+// served: no Metal caller reaches them, and the facade rejects them before a
+// launch.
+#define T4A_METAL_BINARY_MAX 0
+#define T4A_METAL_BINARY_MIN 1
+#define T4A_METAL_BINARY_POW 2
+#define T4A_METAL_BINARY_REM 3
+#define T4A_METAL_BINARY_MUL 4
+#define T4A_METAL_BINARY_DIV_COMPLEX 5
+#define T4A_METAL_BINARY_DIV_CHECKED 6
+#define T4A_METAL_BINARY_REM_CHECKED 7
+#define T4A_METAL_BINARY_POW_CHECKED 8
+#define T4A_METAL_BINARY_MIXED_ADD 9
+#define T4A_METAL_BINARY_MIXED_SUB 10
+#define T4A_METAL_BINARY_MIXED_MUL 11
+#define T4A_METAL_BINARY_MIXED_DIV 12
+#define T4A_METAL_BINARY_DIV 13
+
+// Which side is the one-element operand: `ScalarSide::tag()`.
+#define T4A_METAL_SCALAR_BOTH 0
+#define T4A_METAL_SCALAR_LHS 1
+#define T4A_METAL_SCALAR_RHS 2
+
+// Comparison tags: `CompareOp::tag()`.
+#define T4A_METAL_COMPARE_EQ 0
+#define T4A_METAL_COMPARE_LT 1
+#define T4A_METAL_COMPARE_LE 2
+#define T4A_METAL_COMPARE_GT 3
+#define T4A_METAL_COMPARE_GE 4
+
+// Reduction tags: `ReduceOp::tag()` and `ReduceStrategy::tag()`.
+#define T4A_METAL_REDUCE_SUM 0
+#define T4A_METAL_REDUCE_PROD 1
+#define T4A_METAL_REDUCE_SUM_SQUARES 2
+#define T4A_METAL_REDUCE_MAX 3
+#define T4A_METAL_REDUCE_MIN 4
+#define T4A_METAL_REDUCE_UNIT 0
+#define T4A_METAL_REDUCE_PLANE 1
+
 struct t4a_metal_c32 {
   float re;
   float im;
@@ -55,6 +104,31 @@ struct t4a_metal_c32 {
 // element type alignment 8 and misalign every binding whose byte offset is 4.
 static_assert(sizeof(t4a_metal_c32) == 8, "t4a_metal_c32 size");
 static_assert(alignof(t4a_metal_c32) == 4, "t4a_metal_c32 alignment");
+
+// By-value mirror of `t4a_cuda_kernels::CLayout`: axis 0 is the fastest-varying
+// axis, strides and the offset are signed element counts, and a stride of zero is
+// a broadcast axis. The Rust struct is the same 144 bytes, and `Arg::Bytes` copies
+// it into the constant address space unchanged.
+struct t4a_metal_layout {
+  int rank;
+  int reserved;
+  long offset;
+  long extents[T4A_METAL_MAX_RANK];
+  long strides[T4A_METAL_MAX_RANK];
+};
+
+static_assert(sizeof(t4a_metal_layout) == 144, "t4a_metal_layout size");
+static_assert(alignof(t4a_metal_layout) == 8, "t4a_metal_layout alignment");
+
+// By-value mirror of `t4a_cuda_kernels::CAxisValues`: one `long` per mapped axis.
+struct t4a_metal_axis_values {
+  int rank;
+  int reserved;
+  long values[T4A_METAL_MAX_RANK];
+};
+
+static_assert(sizeof(t4a_metal_axis_values) == 72, "t4a_metal_axis_values size");
+static_assert(alignof(t4a_metal_axis_values) == 8, "t4a_metal_axis_values alignment");
 
 // --- index -----------------------------------------------------------------
 
@@ -66,6 +140,37 @@ static_assert(alignof(t4a_metal_c32) == 4, "t4a_metal_c32 alignment");
 static inline bool t4a_metal_reaches(uint index, long len) {
   return (long)index < len;
 }
+
+// Element index of the logical position `flat` in `layout`, in the same order as
+// the CUDA narrow decoder: the quotient walk is 32-bit because the planner proves
+// `flat < len <= UINT_MAX` and every extent is at most `len`, while the
+// coordinate*stride product and the offset stay 64-bit, so a negative stride or a
+// large offset is unchanged.
+static inline long t4a_metal_decode(uint flat, constant t4a_metal_layout& layout) {
+  long offset = layout.offset;
+  for (int axis = 0; axis < T4A_METAL_MAX_RANK; ++axis) {
+    if (axis >= layout.rank) {
+      break;
+    }
+    const uint extent = (uint)layout.extents[axis];
+    const uint coordinate = flat % extent;
+    flat /= extent;
+    offset += (long)coordinate * layout.strides[axis];
+  }
+  return offset;
+}
+
+// Coordinate of the compact position `flat` along `axis`: the quotient walk stops
+// at the requested axis, so no per-axis coordinate array is needed and the cost is
+// a few divides whatever the rank.
+static inline long t4a_metal_compact_coord(ulong flat, constant t4a_metal_layout& layout,
+                                           int axis) {
+  for (int step = 0; step < axis; ++step) {
+    flat /= (ulong)layout.extents[step];
+  }
+  return (long)(flat % (ulong)layout.extents[axis]);
+}
+
 // --- classification --------------------------------------------------------
 
 // NaN and infinity by bit pattern, not by comparison. The runtime compiles with
@@ -218,6 +323,233 @@ static inline t4a_metal_c32 t4a_metal_unary_c32(int op, t4a_metal_c32 value) {
     default:
       return value;
   }
+}
+
+// --- f32 extrema and clamp -------------------------------------------------
+
+// NaN-propagating max/min, the form `t4a_cuda_nan_max`/`t4a_cuda_nan_min` use.
+// `precise::fmax` returns the ordered operand when exactly one is NaN, so the two
+// explicit arms restore the NaN precedence the reference has.
+static inline float t4a_metal_nan_max_f32(float lhs, float rhs) {
+  const float ordered = metal::precise::fmax(lhs, rhs);
+  const float right = t4a_metal_is_nan32(rhs) ? rhs : ordered;
+  return t4a_metal_is_nan32(lhs) ? lhs : right;
+}
+
+static inline float t4a_metal_nan_min_f32(float lhs, float rhs) {
+  const float ordered = metal::precise::fmin(lhs, rhs);
+  const float right = t4a_metal_is_nan32(rhs) ? rhs : ordered;
+  return t4a_metal_is_nan32(lhs) ? lhs : right;
+}
+
+// The statement order of `t4a_cuda_clamp`: a NaN value propagates, a NaN bound
+// disables its own comparison, and inverted bounds resolve through the order. The
+// bit-test guards state that intent under fast math, where a bare `value < low`
+// with a NaN may be folded.
+static inline float t4a_metal_clamp_f32(float value, float low, float high) {
+  float result = value;
+  if (!t4a_metal_is_nan32(value) && !t4a_metal_is_nan32(low) && value < low) {
+    result = low;
+  } else if (!t4a_metal_is_nan32(value) && !t4a_metal_is_nan32(high) && value > high) {
+    result = high;
+  }
+  return result;
+}
+
+// --- Complex32 division ----------------------------------------------------
+
+// Scale-robust division, ported from `t4a_cuda_div_complex_parts_at` in
+// `cuda/include/t4a/abi.cuh`, which derives from tenferro-rs
+// `elementwise.rs:div_complex_parts_at` and Julia Base `complex.jl` (`cdiv`,
+// `robust_cdiv1/2`, `scaling_cdiv`, `scaleargs_cdiv`). Copyright (c) 2009-2026
+// Jeff Bezanson, Stefan Karpinski, Viral B. Shah, and other contributors; MIT. See
+// THIRD_PARTY_NOTICES.md.
+//
+// The only change is the NaN test: `a == a` is a comparison, and this header cannot
+// rely on one under fast math, so `t4a_metal_is_nan32` replaces it. Every other
+// statement, including the order of the scaling branches, is the reference's.
+static inline float t4a_metal_signed_unit_f32(float value) {
+  float result = 1.0f;
+  if (value == 0.0f) {
+    result = value;
+  } else if (value < 0.0f) {
+    result = -1.0f;
+  }
+  return result;
+}
+
+static inline float t4a_metal_complex_div_term_f32(float a, float b, float c, float d, float r,
+                                                   float t) {
+  if (r != 0.0f) {
+    const float br = b * r;
+    if (br != 0.0f) {
+      return (a + br) * t;
+    }
+    return a * t + (b * t) * r;
+  }
+  return (a + d * metal::precise::divide(b, c)) * t;
+}
+
+// Writes the real and imaginary parts of `(a0 + b0 i) / (c0 + d0 i)` to
+// `out[2 * index]` and `out[2 * index + 1]`.
+static inline void t4a_metal_div_complex_parts_f32(float a0, float b0, float c0, float d0,
+                                                   device float* out, ulong index) {
+  constexpr float max_value = 3.40282346638528859812e+38f;
+  constexpr float min_positive = 1.17549435082228750797e-38f;
+  constexpr float epsilon = 1.1920928955078125e-07f;
+  float a = a0;
+  float b = b0;
+  float c = c0;
+  float d = d0;
+  if (metal::precise::fabs(c) > max_value || metal::precise::fabs(d) > max_value) {
+    const bool a_finite = !t4a_metal_is_nan32(a) && metal::precise::fabs(a) <= max_value;
+    const bool b_finite = !t4a_metal_is_nan32(b) && metal::precise::fabs(b) <= max_value;
+    if (a_finite && b_finite) {
+      out[2 * index] = 0.0f * t4a_metal_signed_unit_f32(a) * t4a_metal_signed_unit_f32(c);
+      out[2 * index + 1] = -0.0f * t4a_metal_signed_unit_f32(b) * t4a_metal_signed_unit_f32(d);
+    } else {
+      out[2 * index] = NAN;
+      out[2 * index + 1] = NAN;
+    }
+    return;
+  }
+  const float abs_a = metal::precise::fabs(a);
+  const float abs_b = metal::precise::fabs(b);
+  const float abs_c = metal::precise::fabs(c);
+  const float abs_d = metal::precise::fabs(d);
+  const float ab = abs_a >= abs_b ? abs_a : abs_b;
+  const float cd = abs_c >= abs_d ? abs_c : abs_d;
+  const float half_value = 0.5f;
+  const float two = 2.0f;
+  const float half_over = max_value * half_value;
+  const float two_under_eps = metal::precise::divide(min_positive * two, epsilon);
+  float scale = 1.0f;
+  if (ab >= half_over || ab <= two_under_eps || cd >= half_over || cd <= two_under_eps) {
+    const float big = metal::precise::divide(two, epsilon * epsilon);
+    if (ab >= half_over) {
+      a = a * half_value;
+      b = b * half_value;
+      scale = scale * two;
+    } else if (ab <= two_under_eps) {
+      a = a * big;
+      b = b * big;
+      scale = metal::precise::divide(scale, big);
+    }
+    if (cd >= half_over) {
+      c = c * half_value;
+      d = d * half_value;
+      scale = scale * half_value;
+    } else if (cd <= two_under_eps) {
+      c = c * big;
+      d = d * big;
+      scale = scale * big;
+    }
+  }
+  if (metal::precise::fabs(d) <= metal::precise::fabs(c)) {
+    const float r = metal::precise::divide(d, c);
+    const float t = metal::precise::divide(1.0f, c + d * r);
+    out[2 * index] = t4a_metal_complex_div_term_f32(a, b, c, d, r, t) * scale;
+    out[2 * index + 1] = t4a_metal_complex_div_term_f32(b, -a, c, d, r, t) * scale;
+  } else {
+    const float r = metal::precise::divide(c, d);
+    const float t = metal::precise::divide(1.0f, c * r + d);
+    out[2 * index] = t4a_metal_complex_div_term_f32(b, a, d, c, r, t) * scale;
+    out[2 * index + 1] = -t4a_metal_complex_div_term_f32(a, -b, d, c, r, t) * scale;
+  }
+}
+
+// --- element movement ------------------------------------------------------
+
+// Store the zero of `dtype` at element `index`.
+static inline void t4a_metal_store_zero(int dtype, device uchar* out, long index) {
+  if (dtype == T4A_METAL_C32) {
+    device t4a_metal_c32* dst = reinterpret_cast<device t4a_metal_c32*>(out);
+    dst[index] = t4a_metal_zero_c32();
+    return;
+  }
+  device float* dst = reinterpret_cast<device float*>(out);
+  dst[index] = 0.0f;
+}
+
+// Move one element as 32-bit words, so every bit survives: a NaN payload, a signed
+// zero and a subnormal all move unchanged, and a Complex32 element is two words at
+// 4-byte alignment rather than one 64-bit access.
+static inline void t4a_metal_move_element(int dtype, device uchar* dst, device const uchar* src,
+                                          long dst_index, long src_index) {
+  device uint* out = reinterpret_cast<device uint*>(dst);
+  device const uint* in = reinterpret_cast<device const uint*>(src);
+  const ulong d = (ulong)dst_index * (dtype == T4A_METAL_C32 ? 2ul : 1ul);
+  const ulong s = (ulong)src_index * (dtype == T4A_METAL_C32 ? 2ul : 1ul);
+  out[d] = in[s];
+  if (dtype == T4A_METAL_C32) {
+    out[d + 1] = in[s + 1];
+  }
+}
+
+// --- reduction folds -------------------------------------------------------
+
+// One fold per served operation. A fold seeds the accumulator from the axis' own
+// first element, so the seed is the operation applied to that element
+// (sum-of-squares squares it); `combine` is the step the threadgroup tree uses,
+// where an accumulator must not be squared again.
+
+static inline float t4a_metal_reduce_seed_f32(int op, float value) {
+  return op == T4A_METAL_REDUCE_SUM_SQUARES ? metal::precise::fma(value, value, 0.0f) : value;
+}
+
+static inline float t4a_metal_reduce_step_f32(int op, float acc, float value) {
+  switch (op) {
+    case T4A_METAL_REDUCE_SUM:
+      return acc + value;
+    case T4A_METAL_REDUCE_PROD:
+      return acc * value;
+    case T4A_METAL_REDUCE_SUM_SQUARES:
+      return acc + metal::precise::fma(value, value, 0.0f);
+    case T4A_METAL_REDUCE_MAX:
+      return t4a_metal_nan_max_f32(acc, value);
+    default:
+      return t4a_metal_nan_min_f32(acc, value);
+  }
+}
+
+static inline float t4a_metal_reduce_combine_f32(int op, float lhs, float rhs) {
+  switch (op) {
+    case T4A_METAL_REDUCE_PROD:
+      return lhs * rhs;
+    case T4A_METAL_REDUCE_MAX:
+      return t4a_metal_nan_max_f32(lhs, rhs);
+    case T4A_METAL_REDUCE_MIN:
+      return t4a_metal_nan_min_f32(lhs, rhs);
+    default:
+      return lhs + rhs;
+  }
+}
+
+static inline t4a_metal_c32 t4a_metal_reduce_step_c32(int op, t4a_metal_c32 acc,
+                                                      t4a_metal_c32 value) {
+  return op == T4A_METAL_REDUCE_PROD ? t4a_metal_mul_c32(acc, value)
+                                     : t4a_metal_add_c32(acc, value);
+}
+
+// Base offset in the input and position in the keepdims output of one output
+// element. The reduce axis has extent one in the output, so its coordinate is zero
+// and contributes to neither offset.
+static inline void t4a_metal_reduce_offsets(constant t4a_metal_layout& out_layout,
+                                            constant t4a_metal_layout& in_layout,
+                                            long output_index, thread long* in_base,
+                                            thread long* out_offset) {
+  long rest = output_index;
+  long base = in_layout.offset;
+  long offset = out_layout.offset;
+  for (int dim = 0; dim < out_layout.rank; ++dim) {
+    const long extent = out_layout.extents[dim];
+    const long coordinate = rest % extent;
+    rest /= extent;
+    base += coordinate * in_layout.strides[dim];
+    offset += coordinate * out_layout.strides[dim];
+  }
+  *in_base = base;
+  *out_offset = offset;
 }
 
 #endif  // T4A_METAL_ABI_MSL

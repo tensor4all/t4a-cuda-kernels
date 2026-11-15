@@ -1,0 +1,9 @@
+$ cargo fmt --check
+no diff
+
+$ cargo clippy -j 4 --locked --all-targets -- -D warnings
+    Checking t4a-cuda-kernels v0.2.0 (/private/tmp/wt-metal-slices-2-4)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.83s
+
+$ cargo clippy -j 4 --locked --all-targets --features gpu-tests-metal -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.01s

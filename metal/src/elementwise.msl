@@ -195,3 +195,165 @@ kernel void t4a_metal_unary(device uchar* out [[buffer(0)]],
     dst[index] = t4a_metal_unary_c32(op, src[index]);
   }
 }
+
+// --- binary (op tag) -------------------------------------------------------
+
+// `dst[i] = lhs[i] op rhs[i]` for the served tags. `scalar_side` names the operand
+// that is a single element (`ScalarSide::tag()`); `Both` reads both at `index`.
+// Complex32 serves scalar multiplication and the scaled division only; the facade
+// rejects every other tag before the launch, so a Complex32 `Max` cannot reach here.
+kernel void t4a_metal_binary(device uchar* out [[buffer(0)]],
+                             device const uchar* lhs [[buffer(1)]],
+                             device const uchar* rhs [[buffer(2)]],
+                             constant int& dtype [[buffer(3)]],
+                             constant int& op [[buffer(4)]],
+                             constant int& scalar_side [[buffer(5)]],
+                             constant long& len [[buffer(6)]],
+                             uint index [[thread_position_in_grid]]) {
+  if (!t4a_metal_reaches(index, len)) {
+    return;
+  }
+  if (dtype == T4A_METAL_F32) {
+    device float* dst = reinterpret_cast<device float*>(out);
+    device const float* a = reinterpret_cast<device const float*>(lhs);
+    device const float* b = reinterpret_cast<device const float*>(rhs);
+    const ulong li = scalar_side == T4A_METAL_SCALAR_LHS ? 0ul : (ulong)index;
+    const ulong ri = scalar_side == T4A_METAL_SCALAR_RHS ? 0ul : (ulong)index;
+    const float l = a[li];
+    const float r = b[ri];
+    float result = l;
+    switch (op) {
+      case T4A_METAL_BINARY_MAX:
+        result = t4a_metal_nan_max_f32(l, r);
+        break;
+      case T4A_METAL_BINARY_MIN:
+        result = t4a_metal_nan_min_f32(l, r);
+        break;
+      case T4A_METAL_BINARY_POW:
+        result = metal::precise::pow(l, r);
+        break;
+      case T4A_METAL_BINARY_REM:
+        result = metal::precise::fmod(l, r);
+        break;
+      case T4A_METAL_BINARY_MUL:
+        result = l * r;
+        break;
+      case T4A_METAL_BINARY_DIV:
+        result = metal::precise::divide(l, r);
+        break;
+      default:
+        break;
+    }
+    dst[index] = result;
+    return;
+  }
+  if (dtype == T4A_METAL_C32) {
+    device t4a_metal_c32* dst = reinterpret_cast<device t4a_metal_c32*>(out);
+    device const t4a_metal_c32* a = reinterpret_cast<device const t4a_metal_c32*>(lhs);
+    device const t4a_metal_c32* b = reinterpret_cast<device const t4a_metal_c32*>(rhs);
+    if (op == T4A_METAL_BINARY_MUL) {
+      const ulong li = scalar_side == T4A_METAL_SCALAR_LHS ? 0ul : (ulong)index;
+      const ulong ri = scalar_side == T4A_METAL_SCALAR_RHS ? 0ul : (ulong)index;
+      dst[index] = t4a_metal_mul_c32(a[li], b[ri]);
+      return;
+    }
+    // `DivComplex` addresses the interleaved parts of element `index` at
+    // `2 * index`; the planner refuses a length above `u32::MAX / 2`, so the
+    // component position fits the same 32-bit index.
+    t4a_metal_div_complex_parts_f32(a[index].re, a[index].im, b[index].re, b[index].im,
+                                    reinterpret_cast<device float*>(out), (ulong)index);
+  }
+}
+
+// --- comparison ------------------------------------------------------------
+
+// `dst[i] = 1` when the comparison holds, else `0`, one byte per position. A NaN
+// operand compares false in every arm, as the reference's IEEE comparisons do.
+kernel void t4a_metal_compare(device uchar* out [[buffer(0)]],
+                              device const uchar* lhs [[buffer(1)]],
+                              device const uchar* rhs [[buffer(2)]],
+                              constant int& dtype [[buffer(3)]],
+                              constant int& cmp [[buffer(4)]],
+                              constant long& len [[buffer(5)]],
+                              uint index [[thread_position_in_grid]]) {
+  if (!t4a_metal_reaches(index, len)) {
+    return;
+  }
+  if (dtype != T4A_METAL_F32) {
+    return;
+  }
+  device const float* a = reinterpret_cast<device const float*>(lhs);
+  device const float* b = reinterpret_cast<device const float*>(rhs);
+  const float x = a[index];
+  const float y = b[index];
+  bool predicate = false;
+  switch (cmp) {
+    case T4A_METAL_COMPARE_EQ:
+      predicate = x == y;
+      break;
+    case T4A_METAL_COMPARE_LT:
+      predicate = x < y;
+      break;
+    case T4A_METAL_COMPARE_LE:
+      predicate = x <= y;
+      break;
+    case T4A_METAL_COMPARE_GT:
+      predicate = x > y;
+      break;
+    case T4A_METAL_COMPARE_GE:
+      predicate = x >= y;
+      break;
+    default:
+      predicate = false;
+      break;
+  }
+  out[index] = predicate ? (uchar)1 : (uchar)0;
+}
+
+// --- selection -------------------------------------------------------------
+
+// `dst[i] = pred[i] != 0 ? on_true[i] : on_false[i]`, where the predicate is one
+// byte per position.
+kernel void t4a_metal_select(device uchar* out [[buffer(0)]],
+                             device const uchar* pred [[buffer(1)]],
+                             device const uchar* on_true [[buffer(2)]],
+                             device const uchar* on_false [[buffer(3)]],
+                             constant int& dtype [[buffer(4)]],
+                             constant long& len [[buffer(5)]],
+                             uint index [[thread_position_in_grid]]) {
+  if (!t4a_metal_reaches(index, len)) {
+    return;
+  }
+  if (dtype != T4A_METAL_F32) {
+    return;
+  }
+  device float* dst = reinterpret_cast<device float*>(out);
+  device const float* a = reinterpret_cast<device const float*>(on_true);
+  device const float* b = reinterpret_cast<device const float*>(on_false);
+  dst[index] = pred[index] != 0 ? a[index] : b[index];
+}
+
+// --- clamp -----------------------------------------------------------------
+
+// Per-element bounds, with the reference's statement order and NaN rule
+// (`t4a_metal_clamp_f32`): a NaN input propagates and a NaN bound disables its own
+// comparison.
+kernel void t4a_metal_clamp(device uchar* out [[buffer(0)]],
+                            device const uchar* in [[buffer(1)]],
+                            device const uchar* lower [[buffer(2)]],
+                            device const uchar* upper [[buffer(3)]],
+                            constant int& dtype [[buffer(4)]],
+                            constant long& len [[buffer(5)]],
+                            uint index [[thread_position_in_grid]]) {
+  if (!t4a_metal_reaches(index, len)) {
+    return;
+  }
+  if (dtype != T4A_METAL_F32) {
+    return;
+  }
+  device float* dst = reinterpret_cast<device float*>(out);
+  device const float* src = reinterpret_cast<device const float*>(in);
+  device const float* low = reinterpret_cast<device const float*>(lower);
+  device const float* high = reinterpret_cast<device const float*>(upper);
+  dst[index] = t4a_metal_clamp_f32(src[index], low[index], high[index]);
+}

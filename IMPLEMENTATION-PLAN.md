@@ -77,7 +77,7 @@ header is revision 1 with the 14 unary tags, and `tests/metal_planning.rs` +
 | `docs/abi/c-kernel-abi.md` (1227 lines) | Metal section, revision 1 | Metal section extended to revision 2: POD, parameter blocks, semantics, dtypes, absence list |
 | `docs/design/slice-metal-structural.md` | absent | new slice design for slices 2–4 |
 | `docs/worklogs/2026-11-16-metal-structural-slices.md` | absent | new: decisions, deferred items, M5 evidence, review record |
-| `README.md`, `AGENTS.md`, `Cargo.toml`, `Cargo.lock`, `.github/workflows/ci.yml` | — | **unchanged**: same two commands, no dependency, no lock entry, no feature, no lane. CI already compiles `--features gpu-tests-metal --no-run` |
+| `AGENTS.md`, `Cargo.toml`, `Cargo.lock` | — | **unchanged**: no dependency, no lock entry, no feature. `README.md` gains the revision-2 status line and `.github/workflows/ci.yml` one clippy invocation with `--features gpu-tests-metal`, so the hosted lint sees the device test suite |
 
 Behaviour that does not change: every CUDA symbol, planner, tag and `ABI_REVISION == 14`;
 `fusion.rs`; the NVRTC `source` module; the slice-1 Metal symbols, their parameter
@@ -232,7 +232,8 @@ array and stride are compile-time):
 
 - **Unit** — one thread per output; `threadgroups = ceil(output_len / 256)`; the thread
   walks the axis serially from axis position 0. Same combination order as the CUDA unit
-  body, so an f32 unit reduction is bit-identical to CUDA.
+  body, so an f32 unit reduction is bit-identical to CUDA wherever the subnormal flush
+  cannot reach: every operand and partial stays normal.
 - **Plane** — one threadgroup per output; `threadgroups = output_len`; lane `l` seeds
   from its own first element (axis position `l`) and strides by 256, then a threadgroup
   tree fold (halving strides through `threadgroup` memory with a barrier per level)

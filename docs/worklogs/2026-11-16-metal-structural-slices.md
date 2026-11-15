@@ -197,6 +197,12 @@ records the rule instead of pinning one vendor's choice.
   the slice design kept "IEEE remainder" and `i32::MIN/MAX` after the ABI table was fixed,
   the plan still said `select` serves both dtypes, and a host-test fixture had three
   unused bindings. All corrected.
+- Final pass on the pushed head, same reviewer and model: `CRITICAL: 0`,
+  `NEEDS_CHANGES: 0`, **APPROVE**, with three stale-text minors (the `Plan::bytes` doc
+  comment still gave the element-count formula, this plan still called the `Unit` fold
+  bit-identical to CUDA without the flush qualifier, and its unchanged-file row listed
+  `README.md` and the CI workflow that this change does edit). All three were fixed
+  before the head was pinned.
 
 ## Deferred
 

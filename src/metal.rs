@@ -152,10 +152,12 @@ pub struct Plan {
     pub dispatch: Dispatch,
     /// Bytes of the destination allocation this plan writes.
     ///
-    /// The caller allocates from this, so it is the destination's element count
-    /// times its element size — not always the launch's position count:
-    /// [`plan_embed_diagonal_copy`] inserts an axis and writes more elements than it
-    /// launches over, and [`plan_compare`] writes one byte per position.
+    /// The caller allocates exactly this, so it is the destination's *validated
+    /// allocation* times its element size, never the launch's position count: a view
+    /// destination with a stride and an offset reaches past its own element count
+    /// (`plan_into`), [`plan_embed_diagonal_copy`] inserts an axis and writes more
+    /// elements than it launches over, and [`plan_compare`] writes one byte per
+    /// position.
     pub bytes: u64,
 }
 

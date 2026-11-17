@@ -1080,7 +1080,7 @@ not reshape the metadata into a device upload to avoid that work.
 
 The Metal entry set is a second ABI beside the CUDA one, and it is not a
 revision of it: Metal kernels are MSL (`kernel void`, `[[buffer(n)]]`), which is
-not CUDA-source compatible, and `T4A_METAL_ABI_REVISION == 1` is independent of
+not CUDA-source compatible, and `T4A_METAL_ABI_REVISION == 2` is independent of
 `T4A_CUDA_ABI_REVISION == 14`. Header:
 [`metal/include/t4a/abi.msl`](../../metal/include/t4a/abi.msl). A wrong-vendor
 lookup fails by name, as the vendor-prefix rule requires.
@@ -1089,7 +1089,9 @@ The library is compiled at run time from the text this crate ships
 (`t4a_cuda_kernels::metal::source`). `newLibraryWithSource:` has no include path,
 so a module carries an `#include <t4a/abi.msl>` line for a file-based compile and
 `metal::source::compose` removes it while prepending the header; the SHA-256 of
-the composed text identifies the artifact.
+the composed text identifies the artifact. Revision 2 adds four modules
+(`movement`, `diagonal`, `convert`, `reduce`) beside `elementwise`, and the
+by-value layout and dimension mirrors with their tags.
 
 ### Dtypes
 
@@ -1103,13 +1105,19 @@ launch: MSL rejects a wider floating type, and f64/Complex64 work belongs to the
 paired `CpuEngine` (that routing is the engine's, in the design's §4; the shared
 `UnsupportedDType` message is the generic one, since the CUDA entries use it too).
 `Entry::Div` serves f32 here: the CUDA dtype table has F32 and F64, this set has no
-F64, and Complex32 division is out of this revision on both sides.
+F64, and Complex32 division belongs to `Entry::Binary`'s `DIV_COMPLEX` tag.
+`compare`, `select` and `clamp` intersect the shared dtype tables with this set, so
+`compare` and `clamp` are f32-only and `select` is f32-only (the shared table has no
+Complex32 select on either vendor).
 
 ### Entries
 
-Every entry is one flat launch over `len` logical elements. Parameters are bound
-by index in the order below; `dtype`, `op`, `dst_dtype`, `src_dtype` are
-`constant int&` (4 bytes) and `len` is `constant long&` (8 bytes), passed with
+Parameters are bound by index in the order below; every entry is one flat launch over
+its logical domain. `dtype`, `op`, `cmp`, `scalar_side`, `strategy`, `axis`,
+`axis_a`, `axis_b`, `dst_dtype`, `src_dtype` are `constant int&` (4 bytes); `len`,
+`out_len`, `output_len`, `offset`, `k`, `rows`, `cols` are `constant long&` (8
+bytes); a layout is the 144-byte `constant t4a_metal_layout&` and a dimension map the
+72-byte `constant t4a_metal_axis_values&`, both passed with
 `MTLComputeCommandEncoder setBytes:length:atIndex:`.
 
 | MSL kernel | Buffers | Scalars |
@@ -1121,9 +1129,64 @@ by index in the order below; `dtype`, `op`, `dst_dtype`, `src_dtype` are
 | `t4a_metal_mul` | as `add` | as `add` |
 | `t4a_metal_div` | as `add` | as `add`; f32 only |
 | `t4a_metal_unary` | 0 `out`, 1 `in` | 2 `dst_dtype`, 3 `src_dtype`, 4 `op`, 5 `len` |
+| `t4a_metal_binary` | 0 `out`, 1 `lhs`, 2 `rhs` | 3 `dtype`, 4 `op`, 5 `scalar_side`, 6 `len` |
+| `t4a_metal_compare` | 0 `out`, 1 `lhs`, 2 `rhs` | 3 `dtype`, 4 `cmp`, 5 `len` |
+| `t4a_metal_select` | 0 `out`, 1 `pred`, 2 `on_true`, 3 `on_false` | 4 `dtype`, 5 `len` |
+| `t4a_metal_clamp` | 0 `out`, 1 `in`, 2 `lower`, 3 `upper` | 4 `dtype`, 5 `len` |
+| `t4a_metal_fill_zero_view` | 0 `out` | 1 `dtype`, 2 `dst_layout`, 3 `len` |
+| `t4a_metal_materialize_strided` | 0 `dst`, 1 `src` | 2 `dtype`, 3 `src_layout`, 4 `len` |
+| `t4a_metal_contiguous_to_view` | 0 `dst`, 1 `src` | 2 `dtype`, 3 `dst_layout`, 4 `len` |
+| `t4a_metal_strided_to_strided` | 0 `dst`, 1 `src` | 2 `dtype`, 3 `src_layout`, 4 `dst_layout`, 5 `len` |
+| `t4a_metal_broadcast_in_dim` | 0 `out`, 1 `in` | 2 `dtype`, 3 `out_layout`, 4 `in_layout`, 5 `dims`, 6 `out_len` |
+| `t4a_metal_extract_diagonal` | 0 `out`, 1 `in` | 2 `dtype`, 3 `out_layout`, 4 `in_layout`, 5 `axis_a`, 6 `axis_b`, 7 `len` |
+| `t4a_metal_embed_diagonal_copy` | as `extract_diagonal` | as `extract_diagonal` |
+| `t4a_metal_tril` | 0 `out`, 1 `in` | 2 `dtype`, 3 `k`, 4 `rows`, 5 `cols`, 6 `len` |
+| `t4a_metal_triu` | as `tril` | as `tril` |
+| `t4a_metal_tril_view` | 0 `out`, 1 `in` | 2 `dtype`, 3 `in_layout`, 4 `k`, 5 `len` |
+| `t4a_metal_triu_view` | as `tril_view` | as `tril_view` |
+| `t4a_metal_convert` | 0 `out`, 1 `in` | 2 `dst_dtype`, 3 `src_dtype`, 4 `len` |
+| `t4a_metal_reduce` | 0 `out`, 1 `in` | 2 `dtype`, 3 `op`, 4 `strategy`, 5 `out_layout`, 6 `in_layout`, 7 `axis`, 8 `output_len` |
 
 `t4a_metal_unary` takes two dtype tags because `abs` of a Complex32 operand writes
-f32; that is the only unequal pair, as in the CUDA entry.
+f32; that is the only unequal pair, as in the CUDA entry. `t4a_metal_convert` takes
+both tags for the same reason: the served pairs are f32 → Complex32 and Complex32 →
+f32, the imaginary part of a widened value is `+0`, and a narrowed value keeps its
+real part.
+
+The launch domain of each entry is its position count: `len` elements for the flat
+entries, `out_layout.element_count()` for `fill_zero_view`, `contiguous_to_view`,
+`broadcast_in_dim` and `extract_diagonal`, the source's `element_count()` for
+`materialize_strided` and `embed_diagonal_copy` (the destination gains the inserted
+axis, so `Plan::bytes` is the output's allocation, not the position count), the input's
+for `tril_view`/`triu_view`, `len` for `tril`/`triu` and `output_len` for `reduce`.
+
+### Operation tags
+
+The values are those of the Rust enums, so one vocabulary describes both vendors, and
+a host test compares every served tag against its `#define`. `BinaryOp`, `ScalarSide`,
+`CompareOp`, `ReduceOp` and `ReduceStrategy` keep the CUDA numbers unchanged.
+
+| Tag | Operation | f32 | C32 |
+| --- | --- | --- | --- |
+| 0 | `BINARY_MAX` | ✔ | — |
+| 1 | `BINARY_MIN` | ✔ | — |
+| 2 | `BINARY_POW` | ✔ (`precise::pow`) | — |
+| 3 | `BINARY_REM` | ✔ (`precise::fmod`, the truncating remainder) | — |
+| 4 | `BINARY_MUL` | ✔ with a scalar side | ✔ with a scalar side |
+| 5 | `BINARY_DIV_COMPLEX` | — | ✔ `Both` only, scaled Baudin-Smith |
+| 6–8 | `DIV_CHECKED`, `REM_CHECKED`, `POW_CHECKED` | rejected | rejected |
+| 9–12 | `MIXED_ADD`, `MIXED_SUB`, `MIXED_MUL`, `MIXED_DIV` | rejected | rejected |
+| 13 | `BINARY_DIV` | ✔ with a scalar side | — |
+
+`MAX`/`MIN` propagate NaN (the ordered operand wins only when the other is not NaN),
+`POW`/`REM`/`DIV` are the same operations the CUDA twins call (`powf`, `fmod` and the
+correctly rounded quotient), and `DIV_COMPLEX` is the scaled form below. The checked integer tags and `Mixed*` are not served: this
+set has no integer dtype and no Metal caller reaches a mixed real/complex pair, so the
+facade refuses them with `UnsupportedOp` before a launch. `Max`/`Min`/`Pow`/`Rem` on
+Complex32 are refused the same way.
+
+`ReduceOp` serves `SUMSQUARES` and `MAX`/`MIN` on f32 and `SUM`/`PROD` on both dtypes,
+the intersection of `ReduceOp::supported_dtypes` with this set.
 
 ### Unary operation tags
 
@@ -1150,22 +1213,60 @@ describes both vendors. `metal::UNARY_OPS` is the subset MSL implements.
 `EXPM1`, `LOG1P` and `ERF` keep their numbers so the table reads against the CUDA
 one, but this MSL library provides no such function — measured against
 `…/GPUCompiler.framework/Versions/32023/…/metal/metal_math`, which has `exp`,
-`log`, `sin`, `cos`, `tanh`, `sqrt`, `rsqrt`, `pow`, `fmod`, `fabs` and `divide`
-and nothing for the three. The facade refuses them with `UnsupportedOp` instead of
-computing an approximation. `CONJ` on a real dtype is refused by
-`UnaryOp::accepts`, as on the CUDA side.
+`log`, `sin`, `cos`, `tanh`, `sqrt`, `rsqrt`, `pow`, `fmod`, `fabs`, `fma`,
+`fmin`, `fmax` and `divide` and nothing for the three. The facade refuses them with
+`UnsupportedOp` instead of computing an approximation. `CONJ` on a real dtype is
+refused by `UnaryOp::accepts`, as on the CUDA side.
+
+### Structural semantics
+
+- **Movement** (`fill_zero_view`, `materialize_strided`, `contiguous_to_view`,
+  `strided_to_strided`) decodes the logical position through the by-value layout:
+  axis 0 is fastest, `offset + sum(coordinate * stride)` is the element index, and a
+  signed stride, an offset and a stride-zero broadcast axis are all read through it.
+  A destination must be injective (`require_destination`: no stride-zero axis with an
+  extent above one), which is refused as `BroadcastDestination`; a stride-zero
+  *source* is legal. Every element moves as 32-bit words, never through arithmetic, so
+  a NaN payload, a signed zero and a subnormal arrive unchanged; a Complex32 element is
+  two 4-byte words at its 4-byte alignment.
+- **Broadcast** (`broadcast_in_dim`) reads `dims.values[src_axis]` as the destination
+  axis carrying that source axis, takes coordinate 0 for a source extent of one, and
+  writes the compact destination at its flat position. The destination must be
+  compact and a destination (`require_compact`, `require_destination`).
+- **Diagonals** (`extract_diagonal`, `embed_diagonal_copy`) use the corrected map from
+  `cuda/src/diagonal.cu`: the diagonal output axis is `axis_a - (axis_b < axis_a)` and
+  is skipped while the remaining output coordinates are walked, which the baseline's
+  rank ≥ 3 defect did not do. The extract destination is the compact input without
+  `axis_b`, with the diagonal length at that axis; the embed input is compact, the
+  output must be zero-filled before the launch (only diagonal positions are written),
+  and `axis_b` is an insertion position in `[0, in.rank]`.
+- **Triangles** (`tril`, `triu`) compare `col - row` with `k` on axes 0 and 1 of a
+  compact pair, so an extreme `k` is well defined (the baseline's `col - k` was not);
+  a masked element stores zero. The `*_view` twins read the input through its own
+  layout and write the compact output over the input's extents, storing zero for a
+  masked element and touching no input address for it.
+- **Convert** (`convert`) serves f32 ↔ Complex32 only; any other pair, including an
+  identity pair, is refused before the launch.
+- **Reduce** (`reduce`) is a single-axis fold with a keepdims output. `UNIT` walks the
+  axis serially from its first element, one thread per output, and is legal only when
+  the axis is at most one threadgroup wide; `PLANE` puts one threadgroup per output,
+  has lane `l` seed from axis position `l` and stride by the threadgroup width, folds
+  the lanes through `threadgroup` memory with a barrier per level, and is legal only
+  when the axis is at least that wide. Sum-of-squares seeds with the square and
+  combines with a plain add. `MAX`/`MIN` propagate NaN.
 
 ### Numerics
 
 Measured on an M5 Max and asserted by the device lane, not inferred:
 
 - Bit-exact, integer for integer: `fill_zero`, `copy_exact` (copied as 32-bit
-  words, so a NaN payload, a signed zero and a subnormal all move unchanged), the seven
-  f32 arithmetic and sign entries (`ADD`, `SUB`, `MUL`, `DIV`, `NEG`, `ABS`, `SIGN`)
-  over normal-range operands, and `ADD`/`SUB` of Complex32 — the device lane asserts
-  0 ulp for each. `DIV` is the correctly rounded IEEE quotient, so it matches the
-  CUDA entry bit for bit. (`CONJ` is complex-only: `UnaryOp::accepts` refuses the f32
-  pair, as on the CUDA side.)
+  words), every movement entry (a copy is a copy), `convert`'s kept component, the
+  seven f32 arithmetic and sign entries (`ADD`, `SUB`, `MUL`, `DIV`, `NEG`, `ABS`,
+  `SIGN`) over normal-range operands, and `ADD`/`SUB` of Complex32 — the device lane
+  asserts 0 ulp for each. `DIV` and `BINARY_DIV` are the correctly rounded IEEE
+  quotient, so they match the CUDA entry bit for bit. `compare` writes exactly one
+  byte per position; `clamp` keeps the reference's statement order, so a NaN input
+  propagates and a NaN bound disables its own comparison.
 - **Subnormals flush to zero.** The runtime compiles with Metal's default options,
   where fast math is enabled, and this device flushes a subnormal operand and a
   subnormal result (`smallest + smallest` is `0`, not `2 * smallest`). The CUDA
@@ -1173,14 +1274,21 @@ Measured on an M5 Max and asserted by the device lane, not inferred:
   difference between the backends on identical inputs, and the device lane asserts it
   so it cannot change silently. `MTLCompileOptions.fastMathEnabled = NO` would remove
   it, and `t4a-metal-runtime` does not expose compile options yet.
-- Within a few ulp, not bit-exact: the transcendental unary operations, which the
-  device lane bounds at 8 ulp against the host's libm, and Complex32 `MUL`, which is
-  three IEEE operations the compiler may fuse.
+- Within a few ulp, not bit-exact: the transcendental unary operations and
+  `BINARY_POW`, which the device lane bounds at 8 ulp against the host's libm;
+  Complex32 `MUL` and `BINARY_MUL`, which are three IEEE operations the compiler may
+  fuse; `BINARY_DIV_COMPLEX` against the same scaled form implemented on the host
+  (8 ulp); and a `PLANE`-strategy reduction, whose threadgroup tree is this vendor's
+  own, against the exact sum at `1e-5` relative — a `UNIT` reduction is the CUDA unit
+  body's fold in the same order, therefore bit-identical wherever the subnormal flush
+  cannot reach (every operand and partial stays normal), and `MAX`/`MIN` are exact.
 
 `metal::precise::*` is used for every transcendental and for every division whose
-result is part of the contract, because the compile flag is not the caller's to set
-here. Classification never goes through `x != x` or `isnan(x)`: it tests the bit
-pattern, which a fast-math assumption cannot fold.
+rounding is part of the contract — including the four in the scaled complex division,
+so no bare `/` remains on a path a caller can observe — because the compile flag is not
+the caller's to set here. Classification never goes through `x != x` or `isnan(x)`: it tests the bit
+pattern, which a fast-math assumption cannot fold — including inside the scaled
+complex division, where the reference's `a == a` test became a bit test.
 
 `SIGN` returns the literal `+0` for either signed zero and propagates NaN, like the
 baseline. `SIGN` of a Complex32 operand whose magnitude flushes to zero is also that
@@ -1190,14 +1298,25 @@ because MSL has no `hypot`; the order of its three outcomes is the C standard's 
 `hypotf` — an infinite component wins over a NaN one (which `fmax(NaN, 0) == 0`
 would otherwise swallow), any other NaN propagates, and `(0, 0)` is `+0`.
 
+`BINARY_MAX`/`BINARY_MIN` follow `t4a_cuda_nan_max`/`t4a_cuda_nan_min`; the sign of a
+zero result is not part of the contract (C's `fmin`/`fmax` may return either sign), and
+the device lane accepts either.
+
 ### Overlap and aliasing
 
-- `fill_zero` writes only its destination.
+- `fill_zero`, `fill_zero_view`, `materialize_strided`, `contiguous_to_view`,
+  `strided_to_strided`, `broadcast_in_dim`, `extract_diagonal`,
+  `embed_diagonal_copy`, `tril`, `triu`, `tril_view`, `triu_view`, `convert`,
+  `compare`, `select` and `clamp` write only their destination.
 - `copy_exact` writes only its destination, which must be disjoint from `in`.
-- `add`, `sub`, `mul`, `div` and `unary` write every destination element exactly
-  once from read-only operands; a destination that overlaps an operand is
-  undefined (in-place use is not part of revision 1, as on the CUDA side).
-- Every entry fully overwrites `[0, len)` and writes nothing at or beyond `len`.
+- `add`, `sub`, `mul`, `div`, `binary`, `unary` and `reduce` write every destination
+  element exactly once from read-only operands; a destination that overlaps an operand
+  is undefined (in-place use is not part of this revision, as on the CUDA side).
+- Every entry fully overwrites its destination domain and writes nothing at or beyond
+  it. `embed_diagonal_copy` is the exception by contract: it writes only the diagonal
+  positions, so the destination must already be zero.
+- `tril_view`/`triu_view` read the input through its layout while writing the compact
+  output, so the two spans must be disjoint within one launch.
 
 ### Launch geometry
 
@@ -1208,11 +1327,19 @@ covers more positions than elements when `len` is not a multiple of 256: the
 runtime's tiled dispatch is the correct form here and its exact-coverage form is
 not. `len == 0` plans a zero grid and the caller skips the launch.
 
+`reduce` is the one entry with a second geometry: `UNIT` uses the flat form over
+`output_len`, `PLANE` uses `threadgroups = output_len` with the same width, so its
+threadgroup count can be the output length itself. The threadgroup tree's width is
+compile-time (`T4A_METAL_THREADGROUP`), and `metal::THREADGROUP` must equal it —
+a host test fails if they drift.
+
 `len <= u32::MAX` is a planning precondition: every kernel reads its position as a
 32-bit `uint`, so a longer domain would name elements no thread can reach. The
 facade refuses it with `LaunchLimit`, and it widens the index to 64 bits before any
 other scaling (the two-word copy, for example), so the last admissible element
-cannot wrap.
+cannot wrap. `BINARY_DIV_COMPLEX` addresses two interleaved components per element,
+so its planner additionally refuses `len > u32::MAX / 2`: the component position
+`2 * index` must fit the same 32-bit index.
 
 ### What this set deliberately does not contain
 
@@ -1221,7 +1348,23 @@ cannot wrap.
   catalogue. No MSL contraction kernel exists here and none should be added.
 - **FFT and linalg**: later units of the same design; until they land the engine
   returns a typed `Unsupported`.
-- **The op-tag elementwise entry** (`T4A_CUDA_BINARY_*` with `scalar_side`),
-  `compare`, `select` and `clamp`: not part of this source set yet.
-- **Complex32 division**: the baseline keeps a scaled Baudin-Smith form, and this
-  revision does not carry it (the CUDA arithmetic module defers it the same way).
+- **A split reduction**: `Entry::ReducePartials` and the split/combine policy are
+  absent, because no caller exists until the engine adopts a split policy (its U4
+  slice 3 uses MPS where it can). Pass 1 is a second function over the same fold
+  helpers, not a change to `t4a_metal_reduce`.
+- **`FillOne`**: no Metal caller reaches it; it is an auxiliary entry of the linalg
+  family.
+- **`MixedAdd`/`MixedSub`/`MixedMul`/`MixedDiv`**: no caller reaches a mixed
+  real/complex pair (the CUDA engine never emits one either), and serving them would
+  add a second buffer-interpretation rule to `t4a_metal_binary`.
+- **`TiledTranspose`**: transpose is a stride relabelling into `materialize_strided`;
+  the CUDA tiled form is a performance variant whose MSL structure and threadgroup
+  sizing the design leaves to the builder (design §11).
+- **`CombinedStrided` and `ConcatenateCopy`**: the elementwise family stages
+  non-compact operands into `MaterializeStrided`/`ContiguousToView` first, and
+  `ConcatenateCopy`'s address map is `ContiguousToView` with a shifted layout.
+- **The indexing family** (`Slice`, `DynamicSlice`, `DynamicUpdateSlice`, `Pad`,
+  `Gather`, `ScatterAdd`), the validation entries, `MatrixAdjoint` and every linalg
+  entry, the fusion entry, and the dynamic-rank `_any` twins: later units, or entries
+  whose parameter block needs geometry this revision does not carry (a device-resident
+  layout for `_any`, a gather plan for `Gather`).

@@ -1,0 +1,168 @@
+// t4a-cuda-kernels: the Metal reduction module — single-axis sum, product, sum of
+// squares, maximum and minimum with the unit and plane strategies, for f32 and
+// Complex32 where the operation serves the dtype.
+//
+// Translated from `cuda/src/reduce.cu` in this repository, and therefore from
+// tenferro-rs@14bc1ab933e3c7a9c966e08355670331ab9d993c
+// `crates/tenferro-gpu/src/kernels/reduce/{kernels,launch,routines}.rs` and
+// `kernels/helpers.rs` (nan-propagating extrema).
+// Copyright (c) 2026 Hiroshi Shinaoka and tenferro-rs contributors;
+// MIT OR Apache-2.0.
+//
+// The unit and plane strategies are adapted from CubeK Reduce
+// (https://github.com/tracel-ai/cubek at commit
+// 9cf90b797107d46829e1c9d9355ce801c3dd4a7d, crates/cubek-reduce/src/launch/{base,strategy}.rs
+// and routines/{unit,blueprint}.rs):
+// Copyright (c) 2022 Nathaniel Simard & CubeCL Framework Contributors,
+// MIT OR Apache-2.0. See THIRD_PARTY_NOTICES.md.
+//
+// The vendor geometry is this file's own: the plane is one flat threadgroup of
+// `T4A_METAL_THREADGROUP` (256) lanes instead of CUDA's 8/16/32-lane warp, so the
+// threadgroup tree is not CUDA's xor tree and a plane-strategy f32 fold is compared
+// by tolerance, never bit-for-bit. The unit strategy walks the axis serially from
+// its first element, as the CUDA unit body does, so an f32 unit reduction is the same
+// fold in the same order — bit-identical over the range where Metal's fast-math
+// subnormal flush cannot reach, i.e. every operand and partial that stays normal.
+// Only pass 1 of a split reduction is absent: no caller exists until the engine
+// adopts a split policy, and the combine pass alone would be an unreachable entry.
+
+#include <t4a/abi.msl>
+
+// One thread per output, walking the axis serially. The planner only allows this
+// when the axis is no longer than the threadgroup, so the walk stays bounded.
+static inline float t4a_metal_reduce_unit_f32(device const uchar* in, int op,
+                                              constant t4a_metal_layout& in_layout, int axis,
+                                              long in_base) {
+  device const float* src = reinterpret_cast<device const float*>(in);
+  const long axis_stride = in_layout.strides[axis];
+  const long axis_len = in_layout.extents[axis];
+  float acc = t4a_metal_reduce_seed_f32(op, src[in_base]);
+  for (long step = 1; step < axis_len; ++step) {
+    acc = t4a_metal_reduce_step_f32(op, acc, src[in_base + step * axis_stride]);
+  }
+  return acc;
+}
+
+static inline t4a_metal_c32 t4a_metal_reduce_unit_c32(device const uchar* in, int op,
+                                                     constant t4a_metal_layout& in_layout,
+                                                     int axis, long in_base) {
+  device const t4a_metal_c32* src = reinterpret_cast<device const t4a_metal_c32*>(in);
+  const long axis_stride = in_layout.strides[axis];
+  const long axis_len = in_layout.extents[axis];
+  t4a_metal_c32 acc = src[in_base];
+  for (long step = 1; step < axis_len; ++step) {
+    acc = t4a_metal_reduce_step_c32(op, acc, src[in_base + step * axis_stride]);
+  }
+  return acc;
+}
+
+// One threadgroup per output. Lane `l` seeds from axis position `l` and strides by
+// the threadgroup width, so the planner must prove the axis is at least that wide;
+// every lane participates in the tree, which halves the distance through
+// `threadgroup` memory with a barrier per level. Lane 0 writes the result.
+static inline float t4a_metal_reduce_plane_f32(device const uchar* in, int op,
+                                               constant t4a_metal_layout& in_layout, int axis,
+                                               long in_base, uint lane,
+                                               threadgroup float* scratch) {
+  device const float* src = reinterpret_cast<device const float*>(in);
+  const long axis_stride = in_layout.strides[axis];
+  const long axis_len = in_layout.extents[axis];
+  const uint width = T4A_METAL_THREADGROUP;
+  float acc = t4a_metal_reduce_seed_f32(op, src[in_base + (long)lane * axis_stride]);
+  for (long step = (long)lane + (long)width; step < axis_len; step += (long)width) {
+    acc = t4a_metal_reduce_step_f32(op, acc, src[in_base + step * axis_stride]);
+  }
+  scratch[lane] = acc;
+  for (uint offset = width / 2; offset > 0; offset /= 2) {
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane < offset) {
+      scratch[lane] = t4a_metal_reduce_combine_f32(op, scratch[lane], scratch[lane + offset]);
+    }
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  return scratch[0];
+}
+
+static inline t4a_metal_c32 t4a_metal_reduce_plane_c32(device const uchar* in, int op,
+                                                       constant t4a_metal_layout& in_layout,
+                                                       int axis, long in_base, uint lane,
+                                                       threadgroup t4a_metal_c32* scratch) {
+  device const t4a_metal_c32* src = reinterpret_cast<device const t4a_metal_c32*>(in);
+  const long axis_stride = in_layout.strides[axis];
+  const long axis_len = in_layout.extents[axis];
+  const uint width = T4A_METAL_THREADGROUP;
+  t4a_metal_c32 acc = src[in_base + (long)lane * axis_stride];
+  for (long step = (long)lane + (long)width; step < axis_len; step += (long)width) {
+    acc = t4a_metal_reduce_step_c32(op, acc, src[in_base + step * axis_stride]);
+  }
+  scratch[lane] = acc;
+  for (uint offset = width / 2; offset > 0; offset /= 2) {
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane < offset) {
+      scratch[lane] = t4a_metal_reduce_step_c32(op, scratch[lane], scratch[lane + offset]);
+    }
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  return scratch[0];
+}
+
+// The tree is threadgroup-local and threadgroup memory is static: one array per
+// dtype, of which a launch uses exactly one. Both together are 4 KiB, well inside
+// the 32 KiB static limit.
+kernel void t4a_metal_reduce(device uchar* out [[buffer(0)]],
+                             device const uchar* in [[buffer(1)]],
+                             constant int& dtype [[buffer(2)]],
+                             constant int& op [[buffer(3)]],
+                             constant int& strategy [[buffer(4)]],
+                             constant t4a_metal_layout& out_layout [[buffer(5)]],
+                             constant t4a_metal_layout& in_layout [[buffer(6)]],
+                             constant int& axis [[buffer(7)]],
+                             constant long& output_len [[buffer(8)]],
+                             uint group [[threadgroup_position_in_grid]],
+                             uint lane [[thread_position_in_threadgroup]]) {
+  const bool plane = strategy == T4A_METAL_REDUCE_PLANE;
+  // The unit strategy indexes outputs by the flat position; the plane strategy
+  // indexes them by threadgroup. Both are 32-bit, which the planner proves fits.
+  const ulong output_index = plane ? (ulong)group : (ulong)group * T4A_METAL_THREADGROUP + lane;
+  if (!plane && output_index >= (ulong)output_len) {
+    return;
+  }
+  if (plane && output_index >= (ulong)output_len) {
+    // A plane threadgroup past the last output: every lane still reaches the
+    // barriers below, but there is nothing to write, so it returns as a whole and
+    // reads no input.
+    return;
+  }
+  long in_base;
+  long out_offset;
+  t4a_metal_reduce_offsets(out_layout, in_layout, (long)output_index, &in_base, &out_offset);
+
+  threadgroup float scratch_f32[T4A_METAL_THREADGROUP];
+  threadgroup t4a_metal_c32 scratch_c32[T4A_METAL_THREADGROUP];
+
+  if (dtype == T4A_METAL_F32) {
+    device float* dst = reinterpret_cast<device float*>(out);
+    if (plane) {
+      const float acc = t4a_metal_reduce_plane_f32(in, op, in_layout, axis, in_base, lane,
+                                                   scratch_f32);
+      if (lane == 0) {
+        dst[out_offset] = acc;
+      }
+      return;
+    }
+    dst[out_offset] = t4a_metal_reduce_unit_f32(in, op, in_layout, axis, in_base);
+    return;
+  }
+  if (dtype == T4A_METAL_C32) {
+    device t4a_metal_c32* dst = reinterpret_cast<device t4a_metal_c32*>(out);
+    if (plane) {
+      const t4a_metal_c32 acc =
+          t4a_metal_reduce_plane_c32(in, op, in_layout, axis, in_base, lane, scratch_c32);
+      if (lane == 0) {
+        dst[out_offset] = acc;
+      }
+      return;
+    }
+    dst[out_offset] = t4a_metal_reduce_unit_c32(in, op, in_layout, axis, in_base);
+  }
+}

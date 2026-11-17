@@ -1,0 +1,113 @@
+// t4a-cuda-kernels: the Metal movement module — zeroing into a view, strided
+// materialization, scattering into a view, strided-to-strided and the rank-mapped
+// broadcast, for f32 and Complex32.
+//
+// The entry semantics are those of `cuda/src/movement.cu` in this repository, and
+// therefore of tenferro-rs@14bc1ab933e3c7a9c966e08355670331ab9d993c
+// `crates/tenferro-gpu/src/kernels/structural.rs: fill_zero_view_kernel (L40),
+// materialize_strided_kernel (L102), contiguous_to_view_kernel (L284),
+// strided_to_strided_kernel (L299) and broadcast_in_dim_kernel (L327)`.
+// Copyright (c) 2026 Hiroshi Shinaoka and tenferro-rs contributors; MIT OR
+// Apache-2.0.
+//
+// Every entry is one flat launch over its logical domain and guards its own tail.
+// Elements move as words, so every bit survives, and every address comes from the
+// by-value layout, so a signed stride, an offset or a stride-zero broadcast axis
+// needs no staging copy. See docs/abi/c-kernel-abi.md, "Metal", for the parameter
+// blocks and the alias rules.
+
+#include <t4a/abi.msl>
+
+// --- zero into a view ------------------------------------------------------
+
+kernel void t4a_metal_fill_zero_view(device uchar* out [[buffer(0)]],
+                                     constant int& dtype [[buffer(1)]],
+                                     constant t4a_metal_layout& dst_layout [[buffer(2)]],
+                                     constant long& len [[buffer(3)]],
+                                     uint index [[thread_position_in_grid]]) {
+  if (!t4a_metal_reaches(index, len)) {
+    return;
+  }
+  t4a_metal_store_zero(dtype, out, t4a_metal_decode(index, dst_layout));
+}
+
+// --- strided materialization ----------------------------------------------
+
+// `dst[flat] = src[layout(flat)]`, with a compact destination.
+kernel void t4a_metal_materialize_strided(device uchar* dst [[buffer(0)]],
+                                          device const uchar* src [[buffer(1)]],
+                                          constant int& dtype [[buffer(2)]],
+                                          constant t4a_metal_layout& src_layout [[buffer(3)]],
+                                          constant long& len [[buffer(4)]],
+                                          uint index [[thread_position_in_grid]]) {
+  if (!t4a_metal_reaches(index, len)) {
+    return;
+  }
+  t4a_metal_move_element(dtype, dst, src, (long)index,
+                         t4a_metal_decode(index, src_layout));
+}
+
+// --- scatter into a view ---------------------------------------------------
+
+// `dst[layout(flat)] = src[flat]`, with a compact source.
+kernel void t4a_metal_contiguous_to_view(device uchar* dst [[buffer(0)]],
+                                         device const uchar* src [[buffer(1)]],
+                                         constant int& dtype [[buffer(2)]],
+                                         constant t4a_metal_layout& dst_layout [[buffer(3)]],
+                                         constant long& len [[buffer(4)]],
+                                         uint index [[thread_position_in_grid]]) {
+  if (!t4a_metal_reaches(index, len)) {
+    return;
+  }
+  t4a_metal_move_element(dtype, dst, src, t4a_metal_decode(index, dst_layout),
+                         (long)index);
+}
+
+// --- strided to strided ----------------------------------------------------
+
+// Both layouts share the source's extents; only the strides and offsets differ.
+kernel void t4a_metal_strided_to_strided(device uchar* dst [[buffer(0)]],
+                                         device const uchar* src [[buffer(1)]],
+                                         constant int& dtype [[buffer(2)]],
+                                         constant t4a_metal_layout& src_layout [[buffer(3)]],
+                                         constant t4a_metal_layout& dst_layout [[buffer(4)]],
+                                         constant long& len [[buffer(5)]],
+                                         uint index [[thread_position_in_grid]]) {
+  if (!t4a_metal_reaches(index, len)) {
+    return;
+  }
+  t4a_metal_move_element(dtype, dst, src, t4a_metal_decode(index, dst_layout),
+                         t4a_metal_decode(index, src_layout));
+}
+
+// --- rank-mapped broadcast -------------------------------------------------
+
+// `dims.values[src_axis]` is the destination axis that carries the source axis,
+// and a source extent of one is broadcast. The destination is compact, so its
+// coordinate comes from the flat position; the source is read through its own
+// strides, which may be zero.
+kernel void t4a_metal_broadcast_in_dim(device uchar* out [[buffer(0)]],
+                                       device const uchar* in [[buffer(1)]],
+                                       constant int& dtype [[buffer(2)]],
+                                       constant t4a_metal_layout& out_layout [[buffer(3)]],
+                                       constant t4a_metal_layout& in_layout [[buffer(4)]],
+                                       constant t4a_metal_axis_values& dims [[buffer(5)]],
+                                       constant long& out_len [[buffer(6)]],
+                                       uint index [[thread_position_in_grid]]) {
+  if (!t4a_metal_reaches(index, out_len)) {
+    return;
+  }
+  long in_index = in_layout.offset;
+  for (int src_axis = 0; src_axis < T4A_METAL_MAX_RANK; ++src_axis) {
+    if (src_axis >= dims.rank) {
+      break;
+    }
+    const int dst_axis = (int)dims.values[src_axis];
+    const long coordinate =
+        in_layout.extents[src_axis] == 1
+            ? 0
+            : t4a_metal_compact_coord((ulong)index, out_layout, dst_axis);
+    in_index += coordinate * in_layout.strides[src_axis];
+  }
+  t4a_metal_move_element(dtype, out, in, (long)index, in_index);
+}

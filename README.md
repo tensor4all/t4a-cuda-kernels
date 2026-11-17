@@ -17,11 +17,15 @@ baseline's run-time CubeCL IR generation with a source emitter plus an artifact 
 compiling and loading remain the caller's service, as the design requires.
 
 Beside the CUDA set, `metal/` carries a Metal (MSL) source set and
-`t4a_cuda_kernels::metal` plans it: ABI revision 1, the flat elementwise family
-(`fill_zero`, `copy_exact`, `add`, `sub`, `mul`, `div`, `unary`) in f32 and
-Complex32, with an explicit refusal for everything else. Metal is a second ABI, not
-a revision of the CUDA one; see [the Metal section of the ABI
-document](docs/abi/c-kernel-abi.md#metal-the-t4a_metal_-entries).
+`t4a_cuda_kernels::metal` plans it: ABI revision 2, 24 entries in f32 and Complex32 —
+the flat elementwise family (`fill_zero`, `copy_exact`, `add`, `sub`, `mul`, `div`,
+`unary`), the op-tag elementwise family (`binary`, `compare`, `select`, `clamp`),
+movement (`fill_zero_view`, `materialize_strided`, `contiguous_to_view`,
+`strided_to_strided`, `broadcast_in_dim`), diagonals and triangles, `convert`, and
+`reduce` — with an explicit refusal for everything else. Metal is a second ABI, not a
+revision of the CUDA one; see [the Metal section of the ABI
+document](docs/abi/c-kernel-abi.md#metal-the-t4a_metal_-entries) and [the slice
+design](docs/design/slice-metal-structural.md).
 
 | Entry | Ported from | Dtypes |
 | --- | --- | --- |

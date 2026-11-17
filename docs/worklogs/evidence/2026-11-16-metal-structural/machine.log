@@ -1,0 +1,61 @@
+$ sw_vers
+ProductName:		macOS
+ProductVersion:		26.7.2
+BuildVersion:		25G332
+
+$ system_profiler SPHardwareDataType | head -8
+Hardware:
+
+    Hardware Overview:
+
+      Model Name: MacBook Pro
+      Model Identifier: Mac17,6
+      Model Number: Z1N2000WEJ/A
+      Chip: Apple M5 Max
+
+$ system_profiler SPMetalDataType
+
+$ xcodebuild -version
+xcode-select: error: tool 'xcodebuild' requires Xcode, but active developer directory '/Library/Developer/CommandLineTools' is a command line tools instance
+
+$ rustc -vV
+rustc 1.100.0 (0ef1bc386 2026-11-09)
+binary: rustc
+commit-hash: 0ef1bc386059596dada8fb65b50425aab2ea637a
+commit-date: 2026-11-09
+host: aarch64-apple-darwin
+release: 1.100.0
+LLVM version: 23.1.5
+
+$ cargo -V
+cargo 1.100.0 (3acc79c0c 2026-11-05)
+
+$ ls /System/Library/PrivateFrameworks/GPUCompiler.framework/Versions
+32023
+A
+Current
+
+# The MSL compiler is the OS runtime one (GPUCompiler 32023); no Xcode is installed,
+# so xcodebuild above fails and is not part of the build path.
+
+$ system_profiler SPDisplaysDataType
+Graphics/Displays:
+
+    Apple M5 Max:
+
+      Chipset Model: Apple M5 Max
+      Type: GPU
+      Bus: Built-In
+      Total Number of Cores: 40
+      Vendor: Apple (0x106b)
+      Metal Support: Metal 4
+      Displays:
+        Color LCD:
+          Display Type: Built-in Liquid Retina XDR Display
+          Resolution: 3456 x 2234 Retina
+          Main Display: Yes
+          Mirror: Off
+          Online: Yes
+          Automatically Adjust Brightness: No
+          Connection Type: Internal
+

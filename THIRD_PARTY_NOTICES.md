@@ -2,8 +2,8 @@
 
 This repository translates CUDA kernels and host planning from tenferro-rs,
 which in turn adapts portions of CubeK Reduce. The notices below apply to the
-reduction sources (`cuda/src/reduce.cu` and the reduction planning in
-`src/lib.rs`).
+reduction sources (`cuda/src/reduce.cu`, `metal/src/reduce.msl`) and the
+reduction planning in `src/lib.rs` and `src/metal.rs`.
 
 ## tenferro-rs
 

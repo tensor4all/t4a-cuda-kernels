@@ -1,0 +1,37 @@
+// t4a-cuda-kernels: the Metal convert module — the real/complex pairs the Metal
+// catalogue can serve, f32 <-> Complex32.
+//
+// The entry semantics are those of `cuda/src/convert.cu` in this repository, and
+// therefore of tenferro-rs@14bc1ab933e3c7a9c966e08355670331ab9d993c
+// `crates/tenferro-gpu/src/kernels/convert.rs`. Copyright (c) 2026 Hiroshi Shinaoka
+// and tenferro-rs contributors; MIT OR Apache-2.0.
+//
+// The Metal dtype set is f32 and Complex32, so this entry serves exactly two pairs
+// and every other pair is rejected by the facade before planning: the imaginary
+// part of a widened real value is written as +0, and a narrowed complex value takes
+// its real part. Both are bit-exact for the component they keep.
+
+#include <t4a/abi.msl>
+
+kernel void t4a_metal_convert(device uchar* out [[buffer(0)]],
+                              device const uchar* in [[buffer(1)]],
+                              constant int& dst_dtype [[buffer(2)]],
+                              constant int& src_dtype [[buffer(3)]],
+                              constant long& len [[buffer(4)]],
+                              uint index [[thread_position_in_grid]]) {
+  if (!t4a_metal_reaches(index, len)) {
+    return;
+  }
+  if (dst_dtype == T4A_METAL_C32 && src_dtype == T4A_METAL_F32) {
+    device t4a_metal_c32* dst = reinterpret_cast<device t4a_metal_c32*>(out);
+    device const float* src = reinterpret_cast<device const float*>(in);
+    t4a_metal_c32 value = {src[index], 0.0f};
+    dst[index] = value;
+    return;
+  }
+  if (dst_dtype == T4A_METAL_F32 && src_dtype == T4A_METAL_C32) {
+    device float* dst = reinterpret_cast<device float*>(out);
+    device const t4a_metal_c32* src = reinterpret_cast<device const t4a_metal_c32*>(in);
+    dst[index] = src[index].re;
+  }
+}

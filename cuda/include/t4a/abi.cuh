@@ -16,7 +16,7 @@
 #endif
 
 #define T4A_CUDA_MAX_RANK 8
-#define T4A_CUDA_ABI_REVISION 14
+#define T4A_CUDA_ABI_REVISION 15
 
 static_assert(sizeof(int) == 4, "the C ABI requires 32-bit int");
 static_assert(sizeof(long long) == 8, "the C ABI requires 64-bit long long");
@@ -211,7 +211,11 @@ typedef enum {
   T4A_CUDA_BINARY_MIXED_SUB = 10,
   T4A_CUDA_BINARY_MIXED_MUL = 11,
   T4A_CUDA_BINARY_MIXED_DIV = 12,
-  T4A_CUDA_BINARY_DIV = 13
+  T4A_CUDA_BINARY_DIV = 13,
+  // Revision 15: scalar-side addition and subtraction (one operand read at index
+  // 0), t4a_cuda_add / t4a_cuda_sub per element.
+  T4A_CUDA_BINARY_ADD = 14,
+  T4A_CUDA_BINARY_SUB = 15
 } t4a_cuda_binary_op;
 
 // Which operand is the single-element scalar: both are elementwise, or one side
@@ -235,6 +239,25 @@ typedef enum {
   T4A_CUDA_STRIDED_MUL = 0,
   T4A_CUDA_STRIDED_AXPBY = 1
 } t4a_cuda_strided_op;
+
+// Operation tags of t4a_cuda_strided_binary (revision 15). Each tag computes the
+// same per-element formula as the flat entry it mirrors: ADD/SUB/MUL as
+// t4a_cuda_add/sub/mul, DIV as t4a_cuda_div (real) or the scaled complex
+// division (complex), MAX/MIN/POW/REM and the CHECKED integer forms as
+// t4a_cuda_binary with the matching T4A_CUDA_BINARY_* tag.
+typedef enum {
+  T4A_CUDA_STRIDED_BINARY_ADD = 0,
+  T4A_CUDA_STRIDED_BINARY_SUB = 1,
+  T4A_CUDA_STRIDED_BINARY_MUL = 2,
+  T4A_CUDA_STRIDED_BINARY_DIV = 3,
+  T4A_CUDA_STRIDED_BINARY_MAX = 4,
+  T4A_CUDA_STRIDED_BINARY_MIN = 5,
+  T4A_CUDA_STRIDED_BINARY_POW = 6,
+  T4A_CUDA_STRIDED_BINARY_REM = 7,
+  T4A_CUDA_STRIDED_BINARY_DIV_CHECKED = 8,
+  T4A_CUDA_STRIDED_BINARY_REM_CHECKED = 9,
+  T4A_CUDA_STRIDED_BINARY_POW_CHECKED = 10
+} t4a_cuda_strided_binary_op;
 
 // Algorithm configuration of the tiled transpose, selected at runtime.
 typedef struct {
@@ -676,6 +699,34 @@ template <>
 __device__ __forceinline__ t4a_cuda_c64 t4a_cuda_mul<t4a_cuda_c64>(t4a_cuda_c64 lhs,
                                                                  t4a_cuda_c64 rhs) {
   t4a_cuda_c64 value = {lhs.re * rhs.re - lhs.im * rhs.im, lhs.re * rhs.im + lhs.im * rhs.re};
+  return value;
+}
+
+// Element-wise multiply of the t4a_cuda_mul entry and of t4a_cuda_strided_binary MUL
+// (revision 15). For a complex operand the contraction is spelled out: with
+// `--fmad=true` (the default) the compiler may fuse `a*b - c*d` either way round, and
+// it chose differently for the flat and the strided body, so two entries that must be
+// bit-identical cannot leave the choice to it. The spelled-out form is the one the
+// flat entry has always compiled to (re = fma(l.re, r.re, -(l.im * r.im)),
+// im = fma(l.re, r.im, l.im * r.re)), so the flat entry's results do not change.
+template <typename T>
+__device__ __forceinline__ T t4a_cuda_mul_elementwise(T lhs, T rhs) {
+  return t4a_cuda_mul<T>(lhs, rhs);
+}
+
+template <>
+__device__ __forceinline__ t4a_cuda_c32 t4a_cuda_mul_elementwise<t4a_cuda_c32>(t4a_cuda_c32 lhs,
+                                                                             t4a_cuda_c32 rhs) {
+  t4a_cuda_c32 value = {__fmaf_rn(lhs.re, rhs.re, -__fmul_rn(lhs.im, rhs.im)),
+                        __fmaf_rn(lhs.re, rhs.im, __fmul_rn(lhs.im, rhs.re))};
+  return value;
+}
+
+template <>
+__device__ __forceinline__ t4a_cuda_c64 t4a_cuda_mul_elementwise<t4a_cuda_c64>(t4a_cuda_c64 lhs,
+                                                                             t4a_cuda_c64 rhs) {
+  t4a_cuda_c64 value = {__fma_rn(lhs.re, rhs.re, -__dmul_rn(lhs.im, rhs.im)),
+                        __fma_rn(lhs.re, rhs.im, __dmul_rn(lhs.im, rhs.re))};
   return value;
 }
 

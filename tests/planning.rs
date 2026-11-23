@@ -3079,12 +3079,17 @@ fn every_pinned_tenferro_cuda_kernel_resolves_to_an_entry() {
     // `div_float` is an arm of `t4a_cuda_binary`, so the flat `div` entry is unused).
     // Revision 11's entries are ABI-introduced: the pinned inventory is tenferro's
     // historical kernel list and does not name a layout-taking triangle view or a
-    // window write.
+    // window write. Revision 15's layout-taking elementwise entries are
+    // ABI-introduced too: the baseline staged every strided operand.
     let without_baseline = [
         "t4a_cuda_div",
         "t4a_cuda_tril_view",
         "t4a_cuda_triu_view",
         "t4a_cuda_dynamic_update_slice",
+        "t4a_cuda_strided_unary",
+        "t4a_cuda_strided_binary",
+        "t4a_cuda_strided_compare",
+        "t4a_cuda_strided_select",
     ];
     for entry in Entry::ALL {
         let name = entry.name();
@@ -3961,4 +3966,195 @@ fn pass1_plans_multi_warp_blocks_only_for_few_short_cubes() {
     let long = plan(1, 4096, max_chunk + 1);
     assert_eq!(long.block, [32, 1, 1]);
     assert_eq!(long.grid, [4096, 1, 1]);
+}
+
+#[test]
+fn revision_15_layout_taking_elementwise_planners() {
+    use t4a_cuda_kernels::{
+        plan_strided_binary, plan_strided_compare, plan_strided_select, plan_strided_unary,
+        BinaryOp, CompareOp, ScalarSide, StridedBinaryOp, UnaryOp,
+    };
+    let out = Layout::compact(&[4, 3]).unwrap();
+    // A transposed view and a broadcast (stride zero) view of the same extents.
+    let transposed = Layout::new(&[4, 3], &[3, 1], 0).unwrap();
+    let broadcast = Layout::new(&[4, 3], &[1, 0], 0).unwrap();
+    let reversed = Layout::new(&[4, 3], &[-1, 4], 3).unwrap();
+
+    let launch = plan_strided_unary(
+        UnaryOp::Exp,
+        DType::F64,
+        DType::F64,
+        &out,
+        12,
+        &transposed,
+        12,
+    )
+    .unwrap();
+    assert_eq!(launch.grid, [1, 1, 1]);
+    assert_eq!(launch.variant, RankVariant::Fast);
+    assert!(plan_strided_unary(
+        UnaryOp::Abs,
+        DType::F64,
+        DType::C64,
+        &out,
+        12,
+        &broadcast,
+        4
+    )
+    .is_ok());
+    assert_eq!(
+        plan_strided_unary(
+            UnaryOp::Exp,
+            DType::I32,
+            DType::I32,
+            &out,
+            12,
+            &transposed,
+            12
+        ),
+        Err(Error::UnsupportedOp)
+    );
+    // The broadcast operand needs only its four distinct elements; three are too few.
+    assert!(plan_strided_unary(
+        UnaryOp::Neg,
+        DType::F32,
+        DType::F32,
+        &out,
+        12,
+        &broadcast,
+        3
+    )
+    .is_err());
+    // A broadcast destination is not a destination.
+    assert!(plan_strided_unary(
+        UnaryOp::Neg,
+        DType::F32,
+        DType::F32,
+        &broadcast,
+        12,
+        &out,
+        12
+    )
+    .is_err());
+    let other = Layout::compact(&[3, 4]).unwrap();
+    assert_eq!(
+        plan_strided_unary(UnaryOp::Neg, DType::F32, DType::F32, &out, 12, &other, 12),
+        Err(Error::ShapeMismatch)
+    );
+
+    for (op, dtype, ok) in [
+        (StridedBinaryOp::Add, DType::C64, true),
+        (StridedBinaryOp::Div, DType::C32, true),
+        (StridedBinaryOp::Div, DType::I64, false),
+        (StridedBinaryOp::Max, DType::C64, false),
+        (StridedBinaryOp::Pow, DType::I32, false),
+        (StridedBinaryOp::DivChecked, DType::I32, true),
+        (StridedBinaryOp::DivChecked, DType::F64, false),
+        (StridedBinaryOp::Mul, DType::Bool, false),
+    ] {
+        assert_eq!(op.accepts(dtype), ok, "{op:?} {dtype:?}");
+        let plan = plan_strided_binary(op, dtype, &out, 12, &reversed, 12, &broadcast, 4);
+        assert_eq!(plan.is_ok(), ok, "{op:?} {dtype:?}");
+    }
+    assert!(StridedBinaryOp::RemChecked.uses_status());
+    assert!(!StridedBinaryOp::Add.uses_status());
+    assert!(plan_strided_compare(
+        CompareOp::Lt,
+        DType::I64,
+        &out,
+        12,
+        &transposed,
+        12,
+        &broadcast,
+        4
+    )
+    .is_ok());
+    assert_eq!(
+        plan_strided_compare(
+            CompareOp::Lt,
+            DType::C64,
+            &out,
+            12,
+            &transposed,
+            12,
+            &broadcast,
+            4
+        ),
+        Err(Error::UnsupportedDType)
+    );
+    assert!(plan_strided_select(
+        DType::F32,
+        &out,
+        12,
+        &broadcast,
+        4,
+        &transposed,
+        12,
+        &reversed,
+        12
+    )
+    .is_ok());
+    assert!(plan_strided_select(
+        DType::C32,
+        &out,
+        12,
+        &broadcast,
+        4,
+        &transposed,
+        12,
+        &reversed,
+        12
+    )
+    .is_err());
+
+    // Rank 9 selects the general symbol.
+    let extents = vec![2i64; 9];
+    let mut stride = 1;
+    let strides: Vec<i64> = extents
+        .iter()
+        .map(|&e| {
+            let s = stride;
+            stride *= e;
+            s
+        })
+        .collect();
+    let wide = WideLayout::new(extents, strides, 0).unwrap();
+    let plan = plan_strided_binary(
+        StridedBinaryOp::Sub,
+        DType::F64,
+        &wide,
+        512,
+        &wide,
+        512,
+        &wide,
+        512,
+    )
+    .unwrap();
+    assert_eq!(plan.variant, RankVariant::General);
+    for name in [
+        "t4a_cuda_strided_unary_any",
+        "t4a_cuda_strided_binary_any",
+        "t4a_cuda_strided_compare_any",
+        "t4a_cuda_strided_select_any",
+    ] {
+        assert!(GeneralEntry::ALL.iter().any(|entry| entry.name() == name));
+    }
+
+    // Scalar-side Add / Sub on the flat binary entry.
+    for op in [BinaryOp::Add, BinaryOp::Sub] {
+        for dtype in [
+            DType::F32,
+            DType::F64,
+            DType::I32,
+            DType::I64,
+            DType::C32,
+            DType::C64,
+        ] {
+            assert!(op.accepts(dtype, ScalarSide::Left) && op.accepts(dtype, ScalarSide::Right));
+            assert!(!op.accepts(dtype, ScalarSide::Both));
+            assert!(!op.uses_component_length());
+        }
+        assert!(!op.accepts(DType::Bool, ScalarSide::Right));
+    }
+    assert_eq!((BinaryOp::Add.tag(), BinaryOp::Sub.tag()), (14, 15));
 }

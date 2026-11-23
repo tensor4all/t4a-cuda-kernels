@@ -59,6 +59,14 @@ strides and a rebased offset) expresses the reversal through the movement entrie
 and the in-place factor multiply is `t4a_cuda_binary` with a scalar `rhs` and the
 destination aliasing `lhs`.
 
+Revision 15 adds layout-taking twins of the elementwise entries —
+`t4a_cuda_strided_unary`, `_strided_binary`, `_strided_compare` and
+`_strided_select`, each with a general-path twin — so a permuted, offset, broadcast
+(stride zero) or reversed operand is read where it lies instead of being staged into
+a compact copy. Each is bit-identical to the flat entry it mirrors on a compact copy
+(a NaN result's sign and payload are unspecified). `t4a_cuda_binary` gains
+scalar-side `ADD` and `SUB` tags. See [the slice plan](docs/design/slice-strided-elementwise.md).
+
 Not implemented, deliberately: nothing in the kernel inventory. Compilation, module
 loading and artifact persistence are the caller's, per
 [the prepare contract](docs/design/cubecl-kernel-port.md#preparation-compilation-and-private-caches);

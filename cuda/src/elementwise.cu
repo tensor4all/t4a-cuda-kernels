@@ -832,7 +832,7 @@ __device__ __forceinline__ F strided_binary_float(int op, F l, F r) {
     case T4A_CUDA_STRIDED_BINARY_SUB:
       return t4a_cuda_sub<F>(l, r);
     case T4A_CUDA_STRIDED_BINARY_MUL:
-      return t4a_cuda_mul_elementwise<F>(l, r);
+      return t4a_cuda_mul<F>(l, r);
     case T4A_CUDA_STRIDED_BINARY_DIV:
       return t4a_cuda_div<F>(l, r);
     case T4A_CUDA_STRIDED_BINARY_MAX:
@@ -856,7 +856,7 @@ __device__ __forceinline__ I strided_binary_int(int op, I x, I y, unsigned int* 
     case T4A_CUDA_STRIDED_BINARY_SUB:
       return t4a_cuda_sub<I>(x, y);
     case T4A_CUDA_STRIDED_BINARY_MUL:
-      return t4a_cuda_mul_elementwise<I>(x, y);
+      return t4a_cuda_mul<I>(x, y);
     case T4A_CUDA_STRIDED_BINARY_MAX:
       return binary_int_value<I>(T4A_CUDA_BINARY_MAX, x, y, err);
     case T4A_CUDA_STRIDED_BINARY_MIN:
@@ -880,7 +880,7 @@ __device__ __forceinline__ C strided_binary_complex(int op, C l, C r) {
     case T4A_CUDA_STRIDED_BINARY_SUB:
       return t4a_cuda_sub<C>(l, r);
     case T4A_CUDA_STRIDED_BINARY_MUL:
-      return t4a_cuda_mul_elementwise<C>(l, r);
+      return t4a_cuda_mul<C>(l, r);
     case T4A_CUDA_STRIDED_BINARY_DIV:
       return t4a_cuda_div_complex(l, r);
     default:

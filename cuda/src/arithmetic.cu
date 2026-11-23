@@ -41,8 +41,7 @@ __device__ __forceinline__ void mul_body(void* out, const void* lhs, const void*
   long long index;
   if (t4a_cuda_tail_index(&index, len)) {
     static_cast<T*>(out)[index] =
-        t4a_cuda_mul_elementwise<T>(static_cast<const T*>(lhs)[index],
-                                    static_cast<const T*>(rhs)[index]);
+        t4a_cuda_mul<T>(static_cast<const T*>(lhs)[index], static_cast<const T*>(rhs)[index]);
   }
 }
 

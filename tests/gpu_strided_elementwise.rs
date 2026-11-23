@@ -33,6 +33,20 @@ const GUARD: usize = 16;
 const EXTENTS: [i64; 3] = [67, 13, 5];
 const BIG: [i64; 2] = [1000, 103];
 
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+struct C32 {
+    re: f32,
+    im: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+struct C64 {
+    re: f64,
+    im: f64,
+}
+
 // --- layouts ----------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug)]
@@ -188,13 +202,23 @@ impl Rng {
 /// infinities and NaN (floats) or zero, -1 and the minimum (integers) mixed in.
 fn values(dtype: DType, count: usize, seed: u64) -> Vec<u8> {
     let mut rng = Rng(seed);
+    // Extremes per component width: the smallest subnormal, a tiny normal and a
+    // near-maximum finite value, so the scaled complex division's underflow and
+    // overflow branches are reached.
+    let single = matches!(dtype, DType::F32 | DType::C32);
     let real = |rng: &mut Rng| -> f64 {
-        match rng.next() % 23 {
+        match rng.next() % 29 {
             0 => 0.0,
             1 => -0.0,
             2 => f64::INFINITY,
             3 => f64::NAN,
-            4 => 1.0e300,
+            4 if single => f64::from(f32::from_bits(1)),
+            4 => f64::from_bits(1),
+            5 if single => 1.0e-37,
+            5 => 1.0e-307,
+            6 if single => f64::from(f32::MAX) / 3.0,
+            6 => f64::MAX / 3.0,
+            7 => -(rng.unit() + 0.5) * if single { 1.0e38 } else { 1.0e307 },
             _ => (rng.unit() - 0.5) * 8.0,
         }
     };
@@ -1089,6 +1113,357 @@ fn scalar_side_add_and_sub_match_the_elementwise_entries_on_a_splat() {
                     );
                 }
             }
+        }
+    }
+}
+
+// --- directed cases (review of fb9d863) ----------------------------------------------
+
+/// Run the strided binary on two compact operands of explicit values, with the
+/// status word starting at `initial`; return the output bytes and the final word.
+fn strided_binary_on(
+    session: &Session,
+    op: StridedBinaryOp,
+    dtype: DType,
+    lhs: &[u8],
+    rhs: &[u8],
+    initial: u32,
+    general: bool,
+) -> (Vec<u8>, u32) {
+    let len = (lhs.len() / dtype.size()) as i64;
+    let extents = [len];
+    let compact = Layout::compact(&extents).unwrap();
+    let wide = WideLayout::new(extents.to_vec(), vec![1], 0).unwrap();
+    let geometry = geometry(session, &wide);
+    let (lhs_buf, rhs_buf) = (written(session, lhs), written(session, rhs));
+    let out = written(session, &vec![SENTINEL; lhs.len()]);
+    let word = written(session, &initial.to_ne_bytes());
+    let plan = plan_strided_binary(op, dtype, &compact, len, &compact, len, &compact, len).unwrap();
+    let mut slots = [
+        Slot::ptr(&out),
+        Slot::ptr(&lhs_buf),
+        Slot::ptr(&rhs_buf),
+        slot(&geometry, general),
+        slot(&geometry, general),
+        slot(&geometry, general),
+        Slot::i32(dtype.tag()),
+        Slot::i32(op.tag()),
+        Slot::i64(len),
+        Slot::ptr(&word),
+    ];
+    let name = if general {
+        "t4a_cuda_strided_binary_any"
+    } else {
+        "t4a_cuda_strided_binary"
+    };
+    launch(session.function(name), &plan, session.stream(), &mut slots);
+    let word = read_bytes(session, &word);
+    (
+        read_bytes(session, &out),
+        u32::from_ne_bytes(word[..4].try_into().unwrap()),
+    )
+}
+
+/// The flat entry's result for the same explicit operands.
+fn flat_binary_on(
+    session: &Session,
+    op: StridedBinaryOp,
+    dtype: DType,
+    lhs: &[u8],
+    rhs: &[u8],
+) -> Vec<u8> {
+    let len = (lhs.len() / dtype.size()) as i64;
+    let (lhs_buf, rhs_buf) = (written(session, lhs), written(session, rhs));
+    let out = written(session, &vec![SENTINEL; lhs.len()]);
+    let word = status(session);
+    match flat_of(op, dtype) {
+        Flat::Arithmetic(name, entry) => {
+            let mut slots = [
+                Slot::ptr(&out),
+                Slot::ptr(&lhs_buf),
+                Slot::ptr(&rhs_buf),
+                Slot::i32(dtype.tag()),
+                Slot::i64(len),
+            ];
+            launch(
+                session.function(name),
+                &plan_elementwise(entry, dtype, len).unwrap(),
+                session.stream(),
+                &mut slots,
+            );
+        }
+        Flat::Binary(binary) => {
+            let mut slots = [
+                Slot::ptr(&out),
+                Slot::ptr(&lhs_buf),
+                Slot::ptr(&rhs_buf),
+                Slot::i32(dtype.tag()),
+                Slot::i32(binary.tag()),
+                Slot::i32(ScalarSide::Both.tag()),
+                Slot::i64(len),
+                Slot::ptr(&word),
+            ];
+            launch(
+                session.function("t4a_cuda_binary"),
+                &plan_binary(binary, dtype, ScalarSide::Both, len).unwrap(),
+                session.stream(),
+                &mut slots,
+            );
+        }
+    }
+    read_bytes(session, &out)
+}
+
+fn ne_bytes<T: Copy>(values: &[T]) -> Vec<u8> {
+    gpu::as_bytes(values).to_vec()
+}
+
+#[test]
+fn checked_status_word_is_clear_on_valid_input_and_sticky_on_a_set_word() {
+    let session = Session::with_modules(&["elementwise", "arithmetic"]);
+    // Every divisor nonzero, every exponent non-negative: no element is rejected.
+    let lhs: Vec<i32> = (0..1000).map(|i| i - 500).collect();
+    let rhs: Vec<i32> = (0..1000).map(|i| (i % 7) + 1).collect();
+    let (lhs, rhs) = (ne_bytes(&lhs), ne_bytes(&rhs));
+    for op in [
+        StridedBinaryOp::DivChecked,
+        StridedBinaryOp::RemChecked,
+        StridedBinaryOp::PowChecked,
+    ] {
+        let flat = flat_binary_on(&session, op, DType::I32, &lhs, &rhs);
+        for general in [false, true] {
+            let (out, word) = strided_binary_on(&session, op, DType::I32, &lhs, &rhs, 0, general);
+            assert_eq!(word, 0, "{op:?}: a valid batch leaves the word clear");
+            assert_eq!(out, flat, "{op:?}");
+            let (out, word) = strided_binary_on(&session, op, DType::I32, &lhs, &rhs, 1, general);
+            assert_eq!(word, 1, "{op:?}: a set word stays set (sticky)");
+            assert_eq!(out, flat, "{op:?}");
+        }
+    }
+}
+
+#[test]
+fn complex_division_extremes_match_the_flat_entry() {
+    let session = Session::with_modules(&["elementwise", "arithmetic"]);
+    let tiny64 = f64::from_bits(1);
+    let big64 = f64::MAX / 2.0;
+    let pairs64: Vec<(C64, C64)> = vec![
+        (
+            C64 {
+                re: tiny64,
+                im: tiny64,
+            },
+            C64 {
+                re: tiny64,
+                im: tiny64,
+            },
+        ),
+        (
+            C64 {
+                re: big64,
+                im: big64,
+            },
+            C64 {
+                re: big64,
+                im: big64,
+            },
+        ),
+        (
+            C64 { re: 1.0, im: 1.0 },
+            C64 {
+                re: tiny64,
+                im: 0.0,
+            },
+        ),
+        (
+            C64 {
+                re: tiny64,
+                im: 1.0,
+            },
+            C64 {
+                re: big64,
+                im: tiny64,
+            },
+        ),
+        (
+            C64 {
+                re: big64,
+                im: -tiny64,
+            },
+            C64 {
+                re: tiny64,
+                im: big64,
+            },
+        ),
+        (
+            C64 {
+                re: 1.0e-310,
+                im: 3.0,
+            },
+            C64 {
+                re: 2.0e300,
+                im: -1.0e-300,
+            },
+        ),
+    ];
+    let tiny32 = f32::from_bits(1);
+    let big32 = f32::MAX / 2.0;
+    let pairs32: Vec<(C32, C32)> = vec![
+        (
+            C32 {
+                re: tiny32,
+                im: tiny32,
+            },
+            C32 {
+                re: tiny32,
+                im: tiny32,
+            },
+        ),
+        (
+            C32 {
+                re: big32,
+                im: big32,
+            },
+            C32 {
+                re: big32,
+                im: big32,
+            },
+        ),
+        (
+            C32 { re: 1.0, im: 1.0 },
+            C32 {
+                re: tiny32,
+                im: 0.0,
+            },
+        ),
+        (
+            C32 {
+                re: tiny32,
+                im: 1.0,
+            },
+            C32 {
+                re: big32,
+                im: tiny32,
+            },
+        ),
+        (
+            C32 {
+                re: big32,
+                im: -tiny32,
+            },
+            C32 {
+                re: tiny32,
+                im: big32,
+            },
+        ),
+        (
+            C32 {
+                re: 1.0e-40,
+                im: 3.0,
+            },
+            C32 {
+                re: 2.0e37,
+                im: -1.0e-37,
+            },
+        ),
+    ];
+    let cases: [(DType, Vec<u8>, Vec<u8>); 2] = [
+        (
+            DType::C64,
+            ne_bytes(&pairs64.iter().map(|p| p.0).collect::<Vec<_>>()),
+            ne_bytes(&pairs64.iter().map(|p| p.1).collect::<Vec<_>>()),
+        ),
+        (
+            DType::C32,
+            ne_bytes(&pairs32.iter().map(|p| p.0).collect::<Vec<_>>()),
+            ne_bytes(&pairs32.iter().map(|p| p.1).collect::<Vec<_>>()),
+        ),
+    ];
+    for (dtype, lhs, rhs) in cases {
+        let flat = flat_binary_on(&session, StridedBinaryOp::Div, dtype, &lhs, &rhs);
+        for general in [false, true] {
+            let (out, _) = strided_binary_on(
+                &session,
+                StridedBinaryOp::Div,
+                dtype,
+                &lhs,
+                &rhs,
+                0,
+                general,
+            );
+            assert_same(
+                &out,
+                &flat,
+                dtype,
+                &format!("Div {dtype:?} extremes general={general}"),
+            );
+        }
+        // (s + si) / (s + si) == 1 + 0i at the smallest subnormal: the scaled
+        // division must not overflow its reciprocal.
+        let first = &flat[..dtype.size()];
+        let one = if dtype == DType::C64 {
+            ne_bytes(&[C64 { re: 1.0, im: 0.0 }])
+        } else {
+            ne_bytes(&[C32 { re: 1.0, im: 0.0 }])
+        };
+        assert_eq!(first, &one[..], "{dtype:?} subnormal self-division");
+    }
+}
+
+#[test]
+fn complex_multiply_contraction_agrees_between_flat_and_strided() {
+    // Operands for which a fused and an unfused `a*b - c*d` round differently: if the
+    // compiler contracted the two bodies differently, the real parts would differ.
+    let session = Session::with_modules(&["elementwise", "arithmetic"]);
+    let e64 = f64::EPSILON;
+    let lhs64 = ne_bytes(&[
+        C64 {
+            re: 1.0 + e64,
+            im: 1.0,
+        },
+        C64 {
+            re: 1.0 / 3.0,
+            im: 2.0 / 3.0,
+        },
+    ]);
+    let rhs64 = ne_bytes(&[
+        C64 {
+            re: 1.0 - e64,
+            im: 1.0,
+        },
+        C64 { re: 3.0, im: 1.5 },
+    ]);
+    let e32 = f32::EPSILON;
+    let lhs32 = ne_bytes(&[
+        C32 {
+            re: 1.0 + e32,
+            im: 1.0,
+        },
+        C32 {
+            re: 1.0 / 3.0,
+            im: 2.0 / 3.0,
+        },
+    ]);
+    let rhs32 = ne_bytes(&[
+        C32 {
+            re: 1.0 - e32,
+            im: 1.0,
+        },
+        C32 { re: 3.0, im: 1.5 },
+    ]);
+    for (dtype, lhs, rhs) in [(DType::C64, lhs64, rhs64), (DType::C32, lhs32, rhs32)] {
+        let flat = flat_binary_on(&session, StridedBinaryOp::Mul, dtype, &lhs, &rhs);
+        for general in [false, true] {
+            let (out, _) = strided_binary_on(
+                &session,
+                StridedBinaryOp::Mul,
+                dtype,
+                &lhs,
+                &rhs,
+                0,
+                general,
+            );
+            assert_eq!(out, flat, "Mul {dtype:?} general={general}");
         }
     }
 }

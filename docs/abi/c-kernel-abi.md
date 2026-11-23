@@ -886,11 +886,11 @@ value helpers the new entries call).
   revision-14 golden documents the same class): the GPU's `FMUL`/`FFMA`/`DMUL`/`DFMA`
   propagate one input NaN chosen by operand position, and the compiler may commute a
   product's operands differently in two bodies. A NaN result is a NaN in both; a
-  non-NaN result is bit-identical. The complex `MUL` contraction is spelled out
-  (`t4a_cuda_mul_elementwise`: `re = fma(l.re, r.re, -(l.im * r.im))`,
-  `im = fma(l.re, r.im, l.im * r.re)`), in the flat `t4a_cuda_mul` too, so the
-  compiler's freedom to fuse `a*b - c*d` either way cannot split the two entries;
-  that form is what `t4a_cuda_mul` already compiled to, so its results are unchanged.
+  non-NaN result is bit-identical. Both entries must be compiled with the same
+  options: the complex `MUL` (`a*b - c*d`) contracts as `--fmad` decides, for the flat
+  entry, the strided entry and the fused emitter alike, and
+  `tests/gpu_strided_elementwise.rs` checks contraction-sensitive operands under the
+  default options.
 - **Destination.** `out_layout` must be a destination (no stride-zero axis with
   extent greater than one; the planner's `require_destination`); it may be permuted,
   offset or reversed. Operands are read-only and may overlap each other. `out` may

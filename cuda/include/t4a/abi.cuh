@@ -702,34 +702,6 @@ __device__ __forceinline__ t4a_cuda_c64 t4a_cuda_mul<t4a_cuda_c64>(t4a_cuda_c64 
   return value;
 }
 
-// Element-wise multiply of the t4a_cuda_mul entry and of t4a_cuda_strided_binary MUL
-// (revision 15). For a complex operand the contraction is spelled out: with
-// `--fmad=true` (the default) the compiler may fuse `a*b - c*d` either way round, and
-// it chose differently for the flat and the strided body, so two entries that must be
-// bit-identical cannot leave the choice to it. The spelled-out form is the one the
-// flat entry has always compiled to (re = fma(l.re, r.re, -(l.im * r.im)),
-// im = fma(l.re, r.im, l.im * r.re)), so the flat entry's results do not change.
-template <typename T>
-__device__ __forceinline__ T t4a_cuda_mul_elementwise(T lhs, T rhs) {
-  return t4a_cuda_mul<T>(lhs, rhs);
-}
-
-template <>
-__device__ __forceinline__ t4a_cuda_c32 t4a_cuda_mul_elementwise<t4a_cuda_c32>(t4a_cuda_c32 lhs,
-                                                                             t4a_cuda_c32 rhs) {
-  t4a_cuda_c32 value = {__fmaf_rn(lhs.re, rhs.re, -__fmul_rn(lhs.im, rhs.im)),
-                        __fmaf_rn(lhs.re, rhs.im, __fmul_rn(lhs.im, rhs.re))};
-  return value;
-}
-
-template <>
-__device__ __forceinline__ t4a_cuda_c64 t4a_cuda_mul_elementwise<t4a_cuda_c64>(t4a_cuda_c64 lhs,
-                                                                             t4a_cuda_c64 rhs) {
-  t4a_cuda_c64 value = {__fma_rn(lhs.re, rhs.re, -__dmul_rn(lhs.im, rhs.im)),
-                        __fma_rn(lhs.re, rhs.im, __dmul_rn(lhs.im, rhs.re))};
-  return value;
-}
-
 // Index values of the dynamic-slice starts tensor. Truncation matches the
 // baseline's cast, but the baseline validates float starts before the launch, so
 // a fractional or nonfinite start is a caller error rather than data.

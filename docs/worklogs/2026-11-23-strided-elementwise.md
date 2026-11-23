@@ -14,16 +14,22 @@ puts an allocation and a launch inside a timed call).
 
 ## Findings
 
-- **Complex multiply contraction.** The first GPU run had C64 `MUL` differ between `t4a_cuda_mul` and the strided body.
-  Spelling the contraction out (`t4a_cuda_mul_elementwise`) in the form the flat SASS already used
-  (`DMUL t = l.im*r.im; DFMA re = l.re*r.re - t`, `DMUL u = l.im*r.re; DFMA im = l.re*r.im + u`; same for FFMA)
-  pins both entries to one form; the flat entry's SASS has the same instruction structure after the change (register
-  allocation differs).
-- **NaN sign/payload.** The remaining C64 `MUL` mismatch was 5 of 4355 elements, all NaN components: strided
+- **NaN sign/payload.** The first GPU run had C64 `MUL` differ between `t4a_cuda_mul` and the strided body: 5 of
+  4355 elements, all NaN components: strided
   `0x7ff8000000000000`, flat `0xfff8000000000000`. `DFMA`/`DMUL` propagate an input NaN by operand position, and the
   negated product operand carries the flipped sign. The ABI now states that a NaN result's sign and payload are
   unspecified (the revision 14 golden has the same class); the tests compare NaN components as equal and everything
   else bit for bit. Scalar-side `ADD`/`SUB` have no such freedom and are compared fully bitwise, NaN included.
+- An explicit-`fma` complex multiply was tried and dropped after the independent review (round 1): it would have split
+  the flat `t4a_cuda_mul` from the fused emitter under `--fmad=false`, and with the NaN-tolerant comparison the shared
+  `t4a_cuda_mul` already agrees bit for bit on every non-NaN element.
+
+## Review
+
+Independent review by `openai/gpt-6.1-sol` through pi (read-only), on the finished diff. Round 1 (`fb9d863`):
+request-changes — the pinned contraction (dropped), the status-word tests (added a valid batch with the word clear and
+with the word already set), the complex-division extremes (subnormal and near-maximum operands added to the draw and as
+directed pairs, fast and `_any`), and the skipped plan review (a process gap recorded below).
 
 ## Evidence
 

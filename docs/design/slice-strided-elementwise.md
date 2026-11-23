@@ -35,14 +35,12 @@ and computes every operand address in the same loop. No barrier, no shared memor
 ## Numerics
 
 Every element is computed by the same device value function the flat entry calls, so non-NaN results are
-bit-identical. Two refinements were needed and are part of the revision:
-
-1. `t4a_cuda_mul` for complex operands left the fused-multiply-add choice to the compiler, which fused the flat and the
-   strided body differently. `t4a_cuda_mul_elementwise` spells the contraction out in the form the flat entry already
-   compiled to, and both entries use it.
-2. A NaN result's sign and payload follow operand position in `DMUL`/`DFMA`, and the compiler may commute a product's
-   operands; the ABI leaves them unspecified (as the revision 14 golden already does for reductions). Tests compare
-   bits, treating NaN components as equal to NaN components.
+bit-identical under the same compile options. A NaN result's sign and payload follow operand position in
+`DMUL`/`DFMA`, and the compiler may commute a product's operands; the ABI leaves them unspecified (as the revision 14
+golden already does for reductions). Tests compare bits, treating NaN components as equal to NaN components, and a
+directed test feeds contraction-sensitive complex products to both entries. (A first attempt pinned the complex `MUL`
+contraction with explicit `fma` intrinsics; review showed it would split the flat entry from the fused emitter's
+`t4a_cuda_mul` under `--fmad=false`, and the mismatch it chased was NaN-only, so it was dropped.)
 
 ## Validation
 

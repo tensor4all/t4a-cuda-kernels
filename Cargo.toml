@@ -48,7 +48,7 @@ cudarc = { version = "=0.19.8", default-features = false, features = [
 # The Metal device lane only. MSL needs a device and a run-time compiler, and this
 # is the run-time-loaded runtime that provides both; it opens Metal with `dlopen`,
 # so nothing is linked at build time and the default build does not use it.
-t4a-metal-runtime = { git = "https://github.com/tensor4all/t4a-gpu-backend", rev = "b8dee5e99c1936225e50d57a4a237527ffd5d67f", version = "=0.1.0", optional = true }
+t4a-metal-runtime = { git = "https://github.com/tensor4all/t4a-gpu-backend", rev = "1a8e4096b632fd176a29bbb73fb49ee246810e99", version = "=0.1.2", optional = true }
 
 # Both GPU dependencies are used only by the test targets their features select, so
 # this crate's own code has none of them: cargo's unused-dependency lint cannot see

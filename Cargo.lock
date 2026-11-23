@@ -131,8 +131,8 @@ dependencies = [
 
 [[package]]
 name = "t4a-metal-runtime"
-version = "0.1.0"
-source = "git+https://github.com/tensor4all/t4a-gpu-backend?rev=b8dee5e99c1936225e50d57a4a237527ffd5d67f#b8dee5e99c1936225e50d57a4a237527ffd5d67f"
+version = "0.1.2"
+source = "git+https://github.com/tensor4all/t4a-gpu-backend?rev=1a8e4096b632fd176a29bbb73fb49ee246810e99#1a8e4096b632fd176a29bbb73fb49ee246810e99"
 dependencies = [
  "sha2",
  "t4a-metal-sys",
@@ -142,7 +142,7 @@ dependencies = [
 [[package]]
 name = "t4a-metal-sys"
 version = "0.1.0"
-source = "git+https://github.com/tensor4all/t4a-gpu-backend?rev=b8dee5e99c1936225e50d57a4a237527ffd5d67f#b8dee5e99c1936225e50d57a4a237527ffd5d67f"
+source = "git+https://github.com/tensor4all/t4a-gpu-backend?rev=1a8e4096b632fd176a29bbb73fb49ee246810e99#1a8e4096b632fd176a29bbb73fb49ee246810e99"
 dependencies = [
  "libc",
  "thiserror",

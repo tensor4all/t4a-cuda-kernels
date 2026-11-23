@@ -1,4 +1,4 @@
-# C kernel ABI (revision 14)
+# C kernel ABI (revision 15)
 
 Every entry is an `extern "C" __global__` CUDA function in `cuda/src/`. A caller
 loads the compiled module into its own context, looks the symbol up by the name
@@ -22,7 +22,7 @@ and revision; it is documented at the end of this file under "Metal: the
 
 ## Revision
 
-`T4A_CUDA_ABI_REVISION == 14`. Revision 2 added `t4a_cuda_axis_values` and the
+`T4A_CUDA_ABI_REVISION == 15`. Revision 2 added `t4a_cuda_axis_values` and the
 diagonal, windowing and validation-status entries; revision 3 added the reduction
 entries; revision 4 added gather and additive scatter; revision 5 added the dtype
 conversion entry; revision 6 added the elementwise, comparison and
@@ -42,7 +42,10 @@ section), with no new symbol, signature, struct or launch geometry; revision 14 
 *launch* contract of split pass 1 only: at `plane_width == 32` one block may carry several
 32-lane planes (the facade plans that only for few, short cubes), one `(output, split)` per warp, with each warp's lane assignment and fold
 exactly those of revision 13, so every partial is bit-identical. No new symbol, signature or
-struct, and a revision-13 launch (one plane per block) still computes the same partials.
+struct, and a revision-13 launch (one plane per block) still computes the same partials;
+revision 15 adds the layout-taking elementwise entries (`strided_unary`, `strided_binary`,
+`strided_compare`, `strided_select`), each with a general-path twin, one new operation-tag
+enum (`t4a_cuda_strided_binary_op`) and no new struct (see "Revision 15").
 **Nothing in revisions 1-10 changed** — the 88 existing symbols, their signatures
 and the nine existing struct layouts are identical. Any
 change to a struct layout, an entry signature, an element type
@@ -530,6 +533,8 @@ element read at index 0, `2` `rhs` is one element read at index 0:
 | 8 | `POW_CHECKED` | I32/I64 | 0,1,2 | `rhs<0` → `err=1`, out `0`; else square-and-multiply (`0^0 == 1`) |
 | 9-12 | `MIXED_ADD`, `MIXED_SUB`, `MIXED_MUL`, `MIXED_DIV` | F32/F64 component | 1,2 | one real operand (1 element) with one complex operand (`2 * len` components); `1` = real is `lhs`. Only `MIXED_DIV` uses the robust form, with the real operand promoted to `(x, +0)` |
 | 13 | `DIV` | F32/F64 | 1,2 | ordinary division; the both-elementwise form is `t4a_cuda_div` |
+| 14 | `ADD` (revision 15) | F32/F64/I32/I64/C32/C64 | 1,2 | `t4a_cuda_add`, integers wrap; bit-identical to `t4a_cuda_add` on a materialized splat of the scalar; the both-elementwise form is `t4a_cuda_add` |
+| 15 | `SUB` (revision 15) | F32/F64/I32/I64/C32/C64 | 1,2 | `t4a_cuda_sub`, as `ADD`; the both-elementwise form is `t4a_cuda_sub` |
 
 - `err` is one 4-byte, 4-byte-aligned word the caller zeroes before the first
   checked launch of a batch. A rejected element stores `1u` with `atomicExch`, so
@@ -839,6 +844,80 @@ code.
 - Neither entry clamps a destination, atomically updates one, or allocates
   scratch. Dtype coverage is `DType::ALL` for both families, Bool included.
 
+## Revision 15: layout-taking elementwise entries
+
+The flat unary, binary, comparison and selection entries of revision 6 address
+`in[index]` for a compact operand, so a consumer holding a permuted, offset,
+broadcast (stride zero) or reversed view had to stage it into a compact copy first.
+Revision 15 adds a layout-taking twin of each, plus the revision 9 general-path
+twins. Nothing in revisions 1-14 changes: the flat entries keep their symbols,
+their signatures and their per-element formulas (their bodies now call the same
+value helpers the new entries call).
+
+| Symbol | Arguments | Semantics |
+| --- | --- | --- |
+| `t4a_cuda_strided_unary` | `(void* out, const void* in, t4a_cuda_layout out_layout, t4a_cuda_layout in_layout, int dst_dtype, int src_dtype, int op, long long len)` | `t4a_cuda_unary`'s `op` (`t4a_cuda_unary_op`, same dtype pairs) through both layouts |
+| `t4a_cuda_strided_binary` | `(void* out, const void* lhs, const void* rhs, t4a_cuda_layout out_layout, t4a_cuda_layout lhs_layout, t4a_cuda_layout rhs_layout, int dtype, int op, long long len, unsigned int* err)` | `op` from `t4a_cuda_strided_binary_op` (below) |
+| `t4a_cuda_strided_compare` | `(void* out, const void* lhs, const void* rhs, t4a_cuda_layout out_layout, t4a_cuda_layout lhs_layout, t4a_cuda_layout rhs_layout, int dtype, int cmp, long long len)` | `t4a_cuda_compare`'s predicate; `out` is one byte per element |
+| `t4a_cuda_strided_select` | `(void* out, const void* pred, const void* on_true, const void* on_false, t4a_cuda_layout out_layout, t4a_cuda_layout pred_layout, t4a_cuda_layout true_layout, t4a_cuda_layout false_layout, int dtype, long long len)` | `t4a_cuda_select`; `pred` is one byte per element |
+| `t4a_cuda_strided_{unary,binary,compare,select}_any` | same with every layout a `t4a_cuda_layout_any` | general path, any rank |
+
+`t4a_cuda_strided_binary_op`: `ADD = 0`, `SUB = 1`, `MUL = 2`, `DIV = 3`,
+`MAX = 4`, `MIN = 5`, `POW = 6`, `REM = 7`, `DIV_CHECKED = 8`, `REM_CHECKED = 9`,
+`POW_CHECKED = 10`.
+
+| Tag | Dtypes | Per-element formula (the flat entry it mirrors) |
+| --- | --- | --- |
+| `ADD`, `SUB`, `MUL` | F32, F64, I32, I64, C32, C64 | `t4a_cuda_add` / `t4a_cuda_sub` / `t4a_cuda_mul` (`t4a_cuda_add`, `t4a_cuda_sub`, `t4a_cuda_mul`; wrapping integers) |
+| `DIV` | F32, F64, C32, C64 | real: `lhs / rhs` (`t4a_cuda_div`, `t4a_cuda_binary` `DIV`); complex: the scaled Baudin-Smith division `t4a_cuda_div_complex_parts_at` (`t4a_cuda_binary` `DIV_COMPLEX`) |
+| `MAX`, `MIN` | F32, F64, I32, I64 | `t4a_cuda_binary` `MAX` / `MIN` |
+| `POW`, `REM` | F32, F64 | `t4a_cuda_binary` `POW` / `REM` |
+| `DIV_CHECKED`, `REM_CHECKED`, `POW_CHECKED` | I32, I64 | `t4a_cuda_binary` with the same tag: a rejected element writes 0 and sets `*err = 1` |
+
+- **Domain.** One thread per logical element; `len = product(out.extents)`, and
+  every operand layout has exactly the destination's extents (the planner checks
+  it). A flat index decodes axis 0 fastest; each operand is addressed by its own
+  `offset + sum(coordinate * stride)`, so a stride may be zero (broadcast) or
+  negative, and the offset nonzero.
+- **Bit identity.** For every accepted `(op, dtype)` a strided launch writes the
+  same bits as the mirrored flat entry run on compact copies of the operands: both
+  call one shared device value function per element. The one exception is the
+  sign and payload of a NaN result, which this ABI leaves unspecified (the
+  revision-14 golden documents the same class): the GPU's `FMUL`/`FFMA`/`DMUL`/`DFMA`
+  propagate one input NaN chosen by operand position, and the compiler may commute a
+  product's operands differently in two bodies. A NaN result is a NaN in both; a
+  non-NaN result is bit-identical. Both entries must be compiled with the same
+  options: the complex `MUL` (`a*b - c*d`) contracts as `--fmad` decides, for the flat
+  entry, the strided entry and the fused emitter alike, and
+  `tests/gpu_strided_elementwise.rs` checks contraction-sensitive operands under the
+  default options.
+- **Destination.** `out_layout` must be a destination (no stride-zero axis with
+  extent greater than one; the planner's `require_destination`); it may be permuted,
+  offset or reversed. Operands are read-only and may overlap each other. `out` may
+  alias an operand only when that operand's element type and layout (extents,
+  strides, offset) are identical to `out`'s, so the thread that writes an element is
+  the thread that read it (the `combined_strided` rule); the complex `ABS` route and
+  the Bool destination of `strided_compare` must be disjoint from their inputs.
+  `err` must not overlap any operand.
+- **Status word.** Only the `*_CHECKED` tags touch `err`, which must then point at
+  a 4-byte device word the caller zeroed; for every other tag `err` may be null.
+  Like `t4a_cuda_binary`, the word is sticky and the rest of the output is still
+  written.
+- **Dtypes.** `strided_unary`: `t4a_cuda_unary`'s pairs (complex `ABS` writes the
+  real component type). `strided_compare` / `strided_select`: F32, F64, I32, I64,
+  as for the flat entries. No entry serves Bool arithmetic.
+- No entry allocates scratch, atomically updates a destination element, or
+  synchronizes.
+- **Capacities.** Unlike the flat entries, each planner receives every allocation
+  length (`out_len`, `in_len`, `lhs_len`, ...; elements of the named dtype, bytes for
+  a Bool operand) and rejects a layout that reaches outside it, including the lowest
+  address a negative stride reaches.
+
+Revision 15 also appends two tags to `t4a_cuda_binary` (table above): `ADD = 14` and
+`SUB = 15`, scalar side only. A compact tensor combined with a resident one-element
+scalar (a constant such as `1 + erf(x)` or `var + eps`) then runs through the flat
+kernel with no broadcast layout and no materialized splat.
+
 ## Dynamic rank (revision 9)
 
 Every entry that takes a `t4a_cuda_layout`, `t4a_cuda_axis_values`,
@@ -920,7 +999,7 @@ Fast/general pairs, per source:
 | `movement.cu` | `fill_zero_view`, `materialize_strided`, `contiguous_to_view`, `strided_to_strided` |
 | `window.cu` | `slice`, `dynamic_slice`, `dynamic_update_slice`, `pad` (the general `pad` takes `edge_low` and `interior` only; `edge_high` is a by-value extent input that the facade folds into `out_layout`) |
 | `diagonal.cu` | `extract_diagonal`, `embed_diagonal_copy`, `tril_view`, `triu_view` |
-| `elementwise.cu` | `combined_strided` |
+| `elementwise.cu` | `combined_strided`, `strided_unary`, `strided_binary`, `strided_compare`, `strided_select` |
 | `gather_scatter.cu` | `gather`, `scatter_add` |
 | `reduce.cu` | `reduce`, `reduce_partials` |
 | `linalg_aux.cu` | `fill_one`, `matrix_adjoint`, `householder_explicit_v`, `identity_shifted`, `qr_phase`, `qr_apply_phase`, `upper_trapezoidal_violation`, `householder_assemble`, `lu_extract_outputs`, `lu_apply_pivots` |
@@ -1050,6 +1129,7 @@ identical.
 | reductions | see the revision-3 section | `(plane_width, 1, 1)`, or `(64..512, 1, 1)` for a split reduction's combine pass (revision 12), or `(32 * PARTIALS_PLANES_PER_BLOCK, 1, 1)` for split pass 1 with 32-lane planes, at most 8192 cubes and chunks of at most 1024 (revision 14) | 0 for the baseline geometries; the wide combine block allocates 16 accumulators of the element type as static shared memory (≤ 256 B for `C64`) |
 | gather / scatter add / convert | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |
 | unary / binary / compare / select / clamp / combined strided | `(ceil(len/256), 1, 1)` | `(256, 1, 1)` | 0 |
+| revision 15 (`strided_unary`, `strided_binary`, `strided_compare`, `strided_select`) | `(ceil(len/256), 1, 1)`, `len = product(out.extents)` | `(256, 1, 1)` | 0 |
 | revision 7 linalg auxiliaries | `(ceil(domain/256), 1, 1)` | `(256, 1, 1)` | 0 |
 | revision 8 flat entries (`initialize_permutation`, `extract_r`, `swap_columns`) | `(ceil(domain/256), 1, 1)` | `(256, 1, 1)` | 0 |
 | revision 8 plane entries (`column_norms`, `select_pivot`, `reflector`, `apply_reflector`, `prefix_rank`) | `(tasks, 1, 1)` | `(32, 1, 1)` | 0 |
@@ -1081,7 +1161,7 @@ not reshape the metadata into a device upload to avoid that work.
 The Metal entry set is a second ABI beside the CUDA one, and it is not a
 revision of it: Metal kernels are MSL (`kernel void`, `[[buffer(n)]]`), which is
 not CUDA-source compatible, and `T4A_METAL_ABI_REVISION == 2` is independent of
-`T4A_CUDA_ABI_REVISION == 14`. Header:
+`T4A_CUDA_ABI_REVISION == 15`. Header:
 [`metal/include/t4a/abi.msl`](../../metal/include/t4a/abi.msl). A wrong-vendor
 lookup fails by name, as the vendor-prefix rule requires.
 

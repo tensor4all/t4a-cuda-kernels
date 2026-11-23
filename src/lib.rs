@@ -136,7 +136,7 @@ pub mod source {
 /// device memory, selected through [`RankVariant`].
 pub const MAX_RANK: usize = 8;
 /// Version of the C ABI described by this crate.
-pub const ABI_REVISION: u32 = 14;
+pub const ABI_REVISION: u32 = 15;
 /// Threads per block for the flat (element-wise) entries.
 pub const FLAT_BLOCK: u32 = 256;
 /// Lanes per block for the plane-reduction entries: one 32-lane plane per block.
@@ -577,10 +577,14 @@ pub enum Entry {
     ApplyReflector,
     ExtractR,
     PrefixRank,
+    StridedUnary,
+    StridedBinary,
+    StridedCompare,
+    StridedSelect,
 }
 
 impl Entry {
-    pub const ALL: [Entry; 58] = [
+    pub const ALL: [Entry; 62] = [
         Entry::FillZero,
         Entry::FillZeroView,
         Entry::CopyExact,
@@ -639,6 +643,10 @@ impl Entry {
         Entry::ApplyReflector,
         Entry::ExtractR,
         Entry::PrefixRank,
+        Entry::StridedUnary,
+        Entry::StridedBinary,
+        Entry::StridedCompare,
+        Entry::StridedSelect,
     ];
 
     /// Exported CUDA symbol; equal to the name documented in the ABI.
@@ -702,6 +710,10 @@ impl Entry {
             Entry::ApplyReflector => "t4a_cuda_apply_reflector",
             Entry::ExtractR => "t4a_cuda_extract_r",
             Entry::PrefixRank => "t4a_cuda_prefix_rank",
+            Entry::StridedUnary => "t4a_cuda_strided_unary",
+            Entry::StridedBinary => "t4a_cuda_strided_binary",
+            Entry::StridedCompare => "t4a_cuda_strided_compare",
+            Entry::StridedSelect => "t4a_cuda_strided_select",
         }
     }
 
@@ -736,6 +748,8 @@ impl Entry {
             Entry::Unary
             | Entry::Binary
             | Entry::CombinedStrided
+            | Entry::StridedUnary
+            | Entry::StridedBinary
             | Entry::MatrixAdjoint
             | Entry::HouseholderExplicitV
             | Entry::IdentityShifted
@@ -747,7 +761,9 @@ impl Entry {
                 DType::C32,
                 DType::C64,
             ],
-            Entry::Compare | Entry::Select => &[DType::F32, DType::F64, DType::I32, DType::I64],
+            Entry::Compare | Entry::Select | Entry::StridedCompare | Entry::StridedSelect => {
+                &[DType::F32, DType::F64, DType::I32, DType::I64]
+            }
             Entry::Clamp => &[DType::F32, DType::F64],
             Entry::QrPhase | Entry::QrApplyPhase | Entry::LuExtractOutputs | Entry::LuParity => {
                 &[DType::F32, DType::F64, DType::C32, DType::C64]
@@ -1373,7 +1389,7 @@ pub struct GeneralEntry {
 
 impl GeneralEntry {
     /// Every general-path symbol, in `Entry::ALL` order.
-    pub const ALL: [GeneralEntry; 36] = [
+    pub const ALL: [GeneralEntry; 40] = [
         GeneralEntry::new("t4a_cuda_fill_zero_view_any", Entry::FillZeroView),
         GeneralEntry::new(
             "t4a_cuda_materialize_strided_any",
@@ -1425,6 +1441,10 @@ impl GeneralEntry {
         GeneralEntry::new("t4a_cuda_apply_reflector_any", Entry::ApplyReflector),
         GeneralEntry::new("t4a_cuda_extract_r_any", Entry::ExtractR),
         GeneralEntry::new("t4a_cuda_prefix_rank_any", Entry::PrefixRank),
+        GeneralEntry::new("t4a_cuda_strided_unary_any", Entry::StridedUnary),
+        GeneralEntry::new("t4a_cuda_strided_binary_any", Entry::StridedBinary),
+        GeneralEntry::new("t4a_cuda_strided_compare_any", Entry::StridedCompare),
+        GeneralEntry::new("t4a_cuda_strided_select_any", Entry::StridedSelect),
     ];
 
     const fn new(name: &'static str, fast: Entry) -> GeneralEntry {
@@ -1876,6 +1896,12 @@ pub enum BinaryOp {
     MixedMul,
     MixedDiv,
     Div,
+    /// Revision 15: `lhs + rhs` with one scalar operand ([`ScalarSide::Left`] or
+    /// [`ScalarSide::Right`]), the per-element formula of [`Entry::Add`].
+    Add,
+    /// Revision 15: `lhs - rhs` with one scalar operand, the per-element formula of
+    /// [`Entry::Sub`].
+    Sub,
 }
 
 impl BinaryOp {
@@ -1895,6 +1921,8 @@ impl BinaryOp {
             BinaryOp::MixedMul => 11,
             BinaryOp::MixedDiv => 12,
             BinaryOp::Div => 13,
+            BinaryOp::Add => 14,
+            BinaryOp::Sub => 15,
         }
     }
 
@@ -1917,6 +1945,8 @@ impl BinaryOp {
                 real && scalar
             }
             BinaryOp::Div => real && scalar,
+            // The elementwise `Both` forms stay with Entry::Add / Entry::Sub.
+            BinaryOp::Add | BinaryOp::Sub => scalar && (real || integer || complex),
         }
     }
 
@@ -2058,6 +2088,204 @@ pub fn plan_combined_strided<'a>(
     a.check_span(a_len, dtype.size())?;
     b.check_span(b_len, dtype.size())?;
     Ok(flat_launch(out.element_count()?)?.with_variant(&[out, a, b], &[]))
+}
+
+// --- revision 15: layout-taking elementwise ----------------------------------
+
+/// Operation tag of [`Entry::StridedBinary`].
+///
+/// Each tag computes the per-element formula of the flat entry it mirrors, so a
+/// strided launch is bit-identical to that flat entry on a compact copy of the
+/// same operands: `Add`/`Sub`/`Mul` mirror [`Entry::Add`]/[`Entry::Sub`]/
+/// [`Entry::Mul`]; `Div` mirrors [`Entry::Div`] on a real dtype and
+/// [`BinaryOp::DivComplex`] on a complex one; `Max`/`Min`/`Pow`/`Rem` and the
+/// `*Checked` integer forms mirror the [`BinaryOp`] tag of the same name with
+/// [`ScalarSide::Both`]. The checked forms report a rejected element through the
+/// sticky status word exactly like [`Entry::Binary`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StridedBinaryOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Max,
+    Min,
+    Pow,
+    Rem,
+    DivChecked,
+    RemChecked,
+    PowChecked,
+}
+
+impl StridedBinaryOp {
+    pub const fn tag(self) -> i32 {
+        match self {
+            StridedBinaryOp::Add => 0,
+            StridedBinaryOp::Sub => 1,
+            StridedBinaryOp::Mul => 2,
+            StridedBinaryOp::Div => 3,
+            StridedBinaryOp::Max => 4,
+            StridedBinaryOp::Min => 5,
+            StridedBinaryOp::Pow => 6,
+            StridedBinaryOp::Rem => 7,
+            StridedBinaryOp::DivChecked => 8,
+            StridedBinaryOp::RemChecked => 9,
+            StridedBinaryOp::PowChecked => 10,
+        }
+    }
+
+    /// Whether the operation serves `dtype`.
+    pub const fn accepts(self, dtype: DType) -> bool {
+        let real = matches!(dtype, DType::F32 | DType::F64);
+        let integer = matches!(dtype, DType::I32 | DType::I64);
+        let complex = matches!(dtype, DType::C32 | DType::C64);
+        match self {
+            StridedBinaryOp::Add | StridedBinaryOp::Sub | StridedBinaryOp::Mul => {
+                real || integer || complex
+            }
+            StridedBinaryOp::Div => real || complex,
+            StridedBinaryOp::Max | StridedBinaryOp::Min => real || integer,
+            StridedBinaryOp::Pow | StridedBinaryOp::Rem => real,
+            StridedBinaryOp::DivChecked
+            | StridedBinaryOp::RemChecked
+            | StridedBinaryOp::PowChecked => integer,
+        }
+    }
+
+    /// Whether the operation writes the sticky status word (`err`), which must then
+    /// point at a zeroed 4-byte device word; for every other tag `err` may be null.
+    pub const fn uses_status(self) -> bool {
+        matches!(
+            self,
+            StridedBinaryOp::DivChecked | StridedBinaryOp::RemChecked | StridedBinaryOp::PowChecked
+        )
+    }
+}
+
+/// Every operand layout of a layout-taking elementwise entry must cover the
+/// destination's logical extents.
+fn require_same_extents(out: LayoutRef<'_>, operands: &[LayoutRef<'_>]) -> Result<(), Error> {
+    if operands
+        .iter()
+        .any(|operand| operand.extents() != out.extents())
+    {
+        return Err(Error::ShapeMismatch);
+    }
+    Ok(())
+}
+
+/// Plan [`Entry::StridedUnary`]: [`plan_unary`]'s operation over one logical
+/// domain (`out`'s extents) with a layout per operand. `input` may carry
+/// broadcast (stride zero), negative strides and an offset; `out` must be a
+/// destination. `out_len` and `in_len` are the caller's allocation lengths in
+/// elements of `dst` and `src` respectively.
+pub fn plan_strided_unary<'a>(
+    op: UnaryOp,
+    dst: DType,
+    src: DType,
+    out: impl Into<LayoutRef<'a>>,
+    out_len: i64,
+    input: impl Into<LayoutRef<'a>>,
+    in_len: i64,
+) -> Result<Launch, Error> {
+    let out = out.into();
+    let input = input.into();
+
+    if !op.accepts(dst, src) {
+        return Err(Error::UnsupportedOp);
+    }
+    require_destination(out)?;
+    require_same_extents(out, &[input])?;
+    out.check_span(out_len, dst.size())?;
+    input.check_span(in_len, src.size())?;
+    Ok(flat_launch(out.element_count()?)?.with_variant(&[out, input], &[]))
+}
+
+/// Plan [`Entry::StridedBinary`]: one logical domain (`out`'s extents) with a
+/// layout per operand. `lhs`/`rhs` may carry broadcast (stride zero), negative
+/// strides and an offset; `out` must be a destination. The lengths are the
+/// caller's allocation lengths in elements.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_strided_binary<'a>(
+    op: StridedBinaryOp,
+    dtype: DType,
+    out: impl Into<LayoutRef<'a>>,
+    out_len: i64,
+    lhs: impl Into<LayoutRef<'a>>,
+    lhs_len: i64,
+    rhs: impl Into<LayoutRef<'a>>,
+    rhs_len: i64,
+) -> Result<Launch, Error> {
+    let out = out.into();
+    let lhs = lhs.into();
+    let rhs = rhs.into();
+
+    if !op.accepts(dtype) {
+        return Err(Error::UnsupportedOp);
+    }
+    require_destination(out)?;
+    require_same_extents(out, &[lhs, rhs])?;
+    out.check_span(out_len, dtype.size())?;
+    lhs.check_span(lhs_len, dtype.size())?;
+    rhs.check_span(rhs_len, dtype.size())?;
+    Ok(flat_launch(out.element_count()?)?.with_variant(&[out, lhs, rhs], &[]))
+}
+
+/// Plan [`Entry::StridedCompare`]: [`plan_compare`]'s predicate over layouts.
+/// `out` is a one-byte (Bool) destination; `out_len` counts its bytes.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_strided_compare<'a>(
+    op: CompareOp,
+    dtype: DType,
+    out: impl Into<LayoutRef<'a>>,
+    out_len: i64,
+    lhs: impl Into<LayoutRef<'a>>,
+    lhs_len: i64,
+    rhs: impl Into<LayoutRef<'a>>,
+    rhs_len: i64,
+) -> Result<Launch, Error> {
+    // Every comparison tag serves every accepted dtype, as for plan_compare.
+    let _ = op;
+    let out = out.into();
+    let lhs = lhs.into();
+    let rhs = rhs.into();
+
+    check_dtype(Entry::StridedCompare, dtype)?;
+    require_destination(out)?;
+    require_same_extents(out, &[lhs, rhs])?;
+    out.check_span(out_len, DType::Bool.size())?;
+    lhs.check_span(lhs_len, dtype.size())?;
+    rhs.check_span(rhs_len, dtype.size())?;
+    Ok(flat_launch(out.element_count()?)?.with_variant(&[out, lhs, rhs], &[]))
+}
+
+/// Plan [`Entry::StridedSelect`]: [`plan_select`]'s selection over layouts.
+/// `pred` is a one-byte (Bool) operand; `pred_len` counts its bytes.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_strided_select<'a>(
+    dtype: DType,
+    out: impl Into<LayoutRef<'a>>,
+    out_len: i64,
+    pred: impl Into<LayoutRef<'a>>,
+    pred_len: i64,
+    on_true: impl Into<LayoutRef<'a>>,
+    true_len: i64,
+    on_false: impl Into<LayoutRef<'a>>,
+    false_len: i64,
+) -> Result<Launch, Error> {
+    let out = out.into();
+    let pred = pred.into();
+    let on_true = on_true.into();
+    let on_false = on_false.into();
+
+    check_dtype(Entry::StridedSelect, dtype)?;
+    require_destination(out)?;
+    require_same_extents(out, &[pred, on_true, on_false])?;
+    out.check_span(out_len, dtype.size())?;
+    pred.check_span(pred_len, DType::Bool.size())?;
+    on_true.check_span(true_len, dtype.size())?;
+    on_false.check_span(false_len, dtype.size())?;
+    Ok(flat_launch(out.element_count()?)?.with_variant(&[out, pred, on_true, on_false], &[]))
 }
 
 // --- revision 7: linalg auxiliaries -----------------------------------------

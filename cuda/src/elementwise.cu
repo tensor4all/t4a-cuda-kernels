@@ -28,8 +28,9 @@
 // scale_in_place_* (L74, L92) is `t4a_cuda_binary` with op MUL, rhs scalar.
 //
 // Every entry is a flat launch over `len` logical elements except
-// t4a_cuda_combined_strided, which decodes each flat index through the
-// destination extents and re-addresses its three operands.
+// t4a_cuda_combined_strided and the revision-15 t4a_cuda_strided_{unary,binary,
+// compare,select}, which decode each flat index through the destination extents
+// and re-address every operand through its own layout.
 
 #include <t4a/abi.cuh>
 
@@ -169,17 +170,10 @@ namespace {
 
 // --- binary -----------------------------------------------------------------
 
+// One element of the real binary tags; shared with t4a_cuda_strided_binary so the
+// two entries cannot drift.
 template <typename F>
-__device__ __forceinline__ void binary_float_body(void* out, const void* lhs, const void* rhs,
-                                                  int op, int scalar_side, long long len) {
-  long long index;
-  if (!t4a_cuda_tail_index(&index, len)) {
-    return;
-  }
-  const long long li = scalar_side == T4A_CUDA_SCALAR_LHS ? 0 : index;
-  const long long ri = scalar_side == T4A_CUDA_SCALAR_RHS ? 0 : index;
-  const F l = static_cast<const F*>(lhs)[li];
-  const F r = static_cast<const F*>(rhs)[ri];
+__device__ __forceinline__ F binary_float_value(int op, F l, F r) {
   F result = l;
   switch (op) {
     case T4A_CUDA_BINARY_MAX:
@@ -200,26 +194,37 @@ __device__ __forceinline__ void binary_float_body(void* out, const void* lhs, co
     case T4A_CUDA_BINARY_DIV:
       result = l / r;
       break;
+    case T4A_CUDA_BINARY_ADD:
+      result = t4a_cuda_add<F>(l, r);
+      break;
+    case T4A_CUDA_BINARY_SUB:
+      result = t4a_cuda_sub<F>(l, r);
+      break;
     default:
       break;
   }
-  static_cast<F*>(out)[index] = result;
+  return result;
 }
 
-// Integer division/remainder/power keep the baseline's explicit exceptional arms
-// so that INT_MIN / -1, a zero divisor and a negative exponent never trap; the
-// rejection is reported through the sticky status word instead.
-template <typename I>
-__device__ __forceinline__ void binary_int_body(void* out, const void* lhs, const void* rhs, int op,
-                                                int scalar_side, long long len, unsigned int* err) {
+template <typename F>
+__device__ __forceinline__ void binary_float_body(void* out, const void* lhs, const void* rhs,
+                                                  int op, int scalar_side, long long len) {
   long long index;
   if (!t4a_cuda_tail_index(&index, len)) {
     return;
   }
   const long long li = scalar_side == T4A_CUDA_SCALAR_LHS ? 0 : index;
   const long long ri = scalar_side == T4A_CUDA_SCALAR_RHS ? 0 : index;
-  const I x = static_cast<const I*>(lhs)[li];
-  const I y = static_cast<const I*>(rhs)[ri];
+  const F l = static_cast<const F*>(lhs)[li];
+  const F r = static_cast<const F*>(rhs)[ri];
+  static_cast<F*>(out)[index] = binary_float_value<F>(op, l, r);
+}
+
+// Integer division/remainder/power keep the baseline's explicit exceptional arms
+// so that INT_MIN / -1, a zero divisor and a negative exponent never trap; the
+// rejection is reported through the sticky status word instead.
+template <typename I>
+__device__ __forceinline__ I binary_int_value(int op, I x, I y, unsigned int* err) {
   I result = x;
   switch (op) {
     case T4A_CUDA_BINARY_MAX:
@@ -230,6 +235,12 @@ __device__ __forceinline__ void binary_int_body(void* out, const void* lhs, cons
       break;
     case T4A_CUDA_BINARY_MUL:
       result = t4a_cuda_mul<I>(x, y);
+      break;
+    case T4A_CUDA_BINARY_ADD:
+      result = t4a_cuda_add<I>(x, y);
+      break;
+    case T4A_CUDA_BINARY_SUB:
+      result = t4a_cuda_sub<I>(x, y);
       break;
     case T4A_CUDA_BINARY_DIV_CHECKED:
       if (y == I(0)) {
@@ -277,7 +288,21 @@ __device__ __forceinline__ void binary_int_body(void* out, const void* lhs, cons
     default:
       break;
   }
-  static_cast<I*>(out)[index] = result;
+  return result;
+}
+
+template <typename I>
+__device__ __forceinline__ void binary_int_body(void* out, const void* lhs, const void* rhs, int op,
+                                                int scalar_side, long long len, unsigned int* err) {
+  long long index;
+  if (!t4a_cuda_tail_index(&index, len)) {
+    return;
+  }
+  const long long li = scalar_side == T4A_CUDA_SCALAR_LHS ? 0 : index;
+  const long long ri = scalar_side == T4A_CUDA_SCALAR_RHS ? 0 : index;
+  const I x = static_cast<const I*>(lhs)[li];
+  const I y = static_cast<const I*>(rhs)[ri];
+  static_cast<I*>(out)[index] = binary_int_value<I>(op, x, y, err);
 }
 
 // `len` counts complex elements; MUL reads and writes whole values and honours the
@@ -290,11 +315,20 @@ __device__ __forceinline__ void binary_complex_body(void* out, const void* lhs, 
   if (!t4a_cuda_tail_index(&index, len)) {
     return;
   }
-  if (op == T4A_CUDA_BINARY_MUL) {
+  if (op == T4A_CUDA_BINARY_MUL || op == T4A_CUDA_BINARY_ADD || op == T4A_CUDA_BINARY_SUB) {
     const long long li = scalar_side == T4A_CUDA_SCALAR_LHS ? 0 : index;
     const long long ri = scalar_side == T4A_CUDA_SCALAR_RHS ? 0 : index;
-    static_cast<C*>(out)[index] = t4a_cuda_mul<C>(static_cast<const C*>(lhs)[li],
-                                                  static_cast<const C*>(rhs)[ri]);
+    const C l = static_cast<const C*>(lhs)[li];
+    const C r = static_cast<const C*>(rhs)[ri];
+    C result;
+    if (op == T4A_CUDA_BINARY_ADD) {
+      result = t4a_cuda_add<C>(l, r);
+    } else if (op == T4A_CUDA_BINARY_SUB) {
+      result = t4a_cuda_sub<C>(l, r);
+    } else {
+      result = t4a_cuda_mul<C>(l, r);
+    }
+    static_cast<C*>(out)[index] = result;
     return;
   }
   const long long part = index * 2;
@@ -408,14 +442,7 @@ extern "C" __global__ void t4a_cuda_binary(void* out, const void* lhs, const voi
 namespace {
 
 template <typename T>
-__device__ __forceinline__ void compare_body(void* out, const void* lhs, const void* rhs, int cmp,
-                                             long long len) {
-  long long index;
-  if (!t4a_cuda_tail_index(&index, len)) {
-    return;
-  }
-  const T x = static_cast<const T*>(lhs)[index];
-  const T y = static_cast<const T*>(rhs)[index];
+__device__ __forceinline__ bool compare_value(int cmp, T x, T y) {
   bool predicate = false;
   switch (cmp) {
     case T4A_CUDA_COMPARE_EQ:
@@ -437,7 +464,19 @@ __device__ __forceinline__ void compare_body(void* out, const void* lhs, const v
       predicate = false;
       break;
   }
-  static_cast<unsigned char*>(out)[index] = predicate ? 1u : 0u;
+  return predicate;
+}
+
+template <typename T>
+__device__ __forceinline__ void compare_body(void* out, const void* lhs, const void* rhs, int cmp,
+                                             long long len) {
+  long long index;
+  if (!t4a_cuda_tail_index(&index, len)) {
+    return;
+  }
+  const T x = static_cast<const T*>(lhs)[index];
+  const T y = static_cast<const T*>(rhs)[index];
+  static_cast<unsigned char*>(out)[index] = compare_value<T>(cmp, x, y) ? 1u : 0u;
 }
 
 template <typename T>
@@ -675,4 +714,383 @@ extern "C" __global__ void t4a_cuda_combined_strided_any(
     default:
       break;
   }
+}
+
+// --- layout-taking elementwise (revision 15) ---------------------------------
+//
+// t4a_cuda_strided_unary / _binary / _compare / _select read every operand through
+// its own layout, so a permuted, offset, broadcast (stride zero) or reversed view
+// is read where it lies instead of being staged into a compact copy. Each element
+// is computed by the same value function as the flat entry it mirrors
+// (unary_float / unary_int / unary_complex / t4a_cuda_abs_complex,
+// t4a_cuda_add / sub / mul / div, binary_float_value, binary_int_value,
+// t4a_cuda_div_complex, compare_value), so a strided launch is bit-identical to
+// the flat launch on a compact copy of the same operands. Every operand layout
+// shares the destination extents; one coordinate walk serves all addresses. The
+// fast symbols take by-value t4a_cuda_layout (rank <= T4A_CUDA_MAX_RANK); the
+// `_any` symbols take t4a_cuda_layout_any (device-resident geometry, any rank).
+
+namespace {
+
+template <typename L>
+__device__ __forceinline__ void strided_index2(long long flat, const L& out, const L& a,
+                                               long long* out_index, long long* a_index) {
+  long long o = out.offset;
+  long long x = a.offset;
+  for (int axis = 0; axis < out.rank; ++axis) {
+    const long long extent = out.extents[axis];
+    const long long coordinate = flat % extent;
+    flat /= extent;
+    o += coordinate * out.strides[axis];
+    x += coordinate * a.strides[axis];
+  }
+  *out_index = o;
+  *a_index = x;
+}
+
+template <typename L>
+__device__ __forceinline__ void strided_index3(long long flat, const L& out, const L& a, const L& b,
+                                               long long* out_index, long long* a_index,
+                                               long long* b_index) {
+  long long o = out.offset;
+  long long x = a.offset;
+  long long y = b.offset;
+  for (int axis = 0; axis < out.rank; ++axis) {
+    const long long extent = out.extents[axis];
+    const long long coordinate = flat % extent;
+    flat /= extent;
+    o += coordinate * out.strides[axis];
+    x += coordinate * a.strides[axis];
+    y += coordinate * b.strides[axis];
+  }
+  *out_index = o;
+  *a_index = x;
+  *b_index = y;
+}
+
+template <typename L>
+__device__ __forceinline__ void strided_index4(long long flat, const L& out, const L& a, const L& b,
+                                               const L& c, long long* out_index, long long* a_index,
+                                               long long* b_index, long long* c_index) {
+  long long o = out.offset;
+  long long x = a.offset;
+  long long y = b.offset;
+  long long z = c.offset;
+  for (int axis = 0; axis < out.rank; ++axis) {
+    const long long extent = out.extents[axis];
+    const long long coordinate = flat % extent;
+    flat /= extent;
+    o += coordinate * out.strides[axis];
+    x += coordinate * a.strides[axis];
+    y += coordinate * b.strides[axis];
+    z += coordinate * c.strides[axis];
+  }
+  *out_index = o;
+  *a_index = x;
+  *b_index = y;
+  *c_index = z;
+}
+
+template <typename L>
+__device__ __forceinline__ void strided_unary_body(void* out, const void* in, const L& out_layout,
+                                                   const L& in_layout, int dst_dtype,
+                                                   int src_dtype, int op, long long len) {
+  long long flat;
+  if (!t4a_cuda_tail_index(&flat, len)) {
+    return;
+  }
+  long long o;
+  long long i;
+  strided_index2(flat, out_layout, in_layout, &o, &i);
+  if (dst_dtype == T4A_CUDA_F32 && src_dtype == T4A_CUDA_F32) {
+    static_cast<float*>(out)[o] = unary_float<float>(op, static_cast<const float*>(in)[i]);
+  } else if (dst_dtype == T4A_CUDA_F64 && src_dtype == T4A_CUDA_F64) {
+    static_cast<double*>(out)[o] = unary_float<double>(op, static_cast<const double*>(in)[i]);
+  } else if (dst_dtype == T4A_CUDA_I32 && src_dtype == T4A_CUDA_I32) {
+    static_cast<int*>(out)[o] = unary_int<int>(op, static_cast<const int*>(in)[i]);
+  } else if (dst_dtype == T4A_CUDA_I64 && src_dtype == T4A_CUDA_I64) {
+    static_cast<long long*>(out)[o] =
+        unary_int<long long>(op, static_cast<const long long*>(in)[i]);
+  } else if (dst_dtype == T4A_CUDA_C32 && src_dtype == T4A_CUDA_C32) {
+    static_cast<t4a_cuda_c32*>(out)[o] =
+        unary_complex<t4a_cuda_c32, float>(op, static_cast<const t4a_cuda_c32*>(in)[i]);
+  } else if (dst_dtype == T4A_CUDA_C64 && src_dtype == T4A_CUDA_C64) {
+    static_cast<t4a_cuda_c64*>(out)[o] =
+        unary_complex<t4a_cuda_c64, double>(op, static_cast<const t4a_cuda_c64*>(in)[i]);
+  } else if (dst_dtype == T4A_CUDA_F32 && src_dtype == T4A_CUDA_C32) {
+    static_cast<float*>(out)[o] = t4a_cuda_abs_complex(static_cast<const t4a_cuda_c32*>(in)[i]);
+  } else if (dst_dtype == T4A_CUDA_F64 && src_dtype == T4A_CUDA_C64) {
+    static_cast<double*>(out)[o] = t4a_cuda_abs_complex(static_cast<const t4a_cuda_c64*>(in)[i]);
+  }
+}
+
+template <typename F>
+__device__ __forceinline__ F strided_binary_float(int op, F l, F r) {
+  switch (op) {
+    case T4A_CUDA_STRIDED_BINARY_ADD:
+      return t4a_cuda_add<F>(l, r);
+    case T4A_CUDA_STRIDED_BINARY_SUB:
+      return t4a_cuda_sub<F>(l, r);
+    case T4A_CUDA_STRIDED_BINARY_MUL:
+      return t4a_cuda_mul<F>(l, r);
+    case T4A_CUDA_STRIDED_BINARY_DIV:
+      return t4a_cuda_div<F>(l, r);
+    case T4A_CUDA_STRIDED_BINARY_MAX:
+      return binary_float_value<F>(T4A_CUDA_BINARY_MAX, l, r);
+    case T4A_CUDA_STRIDED_BINARY_MIN:
+      return binary_float_value<F>(T4A_CUDA_BINARY_MIN, l, r);
+    case T4A_CUDA_STRIDED_BINARY_POW:
+      return binary_float_value<F>(T4A_CUDA_BINARY_POW, l, r);
+    case T4A_CUDA_STRIDED_BINARY_REM:
+      return binary_float_value<F>(T4A_CUDA_BINARY_REM, l, r);
+    default:
+      return l;
+  }
+}
+
+template <typename I>
+__device__ __forceinline__ I strided_binary_int(int op, I x, I y, unsigned int* err) {
+  switch (op) {
+    case T4A_CUDA_STRIDED_BINARY_ADD:
+      return t4a_cuda_add<I>(x, y);
+    case T4A_CUDA_STRIDED_BINARY_SUB:
+      return t4a_cuda_sub<I>(x, y);
+    case T4A_CUDA_STRIDED_BINARY_MUL:
+      return t4a_cuda_mul<I>(x, y);
+    case T4A_CUDA_STRIDED_BINARY_MAX:
+      return binary_int_value<I>(T4A_CUDA_BINARY_MAX, x, y, err);
+    case T4A_CUDA_STRIDED_BINARY_MIN:
+      return binary_int_value<I>(T4A_CUDA_BINARY_MIN, x, y, err);
+    case T4A_CUDA_STRIDED_BINARY_DIV_CHECKED:
+      return binary_int_value<I>(T4A_CUDA_BINARY_DIV_CHECKED, x, y, err);
+    case T4A_CUDA_STRIDED_BINARY_REM_CHECKED:
+      return binary_int_value<I>(T4A_CUDA_BINARY_REM_CHECKED, x, y, err);
+    case T4A_CUDA_STRIDED_BINARY_POW_CHECKED:
+      return binary_int_value<I>(T4A_CUDA_BINARY_POW_CHECKED, x, y, err);
+    default:
+      return x;
+  }
+}
+
+template <typename C>
+__device__ __forceinline__ C strided_binary_complex(int op, C l, C r) {
+  switch (op) {
+    case T4A_CUDA_STRIDED_BINARY_ADD:
+      return t4a_cuda_add<C>(l, r);
+    case T4A_CUDA_STRIDED_BINARY_SUB:
+      return t4a_cuda_sub<C>(l, r);
+    case T4A_CUDA_STRIDED_BINARY_MUL:
+      return t4a_cuda_mul<C>(l, r);
+    case T4A_CUDA_STRIDED_BINARY_DIV:
+      return t4a_cuda_div_complex(l, r);
+    default:
+      return l;
+  }
+}
+
+template <typename T, typename L, typename Op>
+__device__ __forceinline__ void strided_binary_apply(void* out, const void* lhs, const void* rhs,
+                                                     const L& out_layout, const L& lhs_layout,
+                                                     const L& rhs_layout, long long len, Op f) {
+  long long flat;
+  if (!t4a_cuda_tail_index(&flat, len)) {
+    return;
+  }
+  long long o;
+  long long a;
+  long long b;
+  strided_index3(flat, out_layout, lhs_layout, rhs_layout, &o, &a, &b);
+  static_cast<T*>(out)[o] = f(static_cast<const T*>(lhs)[a], static_cast<const T*>(rhs)[b]);
+}
+
+template <typename L>
+__device__ __forceinline__ void strided_binary_dispatch(void* out, const void* lhs, const void* rhs,
+                                                        const L& out_layout, const L& lhs_layout,
+                                                        const L& rhs_layout, int dtype, int op,
+                                                        long long len, unsigned int* err) {
+  switch (dtype) {
+    case T4A_CUDA_F32:
+      strided_binary_apply<float>(out, lhs, rhs, out_layout, lhs_layout, rhs_layout, len,
+                                  [op](float l, float r) { return strided_binary_float<float>(op, l, r); });
+      break;
+    case T4A_CUDA_F64:
+      strided_binary_apply<double>(
+          out, lhs, rhs, out_layout, lhs_layout, rhs_layout, len,
+          [op](double l, double r) { return strided_binary_float<double>(op, l, r); });
+      break;
+    case T4A_CUDA_I32:
+      strided_binary_apply<int>(out, lhs, rhs, out_layout, lhs_layout, rhs_layout, len,
+                                [op, err](int x, int y) { return strided_binary_int<int>(op, x, y, err); });
+      break;
+    case T4A_CUDA_I64:
+      strided_binary_apply<long long>(
+          out, lhs, rhs, out_layout, lhs_layout, rhs_layout, len,
+          [op, err](long long x, long long y) { return strided_binary_int<long long>(op, x, y, err); });
+      break;
+    case T4A_CUDA_C32:
+      strided_binary_apply<t4a_cuda_c32>(
+          out, lhs, rhs, out_layout, lhs_layout, rhs_layout, len,
+          [op](t4a_cuda_c32 l, t4a_cuda_c32 r) { return strided_binary_complex(op, l, r); });
+      break;
+    case T4A_CUDA_C64:
+      strided_binary_apply<t4a_cuda_c64>(
+          out, lhs, rhs, out_layout, lhs_layout, rhs_layout, len,
+          [op](t4a_cuda_c64 l, t4a_cuda_c64 r) { return strided_binary_complex(op, l, r); });
+      break;
+    default:
+      break;
+  }
+}
+
+template <typename T, typename L>
+__device__ __forceinline__ void strided_compare_body(void* out, const void* lhs, const void* rhs,
+                                                     const L& out_layout, const L& lhs_layout,
+                                                     const L& rhs_layout, int cmp, long long len) {
+  long long flat;
+  if (!t4a_cuda_tail_index(&flat, len)) {
+    return;
+  }
+  long long o;
+  long long a;
+  long long b;
+  strided_index3(flat, out_layout, lhs_layout, rhs_layout, &o, &a, &b);
+  static_cast<unsigned char*>(out)[o] =
+      compare_value<T>(cmp, static_cast<const T*>(lhs)[a], static_cast<const T*>(rhs)[b]) ? 1u
+                                                                                          : 0u;
+}
+
+template <typename L>
+__device__ __forceinline__ void strided_compare_dispatch(void* out, const void* lhs,
+                                                         const void* rhs, const L& out_layout,
+                                                         const L& lhs_layout, const L& rhs_layout,
+                                                         int dtype, int cmp, long long len) {
+  switch (dtype) {
+    case T4A_CUDA_F32:
+      strided_compare_body<float>(out, lhs, rhs, out_layout, lhs_layout, rhs_layout, cmp, len);
+      break;
+    case T4A_CUDA_F64:
+      strided_compare_body<double>(out, lhs, rhs, out_layout, lhs_layout, rhs_layout, cmp, len);
+      break;
+    case T4A_CUDA_I32:
+      strided_compare_body<int>(out, lhs, rhs, out_layout, lhs_layout, rhs_layout, cmp, len);
+      break;
+    case T4A_CUDA_I64:
+      strided_compare_body<long long>(out, lhs, rhs, out_layout, lhs_layout, rhs_layout, cmp,
+                                      len);
+      break;
+    default:
+      break;
+  }
+}
+
+template <typename T, typename L>
+__device__ __forceinline__ void strided_select_body(void* out, const void* pred,
+                                                    const void* on_true, const void* on_false,
+                                                    const L& out_layout, const L& pred_layout,
+                                                    const L& true_layout, const L& false_layout,
+                                                    long long len) {
+  long long flat;
+  if (!t4a_cuda_tail_index(&flat, len)) {
+    return;
+  }
+  long long o;
+  long long p;
+  long long t;
+  long long f;
+  strided_index4(flat, out_layout, pred_layout, true_layout, false_layout, &o, &p, &t, &f);
+  static_cast<T*>(out)[o] = static_cast<const unsigned char*>(pred)[p] != 0
+                                ? static_cast<const T*>(on_true)[t]
+                                : static_cast<const T*>(on_false)[f];
+}
+
+template <typename L>
+__device__ __forceinline__ void strided_select_dispatch(void* out, const void* pred,
+                                                        const void* on_true, const void* on_false,
+                                                        const L& out_layout, const L& pred_layout,
+                                                        const L& true_layout,
+                                                        const L& false_layout, int dtype,
+                                                        long long len) {
+  switch (dtype) {
+    case T4A_CUDA_F32:
+      strided_select_body<float>(out, pred, on_true, on_false, out_layout, pred_layout,
+                                 true_layout, false_layout, len);
+      break;
+    case T4A_CUDA_F64:
+      strided_select_body<double>(out, pred, on_true, on_false, out_layout, pred_layout,
+                                  true_layout, false_layout, len);
+      break;
+    case T4A_CUDA_I32:
+      strided_select_body<int>(out, pred, on_true, on_false, out_layout, pred_layout,
+                               true_layout, false_layout, len);
+      break;
+    case T4A_CUDA_I64:
+      strided_select_body<long long>(out, pred, on_true, on_false, out_layout, pred_layout,
+                                     true_layout, false_layout, len);
+      break;
+    default:
+      break;
+  }
+}
+
+}  // namespace
+
+extern "C" __global__ void t4a_cuda_strided_unary(void* out, const void* in,
+                                                  t4a_cuda_layout out_layout,
+                                                  t4a_cuda_layout in_layout, int dst_dtype,
+                                                  int src_dtype, int op, long long len) {
+  strided_unary_body(out, in, out_layout, in_layout, dst_dtype, src_dtype, op, len);
+}
+
+extern "C" __global__ void t4a_cuda_strided_unary_any(void* out, const void* in,
+                                                      t4a_cuda_layout_any out_layout,
+                                                      t4a_cuda_layout_any in_layout,
+                                                      int dst_dtype, int src_dtype, int op,
+                                                      long long len) {
+  strided_unary_body(out, in, out_layout, in_layout, dst_dtype, src_dtype, op, len);
+}
+
+extern "C" __global__ void t4a_cuda_strided_binary(void* out, const void* lhs, const void* rhs,
+                                                   t4a_cuda_layout out_layout,
+                                                   t4a_cuda_layout lhs_layout,
+                                                   t4a_cuda_layout rhs_layout, int dtype, int op,
+                                                   long long len, unsigned int* err) {
+  strided_binary_dispatch(out, lhs, rhs, out_layout, lhs_layout, rhs_layout, dtype, op, len, err);
+}
+
+extern "C" __global__ void t4a_cuda_strided_binary_any(
+    void* out, const void* lhs, const void* rhs, t4a_cuda_layout_any out_layout,
+    t4a_cuda_layout_any lhs_layout, t4a_cuda_layout_any rhs_layout, int dtype, int op,
+    long long len, unsigned int* err) {
+  strided_binary_dispatch(out, lhs, rhs, out_layout, lhs_layout, rhs_layout, dtype, op, len, err);
+}
+
+extern "C" __global__ void t4a_cuda_strided_compare(void* out, const void* lhs, const void* rhs,
+                                                    t4a_cuda_layout out_layout,
+                                                    t4a_cuda_layout lhs_layout,
+                                                    t4a_cuda_layout rhs_layout, int dtype,
+                                                    int cmp, long long len) {
+  strided_compare_dispatch(out, lhs, rhs, out_layout, lhs_layout, rhs_layout, dtype, cmp, len);
+}
+
+extern "C" __global__ void t4a_cuda_strided_compare_any(
+    void* out, const void* lhs, const void* rhs, t4a_cuda_layout_any out_layout,
+    t4a_cuda_layout_any lhs_layout, t4a_cuda_layout_any rhs_layout, int dtype, int cmp,
+    long long len) {
+  strided_compare_dispatch(out, lhs, rhs, out_layout, lhs_layout, rhs_layout, dtype, cmp, len);
+}
+
+extern "C" __global__ void t4a_cuda_strided_select(
+    void* out, const void* pred, const void* on_true, const void* on_false,
+    t4a_cuda_layout out_layout, t4a_cuda_layout pred_layout, t4a_cuda_layout true_layout,
+    t4a_cuda_layout false_layout, int dtype, long long len) {
+  strided_select_dispatch(out, pred, on_true, on_false, out_layout, pred_layout, true_layout,
+                          false_layout, dtype, len);
+}
+
+extern "C" __global__ void t4a_cuda_strided_select_any(
+    void* out, const void* pred, const void* on_true, const void* on_false,
+    t4a_cuda_layout_any out_layout, t4a_cuda_layout_any pred_layout,
+    t4a_cuda_layout_any true_layout, t4a_cuda_layout_any false_layout, int dtype, long long len) {
+  strided_select_dispatch(out, pred, on_true, on_false, out_layout, pred_layout, true_layout,
+                          false_layout, dtype, len);
 }
